@@ -141,6 +141,24 @@ enum Cmd {
         #[arg(long)]
         cwd: PathBuf,
     },
+    /// Delete memories (123), events (E123), a session or a project, for good: re-import
+    /// and transcript replay will not bring them back
+    Forget {
+        ids: Vec<String>,
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Pin a fact every agent sees at session start (this project, or --global)
+    Remember {
+        fact: String,
+        #[arg(long)]
+        global: bool,
+        /// Project id (default: resolved from the current directory)
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -264,6 +282,45 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Forget {
+            ids,
+            session,
+            project,
+        } => {
+            if ids.is_empty() && session.is_none() && project.is_none() {
+                anyhow::bail!("nothing to forget: pass ids, --session or --project");
+            }
+            let f = mnem::forget::forget(&mut conn, &ids, session.as_deref(), project.as_deref())?;
+            println!(
+                "forgot {} memories, {} events, {} sessions (tombstoned: they will not come back)",
+                f.memories, f.events, f.sessions
+            );
+        }
+        Cmd::Remember {
+            fact,
+            global,
+            project,
+        } => {
+            let project = if global {
+                None
+            } else {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+                Some(
+                    project
+                        .or_else(|| hook::project_for(&conn, None, cwd.as_deref()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("cannot resolve a project; pass --project or --global")
+                        })?,
+                )
+            };
+            let id = mnem::forget::remember(&conn, &fact, project.as_deref())?;
+            println!(
+                "pinned #{id} for {}",
+                project.as_deref().unwrap_or("every project")
+            );
+        }
         Cmd::Snapshot { session, cwd } => {
             let recorded = mnem::gitstate::record(&conn, &session, &cwd)?;
             println!("{}", if recorded { "recorded" } else { "unchanged" });

@@ -35,11 +35,13 @@ pub fn build(conn: &Connection, o: &Options) -> Result<String> {
     let sessions = recent_sessions(conn, o)?;
     let (obs, summary) = memories(conn, o.project, o.observations)?;
     let git = crate::gitstate::latest(conn, o.project)?;
+    let pins = crate::forget::pinned(conn, o.project)?;
     // Shrink until it fits: fewer observations, then fewer turns, then fewer sessions.
     let (mut n_obs, mut n_turns, mut n_sess) = (obs.len(), o.turns, sessions.len());
     loop {
         let out = render(
             o,
+            &pins,
             &git,
             &sessions[..n_sess],
             n_turns,
@@ -226,6 +228,7 @@ type GitView = (String, i64, String, String);
 
 fn render(
     o: &Options,
+    pins: &[(i64, String)],
     git: &Option<GitView>,
     sessions: &[SessionView],
     turns: usize,
@@ -235,6 +238,15 @@ fn render(
     let now = db::now_ms();
     let mut w = String::new();
     writeln!(w, "# mnem memory · {}", o.project)?;
+    if !pins.is_empty() {
+        writeln!(
+            w,
+            "\n## Pinned (the user asked every agent to keep these in mind)"
+        )?;
+        for (id, fact) in pins {
+            writeln!(w, "- {} (#{id})", one_line(fact, 300))?;
+        }
+    }
     if let Some((agent, age, _root, desc)) = git {
         writeln!(
             w,

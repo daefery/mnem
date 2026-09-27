@@ -360,10 +360,12 @@ pub fn commit(conn: &mut Connection, b: &Batch, resolver: &mut Resolver) -> Resu
             .unwrap_or_default()
     });
     let sid = format!("{}:{native}", b.src.agent.as_str());
-    let excluded = is_excluded(&b.src.path, st.cwd.as_deref());
+    let project = resolver.resolve(st.cwd.as_deref(), st.repo_url.as_deref());
+    // Forgotten sessions and excluded projects are never captured again.
+    let excluded = is_excluded(&b.src.path, st.cwd.as_deref())
+        || crate::forget::session_blocked(&tx, &sid, project.as_deref())?;
     let mut inserted = 0;
     if !excluded {
-        let project = resolver.resolve(st.cwd.as_deref(), st.repo_url.as_deref());
         tx.execute(
             "INSERT INTO sessions(id, agent, native_id, project, cwd, git_branch, title, started_at, last_event_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
@@ -401,6 +403,9 @@ pub fn commit(conn: &mut Connection, b: &Batch, resolver: &mut Resolver) -> Resu
                 OR events.label IS NOT excluded.label OR events.tool IS NOT excluded.tool",
         )?;
         for e in &b.events {
+            if crate::forget::event_forgotten(&tx, &sid, &e.key)? {
+                continue;
+            }
             inserted += ins.execute(params![
                 sid,
                 e.key,

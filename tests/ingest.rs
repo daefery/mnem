@@ -528,3 +528,90 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
     .unwrap();
     assert!(out.contains("changed since"), "{out}");
 }
+
+#[test]
+fn forgotten_data_never_comes_back() {
+    let d = tmpdir("forget");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let f = fixture("pi", "session.jsonl");
+    ingest(&mut conn, &f, Agent::Pi);
+    let prompt: i64 = conn
+        .query_row("SELECT id FROM events WHERE kind = 'prompt'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    // Forget one event, then replay the whole transcript from zero.
+    mnem::forget::forget(&mut conn, &[format!("E{prompt}")], None, None).unwrap();
+    conn.execute(
+        "UPDATE sources SET byte_offset = 0, parser_state = NULL",
+        [],
+    )
+    .unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    let n: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM events WHERE kind = 'prompt'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0, "forgotten event resurrected by replay");
+    // Forget the whole session: replay stores nothing for it.
+    mnem::forget::forget(&mut conn, &[], Some("pi:s-pi"), None).unwrap();
+    conn.execute(
+        "UPDATE sources SET byte_offset = 0, parser_state = NULL",
+        [],
+    )
+    .unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    let n: i64 = conn
+        .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "forgotten session resurrected by replay");
+}
+
+#[test]
+fn pinned_facts_open_the_context() {
+    let d = tmpdir("pin");
+    let conn = mnem::db::open(&d.join("m.db")).unwrap();
+    mnem::forget::remember(
+        &conn,
+        "Deploys go through the staging branch first",
+        Some("proj"),
+    )
+    .unwrap();
+    mnem::forget::remember(&conn, "Reply in English", None).unwrap();
+    let ctx = mnem::context::build(
+        &conn,
+        &mnem::context::Options {
+            project: "proj",
+            current: None,
+            budget_chars: 8000,
+            sessions: 5,
+            turns: 3,
+            observations: 30,
+        },
+    )
+    .unwrap();
+    assert!(ctx.contains("## Pinned"), "{ctx}");
+    assert!(
+        ctx.contains("staging branch") && ctx.contains("Reply in English"),
+        "{ctx}"
+    );
+    let other = mnem::context::build(
+        &conn,
+        &mnem::context::Options {
+            project: "other",
+            current: None,
+            budget_chars: 8000,
+            sessions: 5,
+            turns: 3,
+            observations: 30,
+        },
+    )
+    .unwrap();
+    assert!(
+        !other.contains("staging branch") && other.contains("Reply in English"),
+        "{other}"
+    );
+}

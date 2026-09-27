@@ -20,6 +20,9 @@ pub struct Config {
     pub harness_prompts: Vec<String>,
     #[serde(default)]
     pub distill: DistillConfig,
+    /// Projects never captured (substring of the project id, e.g. "github.com/me/secret").
+    #[serde(default)]
+    pub exclude_projects: Vec<String>,
 }
 
 /// Background distillation through any OpenAI-compatible endpoint.

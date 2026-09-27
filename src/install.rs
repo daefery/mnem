@@ -368,6 +368,12 @@ export default function (pi: ExtensionAPI) {
 		})),
 	);
 	pi.registerTool(
+		tool("remember", "Pin a fact every agent should see at session start. Use only when the user asks to remember something.", Type.Object({
+			fact: Type.String({ description: "The fact, stated so it stands alone" }),
+			scope: Type.Optional(Type.String({ description: "project (default) or global" })),
+		})),
+	);
+	pi.registerTool(
 		tool("get_observations", "Full details for ids returned by mnem_search or mnem_timeline.", Type.Object({
 			ids: Type.Array(Type.String(), { description: "Ids, e.g. [\"58645\", \"E72923\"]" }),
 		})),

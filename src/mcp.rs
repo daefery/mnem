@@ -133,6 +133,7 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         "timeline" => &["anchor", "query", "depth_before", "depth_after", "project"],
         "get_observations" => &["ids", "limit", "orderBy", "project"],
         "session_start_context" => &["project", "cwd"],
+        "remember" => &["fact", "scope", "project"],
         _ => return Err(format!("unknown tool: {name}")),
     };
     for (k, v) in a.as_object().into_iter().flatten() {
@@ -154,6 +155,9 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         if k == "anchor" && !(v.is_number() || v.is_string()) {
             return Err("anchor must be a number or \"E<id>\"".into());
         }
+    }
+    if name == "remember" && str_arg(a, "fact").is_none() {
+        return Err("fact (string) is required".into());
     }
     if name == "get_observations" && !a.get("ids").is_some_and(Value::is_array) {
         return Err("ids (array) is required".into());
@@ -205,6 +209,15 @@ fn tools() -> Value {
             }}
         },
         {
+            "name": "remember",
+            "description": "Pin a fact the user wants every agent (Claude Code, Codex, pi) to see at session start. Use only when the user asks to remember something.",
+            "inputSchema": { "type": "object", "required": ["fact"], "properties": {
+                "fact": { "type": "string", "description": "The fact, stated so it stands alone" },
+                "scope": { "type": "string", "description": "'project' (default) or 'global'" },
+                "project": { "type": "string", "description": "Project id (default: this server's working directory)" }
+            }}
+        },
+        {
             "name": "session_start_context",
             "description": "The context mnem injects at session start for a project: recent sessions across agents, last summary, observations.",
             "inputSchema": { "type": "object", "properties": {
@@ -220,6 +233,29 @@ pub fn call(conn: &Connection, name: &str, a: &Value) -> Result<String> {
         "search" => search(conn, a),
         "timeline" => timeline(conn, a),
         "get_observations" => get(conn, a),
+        "remember" => {
+            let fact = str_arg(a, "fact").ok_or_else(|| anyhow::anyhow!("fact is required"))?;
+            let project = if str_arg(a, "scope") == Some("global") {
+                None
+            } else {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+                Some(
+                    str_arg(a, "project")
+                        .map(str::to_string)
+                        .or_else(|| hook::project_for(conn, None, cwd.as_deref()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("cannot resolve project; pass project or scope=global")
+                        })?,
+                )
+            };
+            let id = crate::forget::remember(conn, fact, project.as_deref())?;
+            Ok(format!(
+                "Pinned #{id} for {}.",
+                project.as_deref().unwrap_or("every project")
+            ))
+        }
         "session_start_context" => {
             let cwd = str_arg(a, "cwd").map(str::to_string).or_else(|| {
                 std::env::current_dir()

@@ -752,6 +752,9 @@ fn store(
                 .and_then(Value::as_str)
                 .filter(|t| TYPES.contains(t))
                 .unwrap_or("discovery");
+            if crate::forget::memory_forgotten(&tx, "mnem", &format!("{base}#{i}"))? {
+                continue;
+            }
             let cited = cited_ids(&o["evidence"], &c.shown);
             n_obs += ins.execute(params![
                 sid,

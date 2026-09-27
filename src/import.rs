@@ -122,6 +122,9 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for s in &all {
+            if crate::forget::session_blocked(&tx, &s.mnem_id, Some(&proj(&s.project)))? {
+                continue;
+            }
             if exists
                 .query_row(params![s.mnem_id], |_| Ok(()))
                 .optional()?
@@ -155,6 +158,9 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
         let mut rows = s.query([])?;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
+            if crate::forget::memory_forgotten(&tx, "claude-mem", &format!("obs:{id}"))? {
+                continue;
+            }
             anyhow::ensure!(
                 id < SUMMARY_ID_BASE,
                 "observation id {id} exceeds reserved range"
@@ -224,6 +230,9 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
                 "request": request, "investigated": investigated, "learned": learned,
                 "completed": completed, "next_steps": next, "notes": notes,
             });
+            if crate::forget::memory_forgotten(&tx, "claude-mem", &format!("sum:{id}"))? {
+                continue;
+            }
             // The reserved id may already belong to a memory mnem distilled after an
             // earlier import; then take a fresh id. `sum:<id>` still identifies it.
             let wanted = SUMMARY_ID_BASE + id;
@@ -279,7 +288,7 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
             let Some(sid) = by_content.get(&content) else {
                 continue;
             };
-            if has_prompts.contains(sid) {
+            if has_prompts.contains(sid) || crate::forget::session_blocked(&tx, sid, None)? {
                 stats.prompts_skipped += 1;
                 continue;
             }
