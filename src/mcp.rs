@@ -18,6 +18,9 @@ Workflow: 1) search(query) returns a compact index with ids; 2) timeline(anchor)
 3) get_observations(ids) fetches full details only for the ids you need. Numeric ids are distilled observations \
 and summaries; ids like \"E123\" are raw transcript events (prompts, answers, commands, errors, edits).";
 
+/// Protocol versions this server implements, newest first.
+const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
 pub fn serve(conn: &Connection) -> Result<()> {
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
@@ -26,53 +29,134 @@ pub fn serve(conn: &Connection) -> Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                write_msg(
-                    &mut out,
-                    &json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": e.to_string()}}),
-                )?;
-                continue;
-            }
-        };
-        let Some(id) = msg.get("id").cloned() else {
-            continue;
-        }; // notification
-        let method = msg
-            .get("method")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-        let reply = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": params.get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
+        if let Some(resp) = handle(conn, &line) {
+            write_msg(&mut out, &resp)?;
+        }
+    }
+    Ok(())
+}
+
+fn rpc_error(id: Value, code: i64, message: impl Into<String>) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
+}
+
+/// One JSON-RPC message in, at most one response out (notifications get none).
+pub fn handle(conn: &Connection, line: &str) -> Option<Value> {
+    let msg: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => return Some(rpc_error(Value::Null, -32700, format!("parse error: {e}"))),
+    };
+    let id = msg.get("id").cloned();
+    let valid_id = matches!(id, Some(Value::String(_)) | Some(Value::Number(_)));
+    if msg.get("jsonrpc").and_then(Value::as_str) != Some("2.0") || (id.is_some() && !valid_id) {
+        return Some(rpc_error(
+            if valid_id {
+                id.unwrap_or(Value::Null)
+            } else {
+                Value::Null
+            },
+            -32600,
+            "invalid request",
+        ));
+    }
+    let id = id?; // notification
+    let Some(method) = msg.get("method").and_then(Value::as_str) else {
+        return Some(rpc_error(id, -32600, "missing method"));
+    };
+    let params = msg.get("params").cloned().unwrap_or(json!({}));
+    let result = match method {
+        "initialize" => {
+            let asked = params.get("protocolVersion").and_then(Value::as_str);
+            let version = asked
+                .filter(|v| SUPPORTED.contains(v))
+                .unwrap_or(SUPPORTED[0]);
+            json!({
+                "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "mnem", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": tools() })),
-            "tools/call" => {
-                let name = params
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                Ok(match call(conn, name, &args) {
-                    Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
-                    Err(e) => {
-                        json!({ "content": [{ "type": "text", "text": format!("error: {e:#}") }], "isError": true })
-                    }
-                })
+            })
+        }
+        "ping" => json!({}),
+        "tools/list" => json!({ "tools": tools() }),
+        "tools/call" => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            if let Err(e) = validate(name, &args) {
+                return Some(rpc_error(id, -32602, e));
             }
-            _ => Err(json!({ "code": -32601, "message": format!("method not found: {method}") })),
-        };
-        let resp = match reply {
-            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err(error) => json!({ "jsonrpc": "2.0", "id": id, "error": error }),
-        };
-        write_msg(&mut out, &resp)?;
+            match call(conn, name, &args) {
+                Ok(text) => json!({ "content": [{ "type": "text", "text": text }] }),
+                Err(e) => {
+                    json!({ "content": [{ "type": "text", "text": format!("error: {e:#}") }], "isError": true })
+                }
+            }
+        }
+        _ => return Some(rpc_error(id, -32601, format!("method not found: {method}"))),
+    };
+    Some(json!({ "jsonrpc": "2.0", "id": id, "result": result }))
+}
+
+/// Check arguments against the advertised input schemas.
+fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
+    if !a.is_object() {
+        return Err("arguments must be an object".into());
+    }
+    let strings: &[&str] = &[
+        "query",
+        "project",
+        "platformSource",
+        "type",
+        "obs_type",
+        "dateStart",
+        "dateEnd",
+        "orderBy",
+        "cwd",
+    ];
+    let numbers: &[&str] = &["limit", "offset", "depth_before", "depth_after"];
+    let known: &[&str] = match name {
+        "search" => &[
+            "query",
+            "limit",
+            "project",
+            "platformSource",
+            "type",
+            "obs_type",
+            "dateStart",
+            "dateEnd",
+            "offset",
+            "orderBy",
+        ],
+        "timeline" => &["anchor", "query", "depth_before", "depth_after", "project"],
+        "get_observations" => &["ids", "limit", "orderBy", "project"],
+        "session_start_context" => &["project", "cwd"],
+        _ => return Err(format!("unknown tool: {name}")),
+    };
+    for (k, v) in a.as_object().into_iter().flatten() {
+        if !known.contains(&k.as_str()) || v.is_null() {
+            continue; // tolerate extra or null fields, as claude-mem did
+        }
+        if strings.contains(&k.as_str()) && !v.is_string() {
+            return Err(format!("{k} must be a string"));
+        }
+        if numbers.contains(&k.as_str()) {
+            let n = v
+                .as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()));
+            match n {
+                Some(n) if n >= 0.0 && (k != "limit" || n >= 1.0) => {}
+                _ => return Err(format!("{k} must be a non-negative number")),
+            }
+        }
+        if k == "anchor" && !(v.is_number() || v.is_string()) {
+            return Err("anchor must be a number or \"E<id>\"".into());
+        }
+    }
+    if name == "get_observations" && !a.get("ids").is_some_and(Value::is_array) {
+        return Err("ids (array) is required".into());
     }
     Ok(())
 }
@@ -535,20 +619,27 @@ fn timeline(conn: &Connection, a: &Value) -> Result<String> {
                 })
                 .optional()?
                 .ok_or_else(|| anyhow::anyhow!("no event E{id}"))?;
-            let mut st = conn.prepare(
-                "SELECT id, kind, coalesce(ts, 0), coalesce(path, ''), coalesce(text, '') FROM events
-                 WHERE session_id = ?1 AND thread IS NULL AND id BETWEEN ?2 AND ?3 ORDER BY id",
-            )?;
-            // Ids interleave across sessions, so over-fetch the window and trim.
-            let rows: Vec<(i64, String, i64, String, String)> = st
-                .query_map(rusqlite::params![session, id - 5000, id + 5000], |r| {
-                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-                })?
+            let sel = "SELECT id, kind, coalesce(ts, 0), coalesce(path, ''), coalesce(text, '') FROM events
+                       WHERE session_id = ?1 AND thread IS NULL";
+            let map = |r: &rusqlite::Row| -> rusqlite::Result<(i64, String, i64, String, String)> {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            };
+            // Ids interleave across sessions, so walk this session's neighbours by order.
+            let mut prev: Vec<_> = conn
+                .prepare(&format!("{sel} AND id < ?2 ORDER BY id DESC LIMIT ?3"))?
+                .query_map(rusqlite::params![session, id, before], map)?
                 .collect::<rusqlite::Result<_>>()?;
-            let pos = rows.iter().position(|r| r.0 == id).unwrap_or(0);
-            let lo = pos.saturating_sub(before as usize);
-            let hi = (pos + after as usize + 1).min(rows.len());
-            Ok(rows[lo..hi]
+            prev.reverse();
+            let this: Vec<_> = conn
+                .prepare(&format!("{sel} AND id = ?2"))?
+                .query_map(rusqlite::params![session, id], map)?
+                .collect::<rusqlite::Result<_>>()?;
+            let next: Vec<_> = conn
+                .prepare(&format!("{sel} AND id > ?2 ORDER BY id LIMIT ?3"))?
+                .query_map(rusqlite::params![session, id, after], map)?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok([prev, this, next]
+                .concat()
                 .iter()
                 .map(|(i, k, ts, p, t)| {
                     let mark = if *i == id { "→" } else { " " };
@@ -705,7 +796,38 @@ fn squash(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::day;
+    use super::{day, handle};
+
+    fn conn() -> rusqlite::Connection {
+        let p = std::env::temp_dir().join(format!("mnem-mcp-{}.db", std::process::id()));
+        crate::db::open(&p).unwrap()
+    }
+
+    #[test]
+    fn protocol_contract() {
+        let c = conn();
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-99-99"}}"#).unwrap();
+        assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
+        let r = handle(&c, r#"{"id":{"x":1},"method":"ping"}"#).unwrap();
+        assert_eq!(r["error"]["code"], -32600);
+        assert!(
+            handle(
+                &c,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            )
+            .is_none()
+        );
+        let r = handle(
+            &c,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nope"}}"#,
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search","arguments":{"query":{"a":1}}}}"#).unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"query":"x","limit":-1}}}"#).unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+    }
 
     #[test]
     fn formats_days() {

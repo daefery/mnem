@@ -48,57 +48,82 @@ pub struct Freshness {
 }
 
 impl Freshness {
-    pub fn footer(&self) -> String {
-        if self.files_behind == 0 {
-            "mnem: capture caught up across Claude Code, Codex and pi".into()
+    /// Verifiable capture status for the injected footer.
+    pub fn footer(&self, conn: &Connection) -> String {
+        let (sessions, events, last): (i64, i64, Option<i64>) = conn
+            .query_row(
+                "SELECT (SELECT count(*) FROM sessions), (SELECT max(id) FROM events), (SELECT max(ts) FROM events)",
+                [],
+                |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), r.get(2)?)),
+            )
+            .unwrap_or((0, 0, None));
+        let last = last
+            .map(|t| context::ago(db::now_ms() - t))
+            .unwrap_or_else(|| "never".into());
+        let status = if self.files_behind == 0 {
+            "caught up".to_string()
         } else {
             format!(
-                "mnem: {} transcript(s) still catching up ({:.1} KB); context may miss the last few minutes",
+                "{} transcript(s) still catching up ({:.1} KB), so the last few minutes may be missing",
                 self.files_behind,
                 self.bytes_behind as f64 / 1e3
             )
-        }
+        };
+        format!(
+            "mnem: {sessions} sessions, {events} events indexed · newest event {last} ago · {status}"
+        )
     }
 }
 
-/// Catch up every transcript that changed since its cursor, newest first, within
-/// `budget`. This is what makes another agent's work visible in this session.
+/// A hook never parses more than this much of one transcript; bigger backlogs are left
+/// to `mnem backfill` / `mnem watch` and reported as behind.
+const HOOK_MAX_UNREAD: u64 = 8 << 20;
+
+/// Catch up every transcript that changed since it was last read, newest first, until
+/// `budget` runs out. This is what makes another agent's work visible in this session.
 pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshness> {
-    let t0 = Instant::now();
-    let mut seen: HashMap<String, (u64, i64)> = HashMap::new();
+    let deadline = Instant::now() + budget;
+    let mut seen: HashMap<String, (u64, i64, Option<i64>)> = HashMap::new();
     {
-        let mut s = conn.prepare_cached("SELECT path, size_seen, byte_offset FROM sources")?;
+        let mut s =
+            conn.prepare_cached("SELECT path, size_seen, byte_offset, mtime_seen FROM sources")?;
         for r in s.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,
                 r.get::<_, i64>(2)?,
+                r.get::<_, Option<i64>>(3)?,
             ))
         })? {
-            let (p, size, off) = r?;
-            seen.insert(p, (size as u64, off));
+            let (p, size, off, mtime) = r?;
+            seen.insert(p, (size as u64, off, mtime));
         }
     }
-    let mut changed: Vec<(std::time::SystemTime, u64, Source)> = ingest::discover()
+    // Size or mtime changed (or never read): ingest decides whether it is an append or
+    // a rewrite. Size alone would miss same-length rewrites.
+    let mut changed: Vec<(i64, u64, u64, Source)> = ingest::discover()
         .into_iter()
         .filter_map(|s| {
             let m = s.path.metadata().ok()?;
-            let known = seen.get(s.path.to_string_lossy().as_ref());
-            let dirty = match known {
-                Some((size, off)) => m.len() != *size || m.len() as i64 != *off,
-                None => true,
+            let mtime = ingest::mtime_ms(&m);
+            let (dirty, unread) = match seen.get(s.path.to_string_lossy().as_ref()) {
+                Some((size, off, seen_mtime)) => (
+                    m.len() != *size || mtime != *seen_mtime,
+                    m.len().saturating_sub(*off as u64),
+                ),
+                None => (true, m.len()),
             };
-            dirty.then(|| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len(), s))
+            dirty.then(|| (mtime.unwrap_or(0), m.len(), unread, s))
         })
         .collect();
     changed.sort_by_key(|c| std::cmp::Reverse(c.0));
     let mut resolver = Resolver::default();
     let mut f = Freshness::default();
-    for (_, len, src) in changed {
-        if t0.elapsed() > budget {
-            f.budget_hit = true;
+    for (_, len, unread, src) in changed {
+        if Instant::now() > deadline || unread > HOOK_MAX_UNREAD {
+            f.budget_hit |= Instant::now() > deadline;
             f.files_behind += 1;
-            f.bytes_behind += len;
+            f.bytes_behind += unread.min(len);
             continue;
         }
         match ingest::ingest_file(conn, &src, &mut resolver) {
@@ -168,7 +193,19 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                     observations: 30,
                 },
             )?;
-            ctx.push_str(&format!("\n---\n{}\n", fresh.footer()));
+            let mut footer = fresh.footer(conn);
+            if let Ok((pending, err)) = crate::distill::pending(conn) {
+                if pending > 0 {
+                    footer.push_str(&format!(" · {pending} session(s) awaiting distillation"));
+                }
+                if let Some(e) = err {
+                    footer.push_str(&format!(
+                        " · last distill error: {}",
+                        crate::text::head(&e, 80)
+                    ));
+                }
+            }
+            ctx.push_str(&format!("\n---\n{footer}\n"));
             if let Some(s) = &session {
                 set_watermark(conn, s)?;
             }
@@ -184,10 +221,54 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                 emit("UserPromptSubmit", &delta);
             }
         }
-        // Stop / SessionEnd: the transcript catch-up above is the whole job for now.
+        // Turn ended: distil it in a detached process so the agent never waits on an LLM.
+        "stop" => {
+            if let Some(s) = &session {
+                spawn_distill(s);
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn spawn_distill(session: &str) {
+    let c = &crate::config::CONFIG.distill;
+    if c.on_stop == Some(false) || (c.api_key_env.is_none() && c.api_key_json.is_none()) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let args = [
+        "distill",
+        "--session",
+        session,
+        "--active",
+        "--quiet",
+        "--limit",
+        "1",
+    ];
+    // setsid detaches from the agent's process group so the hook returns immediately.
+    let spawned = std::process::Command::new("setsid")
+        .arg("-f")
+        .arg(&exe)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .or_else(|_| {
+            std::process::Command::new(&exe)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+        });
+    if let Err(e) = spawned {
+        log(&format!("spawn distill: {e}"));
+    }
 }
 
 fn emit(event: &str, ctx: &str) {
@@ -205,12 +286,18 @@ fn set_watermark(conn: &Connection, session: &str) -> Result<()> {
 }
 
 /// What other sessions in this project did since this session last looked.
-/// Empty (None) most of the time; capped so it never crowds out the prompt.
+///
+/// Only live work counts: events from transcripts (not imported history), human prompts
+/// (not harness), newer than six hours. At most three sessions are shown in full; any
+/// others are counted in a "+N more" line, so the watermark can advance past everything
+/// without silently dropping anything. Groups are never cut mid-way.
 pub fn cross_agent_delta(
     conn: &Connection,
     session: &str,
     project: &str,
 ) -> Result<Option<String>> {
+    const MAX_SESSIONS: usize = 3;
+    const MAX_CHARS: usize = 1600;
     let wm: Option<i64> = conn
         .query_row(
             "SELECT watermark FROM injections WHERE session_id = ?1",
@@ -223,13 +310,15 @@ pub fn cross_agent_delta(
         return Ok(None);
     };
     let mut s = conn.prepare(
-        "SELECT s.id, s.agent, e.kind, e.label, e.path, e.text, e.id FROM events e JOIN sessions s ON s.id = e.session_id
+        "SELECT s.id, s.agent, e.kind, e.path, e.text, e.label, e.id FROM events e JOIN sessions s ON s.id = e.session_id
          WHERE e.id > ?1 AND s.project = ?2 AND s.id != ?3 AND e.thread IS NULL
-           AND e.kind IN ('prompt', 'assistant', 'file_edit', 'error')
+           AND e.source_path IS NOT NULL AND e.ts > ?4
+           AND (e.kind IN ('assistant', 'file_edit', 'error') OR (e.kind = 'prompt' AND e.label IS NULL))
          ORDER BY e.id",
     )?;
     struct Other {
         agent: String,
+        last_id: i64,
         prompt: Option<String>,
         answer: Option<String>,
         files: Vec<String>,
@@ -237,30 +326,33 @@ pub fn cross_agent_delta(
     }
     let mut by: Vec<(String, Other)> = Vec::new();
     let mut max_id = wm;
-    let mut rows = s.query(params![wm, project, session])?;
+    let mut rows = s.query(params![wm, project, session, db::now_ms() - 6 * 3_600_000])?;
     while let Some(r) = rows.next()? {
         let (sid, agent, kind): (String, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
-        let (label, path, text, id): (Option<String>, Option<String>, String, i64) =
+        let (path, text, label, id): (Option<String>, String, Option<String>, i64) =
             (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
         max_id = max_id.max(id);
-        let o = match by.iter_mut().find(|(k, _)| *k == sid) {
-            Some((_, o)) => o,
+        let i = match by.iter().position(|(k, _)| *k == sid) {
+            Some(i) => i,
             None => {
                 by.push((
                     sid,
                     Other {
                         agent,
+                        last_id: id,
                         prompt: None,
                         answer: None,
                         files: vec![],
                         error: None,
                     },
                 ));
-                &mut by.last_mut().expect("just pushed").1
+                by.len() - 1
             }
         };
+        let o = &mut by[i].1;
+        o.last_id = id;
         match kind.as_str() {
-            "prompt" if label.is_none() => o.prompt = Some(text),
+            "prompt" => o.prompt = Some(text),
             "assistant" => o.answer = Some(text),
             "file_edit" => {
                 if let Some(p) = path
@@ -280,22 +372,32 @@ pub fn cross_agent_delta(
         }
     }
     drop(rows);
+    // Everything up to max_id is either shown below or counted in "+N more".
     conn.execute(
         "UPDATE injections SET watermark = ?2 WHERE session_id = ?1",
         params![session, max_id],
     )?;
+    // Most recently active first; sessions with an answer or edits carry the most signal.
+    by.retain(|(_, o)| o.prompt.is_some() || o.answer.is_some() || !o.files.is_empty());
     if by.is_empty() {
         return Ok(None);
     }
-    let mut w = String::from("mnem: meanwhile in this project (other sessions)\n");
+    by.sort_by_key(|(_, o)| {
+        std::cmp::Reverse((o.answer.is_some() || !o.files.is_empty(), o.last_id))
+    });
+    let mut w = String::from("mnem: meanwhile in this project (other sessions, newest first)\n");
+    let mut shown = 0;
     for (_, o) in &by {
-        w.push_str(&format!("- {}", o.agent));
-        if let Some(p) = &o.prompt {
-            w.push_str(&format!(" · asked: {}", crate::text::head(&squash(p), 140)));
+        if shown == MAX_SESSIONS {
+            break;
         }
-        w.push('\n');
+        let mut g = format!("- {}", o.agent);
+        if let Some(p) = &o.prompt {
+            g.push_str(&format!(" · asked: {}", context::excerpt(&squash(p), 160)));
+        }
+        g.push('\n');
         if let Some(a) = &o.answer {
-            w.push_str(&format!("  = {}\n", crate::text::head(&squash(a), 220)));
+            g.push_str(&format!("  = {}\n", context::excerpt(&squash(a), 280)));
         }
         if !o.files.is_empty() {
             let names: Vec<&str> = o
@@ -304,13 +406,24 @@ pub fn cross_agent_delta(
                 .take(6)
                 .map(|p| p.rsplit('/').next().unwrap_or(p))
                 .collect();
-            w.push_str(&format!("  edited: {}\n", names.join(", ")));
+            g.push_str(&format!("  edited: {}\n", names.join(", ")));
         }
         if let Some(e) = &o.error {
-            w.push_str(&format!("  last error: {}\n", crate::text::head(e, 140)));
+            g.push_str(&format!("  last error: {}\n", crate::text::head(e, 140)));
         }
+        if w.len() + g.len() > MAX_CHARS {
+            break;
+        }
+        w.push_str(&g);
+        shown += 1;
     }
-    Ok(Some(crate::text::head(&w, 1600)))
+    if by.len() > shown {
+        w.push_str(&format!(
+            "+{} more session(s) active here; search memory for details\n",
+            by.len() - shown
+        ));
+    }
+    Ok(Some(w))
 }
 
 fn squash(s: &str) -> String {

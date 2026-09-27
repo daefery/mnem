@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mnem::model::Agent;
-use mnem::{context, db, doctor, hook, import, ingest, install, mcp, project, search};
+use mnem::{context, db, distill, doctor, hook, import, ingest, install, mcp, project, search};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -58,6 +58,11 @@ enum Cmd {
         #[arg(long)]
         bin: Option<String>,
     },
+    /// Remove mnem's hooks, MCP entries and pi extension (keeps the database)
+    Uninstall {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Cross-agent update for a session since it last looked (used by the pi extension)
     Delta {
         #[arg(long)]
@@ -70,6 +75,24 @@ enum Cmd {
         name: String,
         #[arg(default_value = "{}")]
         args: String,
+    },
+    /// Distil captured events into typed observations and summaries (LLM, off the write path)
+    Distill {
+        /// Only this mnem session id (e.g. claude:<uuid>)
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, default_value_t = 7)]
+        since_days: i64,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Show the digests that would be sent, without calling the LLM
+        #[arg(long)]
+        dry_run: bool,
+        /// Include sessions active in the last two minutes
+        #[arg(long)]
+        active: bool,
+        #[arg(long)]
+        quiet: bool,
     },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
@@ -95,6 +118,13 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.db.unwrap_or_else(|| db::data_dir().join("mnem.db"));
     let mut conn = db::open(&path)?;
+    // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
+    if matches!(
+        cli.cmd,
+        Cmd::Hook { .. } | Cmd::Delta { .. } | Cmd::Context { .. }
+    ) {
+        conn.busy_timeout(std::time::Duration::from_millis(1500))?;
+    }
     match cli.cmd {
         Cmd::Backfill => {
             let t = Instant::now();
@@ -177,9 +207,47 @@ fn main() -> Result<()> {
                     observations: 30,
                 },
             )?;
-            println!("{ctx}\n---\n{}", fresh.footer());
+            println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Distill {
+            session,
+            since_days,
+            limit,
+            dry_run,
+            active,
+            quiet,
+        } => {
+            let t = Instant::now();
+            let s = distill::run(
+                &mut conn,
+                &distill::Options {
+                    session,
+                    since_days,
+                    limit,
+                    dry_run,
+                    include_active: active,
+                },
+            )?;
+            if !quiet {
+                println!(
+                    "distill: {} sessions, {} calls, {} observations, {} summaries, {} waiting for more work, {:.1}s",
+                    s.sessions,
+                    s.calls,
+                    s.observations,
+                    s.summaries,
+                    s.skipped_small,
+                    t.elapsed().as_secs_f64()
+                );
+            }
+            for e in &s.errors {
+                if quiet {
+                    hook::log(&format!("distill: {e}"));
+                } else {
+                    eprintln!("distill error: {e}");
+                }
+            }
+        }
         Cmd::Install { dry_run, only, bin } => {
             let has = |a: &str| only.split(',').any(|x| x.trim() == a);
             install::run(&install::Plan {
@@ -190,6 +258,7 @@ fn main() -> Result<()> {
                 pi: has("pi"),
             })?;
         }
+        Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
         Cmd::Delta { session, cwd } => {
             hook::catch_up_recent(&mut conn, std::time::Duration::from_millis(200))?;
             if let Some(project) = hook::project_for(&conn, Some(&session), cwd.as_deref())

@@ -54,24 +54,54 @@ fn hook_entries(bin: &str, agent: &str) -> Vec<HookEntry> {
     ]
 }
 
-/// Replace mnem's entries in a Claude-style `{"hooks": {Event: [group]}}` document.
-fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) {
-    let root = doc.as_object_mut().expect("object");
-    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-    let hooks = hooks.as_object_mut().expect("hooks object");
-    let ours = |g: &Value| {
-        g.get("hooks").and_then(Value::as_array).is_some_and(|hs| {
-            hs.iter().any(|h| {
-                h.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains("mnem hook "))
-            })
-        })
+fn is_ours(h: &Value) -> bool {
+    h.get("command")
+        .and_then(Value::as_str)
+        .is_some_and(|c| c.contains("mnem hook "))
+}
+
+/// Remove mnem's hooks everywhere. Other hooks stay, even when they share a group with
+/// one of ours; only groups and events left empty by the removal are dropped.
+fn strip_ours(doc: &mut Value) -> usize {
+    let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return 0;
     };
+    let mut removed = 0;
+    for groups in hooks.values_mut() {
+        let Some(arr) = groups.as_array_mut() else {
+            continue;
+        };
+        arr.retain_mut(|g| {
+            let Some(hs) = g.get_mut("hooks").and_then(Value::as_array_mut) else {
+                return true;
+            };
+            let before = hs.len();
+            hs.retain(|h| !is_ours(h));
+            removed += before - hs.len();
+            !(before > 0 && hs.is_empty())
+        });
+    }
+    hooks.retain(|_, v| v.as_array().is_none_or(|a| !a.is_empty()));
+    removed
+}
+
+/// Replace mnem's entries in a Claude-style `{"hooks": {Event: [group]}}` document.
+fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) -> Result<()> {
+    anyhow::ensure!(doc.is_object(), "settings root is not a JSON object");
+    strip_ours(doc);
+    let hooks = doc
+        .as_object_mut()
+        .expect("checked above")
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("\"hooks\" is not a JSON object")?;
     for (event, matcher, command, timeout) in entries {
-        let groups = hooks.entry(event.to_string()).or_insert_with(|| json!([]));
-        let arr = groups.as_array_mut().expect("event array");
-        arr.retain(|g| !ours(g));
+        let arr = hooks
+            .entry(event.to_string())
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .with_context(|| format!("hooks.{event} is not an array"))?;
         let mut hook = json!({ "type": "command", "command": command, "timeout": timeout });
         if let (Some(h), Some(x)) = (hook.as_object_mut(), extra.as_object()) {
             for (k, v) in x {
@@ -84,6 +114,7 @@ fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) {
         }
         arr.push(group);
     }
+    Ok(())
 }
 
 fn read_json(path: &Path) -> Result<Value> {
@@ -123,7 +154,7 @@ fn claude(p: &Plan) -> Result<()> {
     println!("Claude Code");
     let path = db::home().join(".claude/settings.json");
     let mut doc = read_json(&path)?;
-    merge_hooks(&mut doc, &hook_entries(&p.bin, "claude"), &json!({}));
+    merge_hooks(&mut doc, &hook_entries(&p.bin, "claude"), &json!({}))?;
     for (event, _, cmd, _) in hook_entries(&p.bin, "claude") {
         println!("  hook {event}: {cmd}");
     }
@@ -145,7 +176,7 @@ fn codex(p: &Plan) -> Result<()> {
         &mut doc,
         &hook_entries(&p.bin, "codex"),
         &json!({ "additionalContextLimit": 12000 }),
-    );
+    )?;
     for (event, _, cmd, _) in hook_entries(&p.bin, "codex") {
         println!("  hook {event}: {cmd}");
     }
@@ -196,7 +227,8 @@ fn pi(p: &Plan) -> Result<()> {
     println!("pi");
     let dir = db::home().join(".pi/agent/extensions/mnem");
     let path = dir.join("index.ts");
-    let src = PI_EXTENSION.replace("__MNEM_BIN__", &p.bin);
+    // JSON string encoding is a valid TS string literal (escapes Windows backslashes).
+    let src = PI_EXTENSION.replace("__MNEM_BIN__", &serde_json::to_string(&p.bin)?);
     if p.dry_run {
         println!("  would write {} ({} bytes)", path.display(), src.len());
         return Ok(());
@@ -216,16 +248,17 @@ const PI_EXTENSION: &str = r#"/**
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-const MNEM = process.env.MNEM_BIN ?? "__MNEM_BIN__";
+const MNEM = process.env.MNEM_BIN ?? __MNEM_BIN__;
 
 export default function (pi: ExtensionAPI) {
 	let session = "";
 	let startContext = "";
+	let delivered = false;
 
 	const run = async (args: string[]) => {
 		try {
 			const r = await pi.exec(MNEM, args);
-			return r.code === 0 ? r.stdout : "";
+			return r.code === 0 ? r.stdout.trim() : "";
 		} catch {
 			return "";
 		}
@@ -236,14 +269,24 @@ export default function (pi: ExtensionAPI) {
 		const file = ctx.sessionManager.getSessionFile();
 		if (file) await run(["ingest", file]);
 		startContext = await run(["context", "--cwd", ctx.cwd, "--session", session]);
+		delivered = false;
 	});
 
-	pi.on("before_agent_start", async (event, ctx) => {
+	// Context rides along as a custom message in the transcript: sent once, kept in the
+	// conversation, and leaves pi's own system prompt untouched.
+	pi.on("before_agent_start", async (_event, ctx) => {
 		const file = ctx.sessionManager.getSessionFile();
 		if (file) await run(["ingest", file]);
-		const delta = session ? await run(["delta", "--session", session, "--cwd", ctx.cwd]) : "";
-		const add = [startContext, delta].filter((s) => s.trim()).join("\n\n");
-		if (add) return { systemPrompt: `${event.systemPrompt}\n\n${add}` };
+		let content = "";
+		if (!delivered && startContext) {
+			delivered = true;
+			content = startContext;
+		} else if (session) {
+			content = await run(["delta", "--session", session, "--cwd", ctx.cwd]);
+		}
+		if (content) {
+			return { message: { customType: "mnem-context", content, display: false } };
+		}
 	});
 
 	const tool = (name: string, description: string, parameters: any) =>
@@ -281,10 +324,135 @@ export default function (pi: ExtensionAPI) {
 }
 "#;
 
+/// Remove everything `install` added. Backs up each file first.
+pub fn uninstall(dry_run: bool) -> Result<()> {
+    let p = Plan {
+        bin: String::new(),
+        dry_run,
+        claude: true,
+        codex: true,
+        pi: true,
+    };
+    for (name, path) in [
+        ("Claude Code", db::home().join(".claude/settings.json")),
+        ("Codex", db::home().join(".codex/hooks.json")),
+    ] {
+        let mut doc = read_json(&path)?;
+        let n = strip_ours(&mut doc);
+        println!("{name}: {n} mnem hook(s) in {}", path.display());
+        if n > 0 {
+            write_json(&p, &path, &doc)?;
+        }
+    }
+    mcp_via_cli(
+        &p,
+        "claude",
+        &["--version"],
+        &["mcp", "remove", "--scope", "user", "mnem"],
+    )?;
+    let cfg = db::home().join(".codex/config.toml");
+    if let Ok(cur) = std::fs::read_to_string(&cfg) {
+        let stripped = remove_toml_table(&cur, "mcp_servers.mnem");
+        if stripped != cur {
+            if dry_run {
+                println!("  would remove [mcp_servers.mnem] from {}", cfg.display());
+            } else {
+                backup(&cfg)?;
+                std::fs::write(&cfg, stripped)?;
+                println!("  removed [mcp_servers.mnem] from {}", cfg.display());
+            }
+        }
+    }
+    let ext = db::home().join(".pi/agent/extensions/mnem");
+    if ext.exists() {
+        if dry_run {
+            println!("  would remove {}", ext.display());
+        } else {
+            std::fs::remove_dir_all(&ext)?;
+            println!("  removed {}", ext.display());
+        }
+    }
+    println!(
+        "Data is kept in {} (delete it yourself if you want).",
+        db::data_dir().display()
+    );
+    Ok(())
+}
+
+/// Drop `[name]` and its keys (up to the next table header) from a TOML document.
+fn remove_toml_table(src: &str, name: &str) -> String {
+    let header = format!("[{name}]");
+    let mut out = Vec::new();
+    let mut skipping = false;
+    for line in src.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            skipping = t == header || t.starts_with(&format!("[{name}."));
+        }
+        if !skipping {
+            out.push(line);
+        }
+    }
+    let mut s = out.join("\n");
+    if src.ends_with('\n') {
+        s.push('\n');
+    }
+    s
+}
+
 pub fn default_bin() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "mnem".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_user_hooks_sharing_a_group() {
+        let mut doc = json!({ "hooks": { "Stop": [
+            { "hooks": [
+                { "type": "command", "command": "notify-send done" },
+                { "type": "command", "command": "/x/mnem hook claude stop" }
+            ] },
+            { "hooks": [{ "type": "command", "command": "/x/mnem hook claude stop" }] }
+        ], "PreToolUse": [{ "matcher": "Read", "hooks": [{ "type": "command", "command": "guard" }] }] } });
+        assert_eq!(strip_ours(&mut doc), 2);
+        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            doc["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "notify-send done"
+        );
+        merge_hooks(&mut doc, &hook_entries("/x/mnem", "claude"), &json!({})).unwrap();
+        merge_hooks(&mut doc, &hook_entries("/x/mnem", "claude"), &json!({})).unwrap();
+        let stop = doc["hooks"]["Stop"].as_array().unwrap();
+        assert_eq!(
+            stop.len(),
+            2,
+            "user group + one mnem group, even after two installs"
+        );
+        assert_eq!(
+            doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+            "guard"
+        );
+    }
+
+    #[test]
+    fn removes_toml_table_only() {
+        let src = "a = 1\n[mcp_servers.x]\ncommand = \"x\"\n[mcp_servers.mnem]\ncommand = \"m\"\nargs = [\"mcp\"]\n[z]\nk = 2\n";
+        assert_eq!(
+            remove_toml_table(src, "mcp_servers.mnem"),
+            "a = 1\n[mcp_servers.x]\ncommand = \"x\"\n[z]\nk = 2\n"
+        );
+    }
+
+    #[test]
+    fn pi_extension_quotes_windows_paths() {
+        let lit = serde_json::to_string(r"C:\bin\mnem.exe").unwrap();
+        assert_eq!(lit, r#""C:\\bin\\mnem.exe""#);
+    }
 }

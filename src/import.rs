@@ -322,12 +322,13 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
 /// matches it; among several such repos, the one most often seen for sessions both
 /// systems know wins. Folder names like "code" stay as they are.
 fn map_projects(conn: &Connection, sessions: &[CmSession]) -> Result<HashMap<String, String>> {
+    // "github.com/o/repo" -> "repo"; "github.com/o/repo#checkout" -> "checkout".
     let tail = |p: &str| {
-        p.trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(p)
-            .to_lowercase()
+        let p = p.trim_end_matches('/');
+        match p.rsplit_once('#') {
+            Some((_, checkout)) => checkout.to_lowercase(),
+            None => p.rsplit('/').next().unwrap_or(p).to_lowercase(),
+        }
     };
     let mut votes: HashMap<(String, String), usize> = HashMap::new();
     // Only transcript-backed sessions vote; sessions created by a previous import carry

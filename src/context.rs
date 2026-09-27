@@ -59,18 +59,65 @@ pub fn build(conn: &Connection, o: &Options) -> Result<String> {
     }
 }
 
+/// id, agent, title, last event, human prompt count, first prompt
+type Candidate = (
+    String,
+    String,
+    Option<String>,
+    Option<i64>,
+    i64,
+    Option<String>,
+);
+
 fn recent_sessions(conn: &Connection, o: &Options) -> Result<Vec<SessionView>> {
+    // Sessions a human actually talked to come first; orchestrator-only sessions (often
+    // many near-identical subagents) fill in only when there is room.
     let mut s = conn.prepare(
-        "SELECT id, agent, title, last_event_at FROM sessions
+        "SELECT id, agent, title, last_event_at,
+                (SELECT count(*) FROM events e WHERE e.session_id = sessions.id AND e.kind = 'prompt'
+                   AND e.label IS NULL AND e.thread IS NULL) AS human,
+                (SELECT text FROM events e WHERE e.session_id = sessions.id AND e.kind = 'prompt'
+                   AND e.thread IS NULL ORDER BY e.id LIMIT 1) AS first_prompt
+         FROM sessions
          WHERE project = ?1 AND id IS NOT ?2
            AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.id AND e.kind = 'prompt')
          ORDER BY last_event_at DESC LIMIT ?3",
     )?;
-    let rows: Vec<(String, String, Option<String>, Option<i64>)> = s
-        .query_map(params![o.project, o.current, o.sessions as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
+    let candidates: Vec<Candidate> = s
+        .query_map(
+            params![o.project, o.current, (o.sessions * 6) as i64],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<_>>()?;
+    let mut rows = Vec::new();
+    let mut first_prompts = std::collections::HashSet::new();
+    for human_pass in [true, false] {
+        for (id, agent, title, last, human, first) in &candidates {
+            if rows.len() == o.sessions {
+                break;
+            }
+            if (*human > 0) != human_pass {
+                continue;
+            }
+            // Many subagents start from the same brief; one of them is enough.
+            if let Some(f) = first
+                && !first_prompts.insert(crate::text::hash(f))
+            {
+                continue;
+            }
+            rows.push((id.clone(), agent.clone(), title.clone(), *last));
+        }
+    }
+    rows.sort_by_key(|r| std::cmp::Reverse(r.3));
     let mut prompts = conn.prepare_cached(
         "SELECT turn, text FROM events
          WHERE session_id = ?1 AND kind = 'prompt' AND thread IS NULL
@@ -185,17 +232,19 @@ fn render(
     if !sessions.is_empty() {
         writeln!(w, "\n## Recent sessions (newest first, all agents)")?;
     }
-    for s in sessions {
+    for (i, s) in sessions.iter().enumerate() {
         let title = s
             .title
             .as_deref()
             .map(|t| format!(" · {}", one_line(t, 80)))
             .unwrap_or_default();
         writeln!(w, "- {} · {} ago{title}", s.agent, ago(now - s.last))?;
+        // The newest session is most likely what the user is continuing.
+        let answer_len = if i == 0 { 600 } else { 240 };
         for t in s.turns.iter().rev().take(turns).rev() {
-            writeln!(w, "  > {}", one_line(&t.prompt, 180))?;
+            writeln!(w, "  > {}", excerpt(&squash(&t.prompt), 200))?;
             if let Some(a) = &t.answer {
-                writeln!(w, "  = {}", one_line(a, 320))?;
+                writeln!(w, "  = {}", excerpt(&squash(a), answer_len))?;
             }
         }
         if !s.edited.is_empty() {
@@ -233,6 +282,28 @@ fn render(
     Ok(w)
 }
 
+fn squash(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// At most `max` chars, ending at a sentence boundary when one falls in the second half,
+/// else at a word boundary.
+pub fn excerpt(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(max).collect();
+    let floor = cut.len() / 2;
+    let end = [". ", "! ", "? ", "; ", "\n"]
+        .iter()
+        .filter_map(|p| cut.rfind(p).map(|i| i + 1))
+        .filter(|&i| i >= floor)
+        .max()
+        .or_else(|| cut.rfind(char::is_whitespace).filter(|&i| i >= floor))
+        .unwrap_or(cut.len());
+    format!("{}…", cut[..end].trim_end())
+}
+
 fn one_line(s: &str, max: usize) -> String {
     text::head(&s.split_whitespace().collect::<Vec<_>>().join(" "), max)
 }
@@ -256,5 +327,20 @@ pub fn ago(ms: i64) -> String {
         60..3600 => format!("{}m", s / 60),
         3600..86400 => format!("{}h", s / 3600),
         _ => format!("{}d", s / 86400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::excerpt;
+
+    #[test]
+    fn excerpts_end_on_sentences() {
+        assert_eq!(excerpt("short", 10), "short");
+        assert_eq!(
+            excerpt("First part done. Second part is long and keeps going", 30),
+            "First part done.…"
+        );
+        assert_eq!(excerpt("one two three four five six", 12), "one two…");
     }
 }

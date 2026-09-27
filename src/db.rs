@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS sources(
   generation INTEGER NOT NULL DEFAULT 0,
   byte_offset INTEGER NOT NULL DEFAULT 0,
   size_seen INTEGER NOT NULL DEFAULT 0,
+  mtime_seen INTEGER,                -- mtime (ms) when last ingested; with size, gates re-reads
   parser_state TEXT,
   session_id TEXT,
   checkpoint TEXT,                   -- hash of the bytes just before byte_offset
@@ -114,6 +115,14 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
   VALUES ('delete', old.id, old.title, old.subtitle, old.narrative, old.facts, old.concepts);
 END;
 
+-- Per-session high-water mark of events already distilled into memories.
+CREATE TABLE IF NOT EXISTS distill_state(
+  session_id TEXT PRIMARY KEY,
+  through INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER,
+  error TEXT
+);
+
 -- Per-session high-water mark of events already shown by the cross-agent delta.
 CREATE TABLE IF NOT EXISTS injections(
   session_id TEXT PRIMARY KEY,
@@ -178,6 +187,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     for (table, col, decl) in [
         ("sources", "checkpoint", "TEXT"),
         ("sources", "file_id", "TEXT"),
+        ("sources", "mtime_seen", "INTEGER"),
         ("events", "thread", "TEXT"),
         ("events", "label", "TEXT"),
         ("events", "tool_raw", "TEXT"),

@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod distill;
 pub mod doctor;
 pub mod hook;
 pub mod import;

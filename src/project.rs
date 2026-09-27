@@ -1,5 +1,9 @@
-//! Project identity: the git remote when resolvable (so worktrees and clones of one repo
-//! share memory), else the git root, else the raw cwd.
+//! Project identity: the git remote when resolvable (so worktrees of one checkout share
+//! memory), else the git root, else the raw cwd.
+//!
+//! Two separate checkouts of the same remote are often different projects (a fork used
+//! for other work, a second clone with its own purpose). When the main checkout's
+//! directory name differs from the repo name, it is appended: `github.com/o/repo#dir`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,15 +34,36 @@ fn resolve_uncached(cwd: &Path) -> Option<String> {
     while let Some(d) = dir {
         let dotgit = d.join(".git");
         if dotgit.exists() {
-            let config = git_common_dir(&dotgit).map(|c| c.join("config"));
-            if let Some(url) = config.and_then(|c| origin_url(&c)) {
-                return Some(normalize_remote(&url));
+            let common = git_common_dir(&dotgit);
+            if let Some(url) = common.as_ref().and_then(|c| origin_url(&c.join("config"))) {
+                let remote = normalize_remote(&url);
+                return Some(match common.as_deref().and_then(checkout_name) {
+                    Some(name)
+                        if !remote
+                            .rsplit('/')
+                            .next()
+                            .is_some_and(|r| r.eq_ignore_ascii_case(&name)) =>
+                    {
+                        format!("{remote}#{}", name.to_lowercase())
+                    }
+                    _ => remote,
+                });
             }
             return Some(d.to_string_lossy().into_owned());
         }
         dir = d.parent();
     }
     managed_worktree_remote(cwd)
+}
+
+/// Directory name of the main working checkout that owns `common` (a `.git` dir).
+/// None for bare repositories, whose names are often ids rather than project names.
+fn checkout_name(common: &Path) -> Option<String> {
+    let common = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+    if common.file_name()? != ".git" {
+        return None;
+    }
+    Some(common.parent()?.file_name()?.to_string_lossy().into_owned())
 }
 
 /// Tools like no-mistakes keep `<root>/repos/<id>.git` and check out throwaway
@@ -120,7 +145,34 @@ pub fn normalize_remote(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_remote;
+    use super::{Resolver, normalize_remote};
+
+    #[test]
+    fn second_checkout_of_same_remote_is_its_own_project() {
+        let root = std::env::temp_dir().join(format!("mnem-proj-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["firstmate", "secondmate"] {
+            let git = root.join(dir).join(".git");
+            std::fs::create_dir_all(&git).unwrap();
+            std::fs::write(
+                git.join("config"),
+                "[remote \"origin\"]\n\turl = git@github.com:o/firstmate.git\n",
+            )
+            .unwrap();
+        }
+        let mut r = Resolver::default();
+        let p = |d: &str| root.join(d).join("src").to_string_lossy().into_owned();
+        std::fs::create_dir_all(root.join("firstmate/src")).unwrap();
+        std::fs::create_dir_all(root.join("secondmate/src")).unwrap();
+        assert_eq!(
+            r.resolve(Some(&p("firstmate")), None).unwrap(),
+            "github.com/o/firstmate"
+        );
+        assert_eq!(
+            r.resolve(Some(&p("secondmate")), None).unwrap(),
+            "github.com/o/firstmate#secondmate"
+        );
+    }
 
     #[test]
     fn normalizes_remotes() {

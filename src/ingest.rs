@@ -42,6 +42,7 @@ pub struct Batch {
     pub generation: i64,
     pub end: u64,
     pub size: u64,
+    pub mtime: Option<i64>,
     pub fingerprint: String,
     pub checkpoint: Option<String>,
     pub file_id: Option<String>,
@@ -168,6 +169,15 @@ fn checkpoint(f: &mut File, offset: u64) -> Result<Option<String>> {
     Ok(Some(text::hash(&String::from_utf8_lossy(&buf))))
 }
 
+pub fn mtime_ms(m: &std::fs::Metadata) -> Option<i64> {
+    let d = m
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    Some(d.as_millis() as i64)
+}
+
 #[cfg(unix)]
 fn file_id(m: &std::fs::Metadata) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
@@ -189,6 +199,7 @@ pub fn parse(src: &Source, cur: Option<Cursor>) -> Result<Option<Batch>> {
     let mut f = File::open(&src.path).with_context(|| format!("open {}", src.path.display()))?;
     let meta = f.metadata()?;
     let size = meta.len();
+    let mtime = mtime_ms(&meta);
     let fid = file_id(&meta);
     let Some(fp) = fingerprint(&mut f)? else {
         return Ok(None);
@@ -269,6 +280,7 @@ pub fn parse(src: &Source, cur: Option<Cursor>) -> Result<Option<Batch>> {
         generation,
         end: pos,
         size,
+        mtime,
         fingerprint: fp,
         checkpoint: checkpoint(&mut f, pos)?,
         file_id: fid,
@@ -380,11 +392,11 @@ pub fn commit(conn: &mut Connection, b: &Batch, resolver: &mut Resolver) -> Resu
         }
     }
     tx.execute(
-        "INSERT INTO sources(path, agent, fingerprint, generation, byte_offset, size_seen, parser_state, session_id, excluded, bad_lines, last_ingest_at, missing_since, checkpoint, file_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13)
+        "INSERT INTO sources(path, agent, fingerprint, generation, byte_offset, size_seen, parser_state, session_id, excluded, bad_lines, last_ingest_at, missing_since, checkpoint, file_id, mtime_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, NULL, ?12, ?13, ?14)
          ON CONFLICT(path) DO UPDATE SET
            fingerprint = excluded.fingerprint, generation = excluded.generation,
-           checkpoint = excluded.checkpoint, file_id = excluded.file_id,
+           checkpoint = excluded.checkpoint, file_id = excluded.file_id, mtime_seen = excluded.mtime_seen,
            byte_offset = excluded.byte_offset, size_seen = excluded.size_seen,
            parser_state = excluded.parser_state, session_id = excluded.session_id,
            excluded = excluded.excluded, bad_lines = bad_lines + excluded.bad_lines,
@@ -403,6 +415,7 @@ pub fn commit(conn: &mut Connection, b: &Batch, resolver: &mut Resolver) -> Resu
             now,
             b.checkpoint,
             b.file_id,
+            b.mtime,
         ],
     )?;
     tx.commit()?;
