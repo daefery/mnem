@@ -5,6 +5,7 @@
 //! `--dry-run` prints the plan without writing.
 
 use crate::db;
+use crate::ingest;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -155,20 +156,39 @@ fn write_json(p: &Plan, path: &Path, doc: &Value) -> Result<()> {
 }
 
 fn claude(p: &Plan) -> Result<()> {
-    println!("Claude Code");
-    let path = db::home().join(".claude/settings.json");
-    let mut doc = read_json(&path)?;
-    merge_hooks(&mut doc, &hook_entries(&p.bin, "claude"), &json!({}))?;
-    for (event, _, cmd, _) in hook_entries(&p.bin, "claude") {
-        println!("  hook {event}: {cmd}");
+    for dir in ingest::claude_config_dirs()
+        .into_iter()
+        .filter(|d| d.is_dir())
+    {
+        println!("Claude Code ({})", dir.display());
+        let path = dir.join("settings.json");
+        let mut doc = read_json(&path)?;
+        merge_hooks(&mut doc, &hook_entries(&p.bin, "claude"), &json!({}))?;
+        for (event, _, cmd, _) in hook_entries(&p.bin, "claude") {
+            println!("  hook {event}: {cmd}");
+        }
+        write_json(p, &path, &doc)?;
+        mcp_via_cli(
+            p,
+            "claude",
+            &claude_env(&dir),
+            &["mcp", "remove", "--scope", "user", "mnem"],
+            &["mcp", "add", "--scope", "user", "mnem", "--", &p.bin, "mcp"],
+        )?;
     }
-    write_json(p, &path, &doc)?;
-    mcp_via_cli(
-        p,
-        "claude",
-        &["mcp", "remove", "--scope", "user", "mnem"],
-        &["mcp", "add", "--scope", "user", "mnem", "--", &p.bin, "mcp"],
-    )
+    Ok(())
+}
+
+/// `CLAUDE_CONFIG_DIR` for non-default profiles, so `claude mcp` edits the right one.
+fn claude_env(dir: &Path) -> Vec<(String, String)> {
+    if dir == db::home().join(".claude") {
+        vec![]
+    } else {
+        vec![(
+            "CLAUDE_CONFIG_DIR".into(),
+            dir.to_string_lossy().into_owned(),
+        )]
+    }
 }
 
 fn codex(p: &Plan) -> Result<()> {
@@ -206,23 +226,40 @@ fn codex(p: &Plan) -> Result<()> {
     Ok(())
 }
 
-fn mcp_via_cli(p: &Plan, cli: &str, remove: &[&str], add: &[&str]) -> Result<()> {
+fn mcp_via_cli(
+    p: &Plan,
+    cli: &str,
+    env: &[(String, String)],
+    remove: &[&str],
+    add: &[&str],
+) -> Result<()> {
+    let shown = format!(
+        "{}{cli} {}",
+        env.iter()
+            .map(|(k, v)| format!("{k}={v} "))
+            .collect::<String>(),
+        add.join(" ")
+    );
     if p.dry_run {
-        println!("  would run: {cli} {}", add.join(" "));
+        println!("  would run: {shown}");
         return Ok(());
     }
-    let _ = Command::new(cli).args(remove).output();
-    match Command::new(cli).args(add).output() {
-        Ok(o) if o.status.success() => println!("  mcp: {cli} {}", add.join(" ")),
+    let run = |args: &[&str]| {
+        let mut c = Command::new(cli);
+        c.args(args);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c.output()
+    };
+    let _ = run(remove);
+    match run(add) {
+        Ok(o) if o.status.success() => println!("  mcp: {shown}"),
         Ok(o) => println!(
-            "  mcp: `{cli} {}` failed: {}",
-            add.join(" "),
+            "  mcp: `{shown}` failed: {}",
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => println!(
-            "  mcp: {cli} not found ({e}); add manually: {cli} {}",
-            add.join(" ")
-        ),
+        Err(e) => println!("  mcp: {cli} not found ({e}); run manually: {shown}"),
     }
     Ok(())
 }
@@ -369,10 +406,20 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
         pi: true,
         watch: false,
     };
-    for (name, path) in [
-        ("Claude Code", db::home().join(".claude/settings.json")),
-        ("Codex", db::home().join(".codex/hooks.json")),
-    ] {
+    let mut files: Vec<(String, PathBuf)> = ingest::claude_config_dirs()
+        .into_iter()
+        .map(|d| {
+            (
+                format!("Claude Code ({})", d.display()),
+                d.join("settings.json"),
+            )
+        })
+        .collect();
+    files.push(("Codex".into(), db::home().join(".codex/hooks.json")));
+    for (name, path) in files {
+        if !path.exists() {
+            continue;
+        }
         let mut doc = read_json(&path)?;
         let n = strip_ours(&mut doc);
         println!("{name}: {n} mnem hook(s) in {}", path.display());
@@ -380,12 +427,18 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
             write_json(&p, &path, &doc)?;
         }
     }
-    mcp_via_cli(
-        &p,
-        "claude",
-        &["--version"],
-        &["mcp", "remove", "--scope", "user", "mnem"],
-    )?;
+    for dir in ingest::claude_config_dirs()
+        .into_iter()
+        .filter(|d| d.is_dir())
+    {
+        mcp_via_cli(
+            &p,
+            "claude",
+            &claude_env(&dir),
+            &["--version"],
+            &["mcp", "remove", "--scope", "user", "mnem"],
+        )?;
+    }
     let cfg = db::home().join(".codex/config.toml");
     if let Ok(cur) = std::fs::read_to_string(&cfg) {
         let stripped = remove_toml_table(&cur, "mcp_servers.mnem");

@@ -114,6 +114,8 @@ enum Cmd {
         #[arg(long, default_value_t = 37777)]
         port: u16,
     },
+    /// Show the distillation model chain as CLIProxyAPI serves it now, with cooldowns
+    Models,
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -237,6 +239,13 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Models => {
+            let llm = distill::Llm::from_config()?;
+            llm.load_cooldowns(&conn);
+            for (i, (model, note)) in llm.describe().into_iter().enumerate() {
+                println!("{:>2}. {model}{note}", i + 1);
+            }
+        }
         Cmd::Ui { port } => {
             drop(conn);
             ui::serve(path, port)?;
@@ -316,12 +325,13 @@ fn main() -> Result<()> {
             )?;
             if !quiet {
                 println!(
-                    "distill: {} sessions, {} calls, {} observations, {} summaries, {} waiting for more work, {:.1}s",
+                    "distill: {} sessions, {} calls, {} observations, {} summaries, {} waiting for more work, models {:?}, {:.1}s",
                     s.sessions,
                     s.calls,
                     s.observations,
                     s.summaries,
                     s.skipped_small,
+                    s.models,
                     t.elapsed().as_secs_f64()
                 );
             }

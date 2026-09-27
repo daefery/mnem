@@ -10,7 +10,7 @@ use crate::text;
 use anyhow::{Context, Result, bail};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -47,10 +47,97 @@ facts: self-contained statements with concrete names, paths and values; no prono
 narrative: 2-4 sentences a teammate could act on.
 Use 0-5 observations; return an empty list when nothing durable happened. summary may be null."#;
 
+/// Default preference order: cheap, capable models spread across providers, so one
+/// exhausted account does not stop distillation.
+pub const DEFAULT_CHAIN: &[&str] = &[
+    "gpt-5.6-luna",
+    "gemini-3.5-flash-lite",
+    "developer/claude-haiku-4-5-20251001",
+    "product/claude-haiku-4-5-20251001",
+    "gpt-5.6-terra",
+    "gemini-3-flash",
+];
+/// Never used for distillation, even as an automatic fallback.
+const NOT_TEXT: &[&str] = &[
+    "image",
+    "embedding",
+    "tts",
+    "whisper",
+    "review",
+    "realtime",
+    "audio",
+];
+/// Cheaper models first when falling back beyond the configured chain.
+const CHEAP_MARKERS: &[&str] = &["lite", "flash", "haiku", "luna", "mini", "nano", "small"];
+
+/// An OpenAI-compatible endpoint (CLIProxyAPI by default) with an ordered model chain.
+/// A model that runs out of quota, is rate limited or unavailable is put on cooldown
+/// and the next one is tried; cooldowns persist across runs in `meta`.
 pub struct Llm {
     base_url: String,
-    model: String,
     key: String,
+    chain: Vec<String>,
+    auto_fallback: bool,
+    cooldowns: std::cell::RefCell<HashMap<String, i64>>,
+}
+
+/// How a failed call affects the model that made it.
+pub enum Failure {
+    /// Try the next model; cool this one down for the given milliseconds (0 = none).
+    NextModel(i64, String),
+    /// The endpoint itself is unusable (down, bad key); stop this run.
+    Endpoint(String),
+}
+
+/// Map an HTTP status to what the chain should do next.
+pub fn classify_status(code: u16) -> Failure {
+    const MIN: i64 = 60_000;
+    match code {
+        401 => Failure::Endpoint("HTTP 401 (API key rejected)".into()),
+        // Quota exhausted or rate limited: give this model a long rest.
+        402 | 429 => Failure::NextModel(30 * MIN, format!("HTTP {code} (quota/rate limit)")),
+        // Model missing, forbidden or disabled for this account.
+        403 | 404 => Failure::NextModel(6 * 60 * MIN, format!("HTTP {code} (model unavailable)")),
+        // Upstream trouble: short rest.
+        _ => Failure::NextModel(5 * MIN, format!("HTTP {code}")),
+    }
+}
+
+/// Whole-token match, so "gemini" does not count as "mini".
+fn looks_cheap(model: &str) -> bool {
+    model
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|t| CHEAP_MARKERS.contains(&t))
+}
+
+/// Order candidates: the chain (limited to `available` when known), then, with
+/// `auto`, every other text model with cheap-looking ones first. Cooling models skipped.
+pub fn order_candidates(
+    chain: &[String],
+    available: Option<Vec<String>>,
+    auto: bool,
+    cooling: &HashMap<String, i64>,
+    now: i64,
+) -> Vec<String> {
+    let ok = |m: &String| cooling.get(m).is_none_or(|until| *until <= now);
+    let mut out: Vec<String> = chain
+        .iter()
+        .filter(|m| available.as_ref().is_none_or(|a| a.contains(m)))
+        .filter(|m| ok(m))
+        .cloned()
+        .collect();
+    if auto && let Some(a) = available {
+        let mut rest: Vec<String> = a
+            .into_iter()
+            .filter(|m| !chain.contains(m))
+            .filter(|m| !NOT_TEXT.iter().any(|x| m.to_lowercase().contains(x)))
+            .filter(|m| ok(m))
+            .collect();
+        rest.sort_by_key(|m| !looks_cheap(m));
+        out.extend(rest);
+    }
+    out
 }
 
 impl Llm {
@@ -70,41 +157,218 @@ impl Llm {
         } else {
             bail!("configure distill.api_key_env or distill.api_key_json in ~/.mnem/config.json")
         };
+        let mut chain: Vec<String> = c.model.iter().cloned().collect();
+        match &c.models {
+            Some(m) => chain.extend(m.iter().cloned()),
+            None if chain.is_empty() => chain.extend(DEFAULT_CHAIN.iter().map(|s| s.to_string())),
+            None => {}
+        }
+        chain.dedup();
         Ok(Llm {
             base_url: c
                 .base_url
                 .clone()
                 .unwrap_or_else(|| "http://127.0.0.1:8317/v1".into()),
-            model: c.model.clone().unwrap_or_else(|| "gpt-5.6-luna".into()),
             key,
+            chain,
+            auto_fallback: c.auto_fallback.unwrap_or(true),
+            cooldowns: Default::default(),
         })
     }
 
-    fn complete(&self, user: &str) -> Result<Value> {
-        let agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(180)))
+    fn agent(timeout: u64) -> ureq::Agent {
+        ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(timeout)))
             .build()
-            .new_agent();
+            .new_agent()
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}/{path}", self.base_url.trim_end_matches('/'))
+    }
+
+    /// Models the endpoint currently serves; None if it cannot say.
+    fn available(&self) -> Option<Vec<String>> {
+        let mut r = Self::agent(20)
+            .get(&self.url("models"))
+            .header("Authorization", &format!("Bearer {}", self.key))
+            .call()
+            .ok()?;
+        let v: Value = r.body_mut().read_json().ok()?;
+        Some(
+            v["data"]
+                .as_array()?
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_string))
+                .collect(),
+        )
+    }
+
+    /// Every model in order with why it is or is not used right now.
+    pub fn describe(&self) -> Vec<(String, String)> {
+        let usable = self.candidates();
+        let now = db::now_ms();
+        let cooling = self.cooldowns.borrow();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for m in &self.chain {
+            let note = match cooling.get(m).filter(|u| **u > now) {
+                Some(u) => format!("  (cooling down {} more)", crate::context::ago(*u - now)),
+                None if usable.contains(m) => "  (chain)".into(),
+                None => "  (not served by endpoint)".into(),
+            };
+            out.push((m.clone(), note));
+        }
+        for m in usable.iter().filter(|m| !self.chain.contains(m)) {
+            out.push((m.clone(), "  (auto fallback)".into()));
+        }
+        out
+    }
+
+    pub fn candidates(&self) -> Vec<String> {
+        order_candidates(
+            &self.chain,
+            self.available(),
+            self.auto_fallback,
+            &self.cooldowns.borrow(),
+            db::now_ms(),
+        )
+    }
+
+    /// Run the prompt on the first model that answers with valid JSON.
+    /// Returns the parsed JSON and the model that produced it.
+    fn complete(&self, user: &str) -> Result<(Value, String)> {
+        let mut tried = Vec::new();
+        for model in self.candidates() {
+            match self.call(&model, user) {
+                Ok(v) => return Ok((v, model)),
+                Err(Failure::NextModel(cool_ms, why)) => {
+                    if cool_ms > 0 {
+                        self.cooldowns
+                            .borrow_mut()
+                            .insert(model.clone(), db::now_ms() + cool_ms);
+                    }
+                    tried.push(format!("{model}: {why}"));
+                }
+                Err(Failure::Endpoint(why)) => bail!("LLM endpoint unusable: {why}"),
+            }
+        }
+        if tried.is_empty() {
+            bail!("no usable model (all configured models unavailable or cooling down)");
+        }
+        bail!("every model failed: {}", tried.join("; "))
+    }
+
+    fn call(&self, model: &str, user: &str) -> std::result::Result<Value, Failure> {
         let body = json!({
-            "model": self.model,
+            "model": model,
             "messages": [{ "role": "system", "content": SYSTEM }, { "role": "user", "content": user }],
             "response_format": { "type": "json_object" },
         });
-        let mut resp = agent
-            .post(&format!(
-                "{}/chat/completions",
-                self.base_url.trim_end_matches('/')
-            ))
+        let resp = Self::agent(180)
+            .post(&self.url("chat/completions"))
             .header("Authorization", &format!("Bearer {}", self.key))
-            .send_json(&body)
-            .context("LLM request failed")?;
-        let v: Value = resp.body_mut().read_json()?;
+            .send_json(&body);
+        let mut resp = match resp {
+            Ok(r) => r,
+            Err(ureq::Error::StatusCode(code)) => return Err(classify_status(code)),
+            Err(ureq::Error::Timeout(_)) => {
+                return Err(Failure::NextModel(5 * 60_000, "timeout".into()));
+            }
+            Err(e) => return Err(Failure::Endpoint(format!("{e}"))),
+        };
+        let v: Value = resp
+            .body_mut()
+            .read_json()
+            .map_err(|e| Failure::NextModel(0, format!("bad response: {e}")))?;
         let content = v["choices"][0]["message"]["content"]
             .as_str()
-            .context("no content in LLM response")?;
+            .unwrap_or_default();
         let start = content.find('{').unwrap_or(0);
         let end = content.rfind('}').map(|i| i + 1).unwrap_or(content.len());
-        serde_json::from_str(&content[start..end]).context("LLM returned invalid JSON")
+        serde_json::from_str(content.get(start..end).unwrap_or_default())
+            .map_err(|_| Failure::NextModel(0, "no valid JSON in reply".into()))
+    }
+
+    pub fn load_cooldowns(&self, conn: &Connection) {
+        let saved: Option<String> = conn
+            .query_row(
+                "SELECT v FROM meta WHERE k = 'distill.cooldowns'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        if let Some(m) = saved.and_then(|s| serde_json::from_str::<HashMap<String, i64>>(&s).ok()) {
+            let now = db::now_ms();
+            self.cooldowns
+                .borrow_mut()
+                .extend(m.into_iter().filter(|(_, until)| *until > now));
+        }
+    }
+
+    fn save_cooldowns(&self, conn: &Connection) -> Result<()> {
+        let now = db::now_ms();
+        let live: HashMap<String, i64> = self
+            .cooldowns
+            .borrow()
+            .iter()
+            .filter(|(_, until)| **until > now)
+            .map(|(m, u)| (m.clone(), *u))
+            .collect();
+        conn.execute(
+            "INSERT INTO meta(k, v) VALUES ('distill.cooldowns', ?1)
+             ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            params![serde_json::to_string(&live)?],
+        )?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    #[test]
+    fn chain_falls_back_to_available_cheap_models() {
+        let chain: Vec<String> = ["a-luna", "b-gone", "c-hot"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let available = Some(
+            [
+                "a-luna",
+                "c-hot",
+                "x-opus",
+                "y-flash-lite",
+                "gpt-image-2",
+                "codex-auto-review",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        );
+        let mut cooling = HashMap::new();
+        cooling.insert("c-hot".to_string(), 2_000);
+        let order = order_candidates(&chain, available, true, &cooling, 1_000);
+        // b-gone is not served; c-hot is cooling; image/review models never used;
+        // cheap-looking models come before expensive ones.
+        assert_eq!(order, ["a-luna", "y-flash-lite", "x-opus"]);
+        assert!(!looks_cheap("gemini-pro-agent") && looks_cheap("gemini-3.1-flash-lite"));
+        let order = order_candidates(&chain, None, false, &cooling, 3_000);
+        assert_eq!(
+            order,
+            ["a-luna", "b-gone", "c-hot"],
+            "unknown availability: trust the chain"
+        );
+    }
+
+    #[test]
+    fn quota_errors_cool_down_and_move_on() {
+        assert!(matches!(classify_status(429), Failure::NextModel(ms, _) if ms >= 30 * 60_000));
+        assert!(matches!(classify_status(404), Failure::NextModel(ms, _) if ms > 60 * 60_000));
+        assert!(matches!(classify_status(401), Failure::Endpoint(_)));
+        assert!(matches!(classify_status(503), Failure::NextModel(_, _)));
     }
 }
 
@@ -246,6 +510,8 @@ pub struct Stats {
     pub summaries: usize,
     pub skipped_small: usize,
     pub errors: Vec<String>,
+    /// Models that produced output this run.
+    pub models: std::collections::BTreeSet<String>,
 }
 
 pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
@@ -282,6 +548,9 @@ pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
     } else {
         Some(Llm::from_config()?)
     };
+    if let Some(l) = &llm {
+        l.load_cooldowns(conn);
+    }
     let mut st = Stats::default();
     for (sid, project, agent, title, through) in sessions {
         st.sessions += 1;
@@ -318,8 +587,9 @@ pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
             };
             st.calls += 1;
             match llm.complete(&user) {
-                Ok(v) => {
-                    let (n_obs, n_sum) = store(conn, &sid, &project, &llm.model, &c, &v)?;
+                Ok((v, model)) => {
+                    st.models.insert(model.clone());
+                    let (n_obs, n_sum) = store(conn, &sid, &project, &model, &c, &v)?;
                     st.observations += n_obs;
                     st.summaries += n_sum;
                 }
@@ -331,6 +601,9 @@ pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
                 }
             }
         }
+    }
+    if let Some(l) = &llm {
+        l.save_cooldowns(conn)?;
     }
     Ok(st)
 }

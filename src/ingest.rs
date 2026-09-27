@@ -51,13 +51,40 @@ pub struct Batch {
     pub bad: Vec<(u64, String, String)>,
 }
 
+/// Every Claude Code config dir: `~/.claude` plus extra profiles such as
+/// `~/.claude-prod` (used via `CLAUDE_CONFIG_DIR`), recognised by a `projects/` dir.
+/// `MNEM_CLAUDE_DIRS` (colon-separated) adds more.
+pub fn claude_config_dirs() -> Vec<PathBuf> {
+    let h = db::home();
+    let mut dirs = vec![h.join(".claude")];
+    if let Ok(rd) = std::fs::read_dir(&h) {
+        let mut extra: Vec<PathBuf> = rd
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                name.starts_with(".claude-") && name != ".claude-mem" && p.join("projects").is_dir()
+            })
+            .collect();
+        extra.sort();
+        dirs.extend(extra);
+    }
+    if let Ok(v) = std::env::var("MNEM_CLAUDE_DIRS") {
+        dirs.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
+    }
+    dirs.dedup();
+    dirs
+}
+
 pub fn roots() -> Vec<(PathBuf, Agent)> {
     let h = db::home();
-    vec![
-        (h.join(".claude/projects"), Agent::Claude),
-        (h.join(".codex/sessions"), Agent::Codex),
-        (h.join(".pi/agent/sessions"), Agent::Pi),
-    ]
+    let mut r: Vec<(PathBuf, Agent)> = claude_config_dirs()
+        .into_iter()
+        .map(|d| (d.join("projects"), Agent::Claude))
+        .collect();
+    r.push((h.join(".codex/sessions"), Agent::Codex));
+    r.push((h.join(".pi/agent/sessions"), Agent::Pi));
+    r
 }
 
 pub fn discover() -> Vec<Source> {

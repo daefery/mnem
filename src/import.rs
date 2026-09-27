@@ -224,8 +224,19 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
                 "request": request, "investigated": investigated, "learned": learned,
                 "completed": completed, "next_steps": next, "notes": notes,
             });
+            // The reserved id may already belong to a memory mnem distilled after an
+            // earlier import; then take a fresh id. `sum:<id>` still identifies it.
+            let wanted = SUMMARY_ID_BASE + id;
+            let taken = tx
+                .query_row(
+                    "SELECT 1 FROM memories WHERE id = ?1 AND NOT (origin = 'claude-mem' AND origin_id = ?2)",
+                    params![wanted, format!("sum:{id}")],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
             stats.summaries += ins.execute(params![
-                SUMMARY_ID_BASE + id,
+                (!taken).then_some(wanted),
                 by_memory.get(&memory).cloned(),
                 proj(&project),
                 "summary",

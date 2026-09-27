@@ -429,3 +429,48 @@ fn final_answer_is_last_text_of_the_turn() {
         Some("Fixed: token expiry used < instead of <=.")
     );
 }
+
+#[test]
+fn import_summary_gets_fresh_id_when_reserved_id_is_taken() {
+    let d = tmpdir("import-ids");
+    // Minimal claude-mem database with one session and one summary (#7).
+    let src = d.join("cm.db");
+    let cm = Connection::open(&src).unwrap();
+    cm.execute_batch(
+        "CREATE TABLE sdk_sessions(memory_session_id TEXT, content_session_id TEXT, platform_source TEXT, project TEXT,
+           started_at_epoch INTEGER, completed_at_epoch INTEGER, custom_title TEXT);
+         CREATE TABLE observations(id INTEGER, memory_session_id TEXT, project TEXT, type TEXT, title TEXT, subtitle TEXT,
+           narrative TEXT, facts TEXT, concepts TEXT, files_read TEXT, files_modified TEXT, generated_by_model TEXT, created_at_epoch INTEGER);
+         CREATE TABLE session_summaries(id INTEGER, memory_session_id TEXT, project TEXT, request TEXT, investigated TEXT, learned TEXT,
+           completed TEXT, next_steps TEXT, notes TEXT, files_read TEXT, files_edited TEXT, created_at_epoch INTEGER);
+         CREATE TABLE user_prompts(id INTEGER, content_session_id TEXT, prompt_number INTEGER, prompt_text TEXT, created_at_epoch INTEGER);
+         INSERT INTO sdk_sessions VALUES ('m1', 'c1', 'claude', 'p', 1, 2, NULL);
+         INSERT INTO session_summaries VALUES (7, 'm1', 'p', 'Ship it', 'logs', '', '', '', '', NULL, NULL, 5);",
+    )
+    .unwrap();
+    drop(cm);
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    // A distilled mnem memory already occupies 1,000,007.
+    conn.execute(
+        "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1000007, 'observation', 'mine', 'mnem', 'x')",
+        [],
+    )
+    .unwrap();
+    unsafe { std::env::set_var("MNEM_HOME", &d) };
+    let s = mnem::import::claude_mem(&mut conn, &src).unwrap();
+    assert_eq!(s.summaries, 1);
+    let title: String = conn
+        .query_row(
+            "SELECT title FROM memories WHERE origin_id = 'sum:7'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Ship it");
+    let mine: String = conn
+        .query_row("SELECT title FROM memories WHERE id = 1000007", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(mine, "mine");
+}

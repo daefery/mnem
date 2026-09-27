@@ -27,8 +27,13 @@ pub struct Config {
 pub struct DistillConfig {
     /// Default: http://127.0.0.1:8317/v1 (CLIProxyAPI)
     pub base_url: Option<String>,
-    /// Default: gpt-5.6-luna
+    /// A single preferred model, tried first (kept for older configs).
     pub model: Option<String>,
+    /// Ordered model chain. Default: luna, gemini flash-lite, claude haiku, terra, gemini flash.
+    pub models: Option<Vec<String>>,
+    /// When every chained model is exhausted or unavailable, try any other text model
+    /// the endpoint lists, cheapest-looking first. Default true.
+    pub auto_fallback: Option<bool>,
     /// Read the API key from this environment variable...
     pub api_key_env: Option<String>,
     /// ...or from a field of a JSON file (e.g. "~/.pi/agent/cliproxyapi.json").

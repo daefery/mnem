@@ -21,6 +21,7 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 | `mnem search <query>` | Full-text search over captured events |
 | `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
 | `mnem watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
+| `mnem distill` / `mnem models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
 | `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `session_start_context` |
 | `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 
@@ -37,10 +38,24 @@ something since, a short "meanwhile" update.
 `~/.mnem/config.json` (optional):
 
 ```json
-{ "harness_prompts": ["^: Firstmate instruction waiting"] }
+{
+  "harness_prompts": ["^: Firstmate instruction waiting"],
+  "distill": {
+    "base_url": "http://127.0.0.1:8317/v1",
+    "api_key_json": "~/.pi/agent/cliproxyapi.json",
+    "models": ["gpt-5.6-luna", "gemini-3.5-flash-lite", "developer/claude-haiku-4-5-20251001"],
+    "auto_fallback": true
+  }
+}
 ```
 
-Prompts matching these patterns are labelled as tooling-injected, not human asks.
+- `harness_prompts`: prompts matching these patterns are labelled as tooling-injected,
+  not human asks.
+- `distill`: any OpenAI-compatible endpoint (CLIProxyAPI by default). Models are tried
+  in order; a model that hits quota or rate limits (HTTP 402/429) cools down for 30 min,
+  an unavailable one (403/404) for 6 h, a failing one (5xx, timeout) for 5 min. With
+  `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
+  first. `mnem models` shows the live order and cooldowns.
 
 ## Guarantees and limits
 
