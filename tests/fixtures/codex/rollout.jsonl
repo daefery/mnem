@@ -1,0 +1,9 @@
+{"timestamp":"2026-09-27T10:00:00.000Z","ordinal":0,"type":"session_meta","payload":{"id":"s-codex","cwd":"/nonexistent/svc","git":{"repository_url":"git@github.com:Acme/Svc.git"}}}
+{"timestamp":"2026-09-27T10:00:00.100Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started","turn_id":"T1"}}
+{"timestamp":"2026-09-27T10:00:00.200Z","ordinal":2,"type":"event_msg","payload":{"type":"user_message","message":"add retries"}}
+{"timestamp":"2026-09-27T10:00:00.300Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"UserMessage","id":"m1","content":[{"type":"text","text":"add retries"}]}}}
+{"timestamp":"2026-09-27T10:00:01.000Z","ordinal":4,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"add retries"}]}}
+{"timestamp":"2026-09-27T10:00:02.000Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"CommandExecution","id":"c1","command":["/bin/bash","-lc","make test"],"exit_code":2,"aggregated_output":"FAIL retry_test"}}}
+{"timestamp":"2026-09-27T10:00:03.000Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"FileChange","id":"f1","changes":{"/nonexistent/svc/retry.go":{}},"status":"completed"}}}
+{"timestamp":"2026-09-27T10:00:04.000Z","ordinal":7,"type":"event_msg","payload":{"type":"item_completed","turn_id":"T1","item":{"type":"AgentMessage","id":"m2","content":[{"type":"Text","text":"Retries added."}],"phase":"final_answer"}}}
+{"timestamp":"2026-09-27T10:00:04.100Z","ordinal":8,"type":"event_msg","payload":{"type":"task_complete","turn_id":"T1","last_agent_message":"Retries added."}}
