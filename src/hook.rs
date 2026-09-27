@@ -354,7 +354,7 @@ pub fn cross_agent_delta(
         return Ok(None);
     };
     let mut s = conn.prepare(
-        "SELECT s.id, s.agent, e.kind, e.path, e.text, e.label, e.id
+        "SELECT s.id, s.agent, e.kind, e.path, coalesce(e.text, ''), e.label, e.id
          FROM events e JOIN sessions s ON s.id = e.session_id
          LEFT JOIN delta_seen d ON d.viewer = ?3 AND d.other = s.id
          WHERE e.id > max(?1, coalesce(d.through, 0)) AND s.project = ?2 AND s.id != ?3
@@ -444,22 +444,24 @@ pub fn cross_agent_delta(
         if let Some(a) = &o.answer {
             g.push_str(&format!("  = {}\n", context::excerpt(&squash(a), 280)));
         }
+        // Every field is capped so a group always fits the budget whole: a group is
+        // either shown completely or left pending, never cut and then marked delivered.
+        if let Some(e) = &o.error {
+            g.push_str(&format!("  last error: {}\n", crate::text::head(e, 140)));
+        }
         if !o.files.is_empty() {
-            let names: Vec<&str> = o
+            let names: Vec<String> = o
                 .files
                 .iter()
                 .take(6)
-                .map(|p| p.rsplit('/').next().unwrap_or(p))
+                .map(|p| crate::text::head(p.rsplit('/').next().unwrap_or(p), 40))
                 .collect();
             g.push_str(&format!("  edited: {}\n", names.join(", ")));
-        }
-        if let Some(e) = &o.error {
-            g.push_str(&format!("  last error: {}\n", crate::text::head(e, 140)));
         }
         if !shown.is_empty() && w.len() + g.len() > MAX_CHARS {
             break;
         }
-        w.push_str(&crate::text::head(&g, MAX_CHARS));
+        w.push_str(&g);
         shown.push(o);
     }
     let mut mark = conn.prepare_cached(

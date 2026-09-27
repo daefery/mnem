@@ -112,3 +112,31 @@ fn imported_history_and_harness_prompts_are_not_news() {
             .is_none()
     );
 }
+
+#[test]
+fn oversized_group_is_shown_whole() {
+    let c = db("oversized");
+    c.execute(
+        "INSERT INTO injections(session_id, watermark) VALUES ('claude:me', 0)",
+        [],
+    )
+    .unwrap();
+    seed(&c, "pi:big", "prompt", &"p".repeat(3000));
+    seed(&c, "pi:big", "assistant", &"a".repeat(3000));
+    for i in 0..6 {
+        c.execute(
+            "INSERT INTO events(session_id, record_key, kind, path, turn, ts, source_path)
+             VALUES ('pi:big', ?1, 'file_edit', ?2, 1, ?3, '/live.jsonl')",
+            params![
+                format!("f{i}"),
+                format!("/x/{}{i}.rs", "n".repeat(240)),
+                mnem::db::now_ms()
+            ],
+        )
+        .unwrap();
+    }
+    seed(&c, "pi:big", "error", "CRITICAL-ERROR-OMITTED");
+    let d = cross_agent_delta(&c, "claude:me", "proj").unwrap().unwrap();
+    assert!(d.contains("CRITICAL-ERROR-OMITTED"), "{d}");
+    assert!(d.len() <= 1600, "{}", d.len());
+}
