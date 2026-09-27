@@ -35,7 +35,11 @@ pub fn run(conn: &Connection, query: &str, project: Option<&str>, limit: usize) 
     for row in rows {
         let (ts, agent, project, kind, path, snip) = row?;
         let snip = snip.replace('\n', " ");
-        let loc = if path.is_empty() { String::new() } else { format!(" {path}") };
+        let loc = if path.is_empty() {
+            String::new()
+        } else {
+            format!(" {path}")
+        };
         println!("{ts} {agent:<6} {project} {kind}{loc}\n    {snip}");
     }
     Ok(())

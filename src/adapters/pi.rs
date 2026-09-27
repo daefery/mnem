@@ -16,7 +16,11 @@ pub fn line(em: &mut Emit, v: &Value) {
         }
         Some("compaction") => {
             if let Some(s) = str_of(v, "summary") {
-                em.push(format!("{id}:compact"), Kind::Compaction, text::clean(s, 6000));
+                em.push(
+                    format!("{id}:compact"),
+                    Kind::Compaction,
+                    text::clean(s, 6000),
+                );
             }
         }
         Some("message") => message(em, &id, v.get("message").unwrap_or(&Value::Null)),
@@ -32,7 +36,9 @@ fn message(em: &mut Emit, id: &str, m: &Value) {
             let Value::Array(parts) = content else { return };
             for (i, p) in parts.iter().enumerate() {
                 match str_of(p, "type") {
-                    Some("text") => em.assistant(format!("{id}:{i}"), str_of(p, "text").unwrap_or_default()),
+                    Some("text") => {
+                        em.assistant(format!("{id}:{i}"), str_of(p, "text").unwrap_or_default())
+                    }
                     Some("toolCall") => {
                         let name = str_of(p, "name").unwrap_or("?");
                         let args = p.get("arguments").unwrap_or(&Value::Null);
@@ -53,13 +59,17 @@ fn message(em: &mut Emit, id: &str, m: &Value) {
         Some("bashExecution") => {
             let cmd = str_of(m, "command").unwrap_or_default();
             let e = em.push(format!("{id}:bash"), Kind::Command, text::clean(cmd, 600));
-            e.tool = Some("bash".into());
+            e.tool = Some("shell".into());
+            e.tool_raw = Some("bash".into());
             let code = m.get("exitCode").and_then(Value::as_i64).unwrap_or(0);
             if code != 0 {
                 let out = str_of(m, "output").unwrap_or_default();
-                let e = em.push(format!("{id}:err"), Kind::Error, text::redact(&text::tail(out, 12, 800)));
-                e.is_error = true;
-                e.tool = Some("bash".into());
+                em.error(
+                    format!("{id}:err"),
+                    Some("bash"),
+                    &format!("exit {code}"),
+                    out,
+                );
             }
         }
         _ => {}

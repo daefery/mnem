@@ -12,7 +12,13 @@ pub fn run(conn: &Connection) -> Result<bool> {
     let mut cursors: HashMap<String, (i64, bool)> = HashMap::new();
     {
         let mut s = conn.prepare("SELECT path, byte_offset, excluded FROM sources")?;
-        for r in s.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, bool>(2)?)))? {
+        for r in s.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, bool>(2)?,
+            ))
+        })? {
             let (p, o, x) = r?;
             cursors.insert(p, (o, x));
         }
@@ -21,7 +27,8 @@ pub fn run(conn: &Connection) -> Result<bool> {
     println!("transcripts");
     let mut healthy = true;
     for agent in ["claude", "codex", "pi"] {
-        let (mut files, mut excluded, mut untracked, mut lagging, mut disk, mut lag) = (0, 0, 0, 0, 0u64, 0u64);
+        let (mut files, mut excluded, mut untracked, mut lagging, mut disk, mut lag) =
+            (0, 0, 0, 0, 0u64, 0u64);
         for s in present.iter().filter(|s| s.agent.as_str() == agent) {
             files += 1;
             let size = s.path.metadata().map(|m| m.len()).unwrap_or(0);
@@ -29,7 +36,9 @@ pub fn run(conn: &Connection) -> Result<bool> {
             match cursors.get(s.path.to_string_lossy().as_ref()) {
                 Some((_, true)) => excluded += 1,
                 Some((off, false)) => {
-                    let behind = size.saturating_sub(*off as u64);
+                    // A file smaller than the cursor was rewritten; all of it must be re-read.
+                    let off = *off as u64;
+                    let behind = if size < off { size } else { size - off };
                     if behind > 0 {
                         lagging += 1;
                         lag += behind;
@@ -50,9 +59,23 @@ pub fn run(conn: &Connection) -> Result<bool> {
             lag as f64 / 1e3
         );
     }
-    let missing: i64 = conn.query_row("SELECT count(*) FROM sources WHERE missing_since IS NOT NULL", [], |r| r.get(0))?;
+    let (missing, lost_files, lost_bytes): (i64, i64, i64) = conn.query_row(
+        "SELECT count(*),
+                coalesce(sum(size_seen > byte_offset), 0),
+                coalesce(sum(max(size_seen - byte_offset, 0)), 0)
+         FROM sources WHERE missing_since IS NOT NULL AND excluded = 0",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
     let quarantined: i64 = conn.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))?;
-    println!("  deleted by agent after capture: {missing} | quarantined lines: {quarantined}");
+    println!("  deleted by agent: {missing} files | quarantined lines: {quarantined}");
+    if lost_files > 0 {
+        // Permanent: the agent deleted these before mnem read their tail.
+        println!(
+            "  LOST: {lost_files} files deleted with {:.1} KB never captured",
+            lost_bytes as f64 / 1e3
+        );
+    }
 
     println!("sessions");
     let mut s = conn.prepare(
@@ -62,22 +85,44 @@ pub fn run(conn: &Connection) -> Result<bool> {
          FROM sessions s GROUP BY s.agent ORDER BY s.agent",
     )?;
     for r in s.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?, r.get::<_, Option<i64>>(3)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, Option<i64>>(3)?,
+        ))
     })? {
         let (agent, n, pathonly, last) = r?;
-        let ago = last.map(|t| fmt_ago(db::now_ms() - t)).unwrap_or_else(|| "never".into());
-        println!("  {agent:<6} {n:>5} sessions | {pathonly} without git identity | last event {ago} ago");
+        let ago = last
+            .map(|t| fmt_ago(db::now_ms() - t))
+            .unwrap_or_else(|| "never".into());
+        println!(
+            "  {agent:<6} {n:>5} sessions | {pathonly} without git identity | last event {ago} ago"
+        );
     }
 
     println!("events");
     let mut s = conn.prepare("SELECT kind, count(*) FROM events GROUP BY kind ORDER BY 2 DESC")?;
     let kinds: Vec<String> = s
-        .query_map([], |r| Ok(format!("{}={}", r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+        .query_map([], |r| {
+            Ok(format!(
+                "{}={}",
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?
+            ))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     println!("  {}", kinds.join(" "));
 
     claude_mem_comparison(conn)?;
-    println!("status: {}", if healthy { "OK, fully caught up" } else { "BEHIND, run `mnem backfill`" });
+    println!(
+        "status: {}",
+        if healthy {
+            "OK, fully caught up"
+        } else {
+            "BEHIND, run `mnem backfill`"
+        }
+    );
     Ok(healthy)
 }
 
@@ -87,7 +132,10 @@ fn claude_mem_comparison(conn: &Connection) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
-    let cm = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let cm = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
     let cutoff = db::now_ms() - 30 * 86_400_000;
     let mut s = cm.prepare(
         "SELECT s.platform_source, s.content_session_id,
@@ -99,23 +147,30 @@ fn claude_mem_comparison(conn: &Connection) -> Result<()> {
         .collect::<rusqlite::Result<_>>()?;
 
     let mut have: HashSet<String> = HashSet::new();
-    let mut q = conn.prepare(
-        "SELECT DISTINCT session_id FROM events WHERE kind IN ('prompt', 'assistant')",
-    )?;
+    let mut q = conn
+        .prepare("SELECT DISTINCT session_id FROM events WHERE kind IN ('prompt', 'assistant')")?;
     for r in q.query_map([], |r| r.get::<_, String>(0))? {
         have.insert(r?);
     }
     println!("claude-mem comparison (last 30 days)");
     for agent in ["claude", "codex", "pi"] {
-        let empty: Vec<&(String, String, bool)> =
-            rows.iter().filter(|(p, _, has)| p == agent && !has).collect();
+        let empty: Vec<&(String, String, bool)> = rows
+            .iter()
+            .filter(|(p, _, has)| p == agent && !has)
+            .collect();
         let total = rows.iter().filter(|(p, _, _)| p == agent).count();
         if agent == "pi" {
             // claude-mem-pi mints its own session ids; they do not match pi's transcripts.
-            println!("  pi     {total:>4} sessions, {} with 0 observations (ids not mappable)", empty.len());
+            println!(
+                "  pi     {total:>4} sessions, {} with 0 observations (ids not mappable)",
+                empty.len()
+            );
             continue;
         }
-        let recovered = empty.iter().filter(|(_, id, _)| have.contains(&format!("{agent}:{id}"))).count();
+        let recovered = empty
+            .iter()
+            .filter(|(_, id, _)| have.contains(&format!("{agent}:{id}")))
+            .count();
         println!(
             "  {agent:<6} {total:>4} sessions, {} with 0 observations -> {recovered} recovered by mnem, {} transcript gone",
             empty.len(),

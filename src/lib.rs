@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod db;
 pub mod doctor;
+pub mod import;
 pub mod ingest;
 pub mod model;
 pub mod project;

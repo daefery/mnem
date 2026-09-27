@@ -60,24 +60,40 @@ fn git_common_dir(dotgit: &Path) -> Option<PathBuf> {
     }
     let s = std::fs::read_to_string(dotgit).ok()?;
     let gitdir = PathBuf::from(s.strip_prefix("gitdir:")?.trim());
-    let gitdir = if gitdir.is_absolute() { gitdir } else { dotgit.parent()?.join(gitdir) };
+    let gitdir = if gitdir.is_absolute() {
+        gitdir
+    } else {
+        dotgit.parent()?.join(gitdir)
+    };
     match std::fs::read_to_string(gitdir.join("commondir")) {
         Ok(c) => Some(gitdir.join(c.trim())),
         Err(_) => Some(gitdir),
     }
 }
 
+/// Remote URL from a git config: `origin` when present, else the first remote.
 fn origin_url(config: &Path) -> Option<String> {
     let s = std::fs::read_to_string(config).ok()?;
-    let mut in_origin = false;
+    let mut remote: Option<&str> = None;
+    let (mut origin, mut first) = (None, None);
     for line in s.lines().map(str::trim) {
         if line.starts_with('[') {
-            in_origin = line == r#"[remote "origin"]"#;
-        } else if in_origin && let Some(v) = line.strip_prefix("url") {
-            return Some(v.trim_start().strip_prefix('=')?.trim().to_string());
+            remote = line
+                .strip_prefix("[remote \"")
+                .and_then(|r| r.strip_suffix("\"]"));
+        } else if let Some(name) = remote
+            && let Some(v) = line.strip_prefix("url")
+            && let Some(url) = v.trim_start().strip_prefix('=')
+        {
+            let url = url.trim().to_string();
+            if name == "origin" {
+                origin = Some(url);
+            } else if first.is_none() {
+                first = Some(url);
+            }
         }
     }
-    None
+    origin.or(first)
 }
 
 /// git@github.com:a/b.git, https://user@github.com/a/b.git -> github.com/a/b
@@ -94,7 +110,9 @@ pub fn normalize_remote(url: &str) -> String {
     let u = u.trim_end_matches('/').trim_end_matches(".git");
     match u.split_once(':') {
         // scp-like syntax; leave host:port/path alone.
-        Some((host, rest)) if !rest.starts_with(|c: char| c.is_ascii_digit()) => format!("{host}/{rest}"),
+        Some((host, rest)) if !rest.starts_with(|c: char| c.is_ascii_digit()) => {
+            format!("{host}/{rest}")
+        }
         _ => u.to_string(),
     }
     .to_lowercase()
@@ -106,9 +124,18 @@ mod tests {
 
     #[test]
     fn normalizes_remotes() {
-        assert_eq!(normalize_remote("git@github.com:Org/Repo.git"), "github.com/org/repo");
-        assert_eq!(normalize_remote("https://tok@gitlab.x.org/a/b.git"), "gitlab.x.org/a/b");
+        assert_eq!(
+            normalize_remote("git@github.com:Org/Repo.git"),
+            "github.com/org/repo"
+        );
+        assert_eq!(
+            normalize_remote("https://tok@gitlab.x.org/a/b.git"),
+            "gitlab.x.org/a/b"
+        );
         assert_eq!(normalize_remote("https://github.com/a/b"), "github.com/a/b");
-        assert_eq!(normalize_remote("ssh://git@host:2222/a/b.git"), "host:2222/a/b");
+        assert_eq!(
+            normalize_remote("ssh://git@host:2222/a/b.git"),
+            "host:2222/a/b"
+        );
     }
 }

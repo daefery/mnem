@@ -13,17 +13,25 @@ fn tmpdir(name: &str) -> PathBuf {
 }
 
 fn fixture(agent: &str, file: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(agent).join(file)
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(agent)
+        .join(file)
 }
 
-fn ingest(conn: &mut Connection, path: &Path, agent: Agent) -> ingest::CommitStats {
-    let src = Source { path: path.to_path_buf(), agent };
+fn ingest(conn: &mut Connection, path: &Path, agent: Agent) -> ingest::Outcome {
+    let src = Source {
+        path: path.to_path_buf(),
+        agent,
+    };
     ingest::ingest_file(conn, &src, &mut Resolver::default()).unwrap()
 }
 
 fn rows(conn: &Connection) -> Vec<(String, String, String, bool)> {
     let mut s = conn
-        .prepare("SELECT kind, coalesce(path, ''), coalesce(text, ''), is_error FROM events ORDER BY id")
+        .prepare(
+            "SELECT kind, coalesce(path, ''), coalesce(text, ''), is_error FROM events ORDER BY id",
+        )
         .unwrap();
     s.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
         .unwrap()
@@ -39,21 +47,44 @@ fn kinds(conn: &Connection) -> Vec<String> {
 fn claude_fixture() {
     let d = tmpdir("claude");
     let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
-    ingest(&mut conn, &fixture("claude", "session.jsonl"), Agent::Claude);
+    ingest(
+        &mut conn,
+        &fixture("claude", "session.jsonl"),
+        Agent::Claude,
+    );
     assert_eq!(
         kinds(&conn),
-        ["title", "prompt", "file_read", "command", "error", "file_edit", "assistant", "compaction", "recap"]
+        [
+            "title",
+            "prompt",
+            "file_read",
+            "command",
+            "error",
+            "file_edit",
+            "assistant",
+            "compaction",
+            "recap"
+        ]
     );
     let r = rows(&conn);
-    assert!(!r[1].2.contains("abcdefghijklmnop"), "secret leaked: {}", r[1].2);
+    assert!(
+        !r[1].2.contains("abcdefghijklmnop"),
+        "secret leaked: {}",
+        r[1].2
+    );
     assert!(r[4].3, "error flag");
     assert_eq!(r[5].1, "/nonexistent/app/auth.rs");
     let (title, branch, project): (String, String, String) = conn
-        .query_row("SELECT title, git_branch, project FROM sessions WHERE id = 'claude:s-claude'", [], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
+        .query_row(
+            "SELECT title, git_branch, project FROM sessions WHERE id = 'claude:s-claude'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .unwrap();
-    assert_eq!((title.as_str(), branch.as_str(), project.as_str()), ("Fix login bug", "main", "/nonexistent/app"));
+    assert_eq!(
+        (title.as_str(), branch.as_str(), project.as_str()),
+        ("Fix login bug", "main", "/nonexistent/app")
+    );
 }
 
 #[test]
@@ -61,11 +92,21 @@ fn codex_fixture_collapses_duplicate_envelopes() {
     let d = tmpdir("codex");
     let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
     ingest(&mut conn, &fixture("codex", "rollout.jsonl"), Agent::Codex);
-    assert_eq!(kinds(&conn), ["prompt", "command", "error", "file_edit", "assistant"]);
+    assert_eq!(
+        kinds(&conn),
+        ["prompt", "command", "error", "file_edit", "assistant"]
+    );
     let project: String = conn
-        .query_row("SELECT project FROM sessions WHERE id = 'codex:s-codex'", [], |r| r.get(0))
+        .query_row(
+            "SELECT project FROM sessions WHERE id = 'codex:s-codex'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
-    assert_eq!(project, "github.com/acme/svc", "falls back to session_meta remote when cwd is gone");
+    assert_eq!(
+        project, "github.com/acme/svc",
+        "falls back to session_meta remote when cwd is gone"
+    );
 }
 
 #[test]
@@ -73,7 +114,17 @@ fn pi_fixture() {
     let d = tmpdir("pi");
     let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
     ingest(&mut conn, &fixture("pi", "session.jsonl"), Agent::Pi);
-    assert_eq!(kinds(&conn), ["prompt", "command", "file_edit", "error", "assistant", "compaction"]);
+    assert_eq!(
+        kinds(&conn),
+        [
+            "prompt",
+            "command",
+            "file_edit",
+            "error",
+            "assistant",
+            "compaction"
+        ]
+    );
     let r = rows(&conn);
     assert!(r[3].2.contains("exited with code 2"));
 }
@@ -84,7 +135,11 @@ fn replay_from_zero_inserts_nothing() {
     let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
     let f = fixture("claude", "session.jsonl");
     let first = ingest(&mut conn, &f, Agent::Claude).inserted;
-    conn.execute("UPDATE sources SET byte_offset = 0, parser_state = NULL", []).unwrap();
+    conn.execute(
+        "UPDATE sources SET byte_offset = 0, parser_state = NULL",
+        [],
+    )
+    .unwrap();
     assert_eq!(ingest(&mut conn, &f, Agent::Claude).inserted, 0);
     assert_eq!(kinds(&conn).len(), first);
 }
@@ -103,8 +158,13 @@ fn partial_tail_waits_for_newline() {
     let (half_a, half_b) = last.split_at(last.len() / 2);
     std::fs::write(&f, format!("{}\n{half_a}", rest.join("\n"))).unwrap();
     ingest(&mut conn, &f, Agent::Pi);
-    assert!(!kinds(&conn).contains(&"compaction".to_string()), "partial line must not be consumed");
-    let quarantined: i64 = conn.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0)).unwrap();
+    assert!(
+        !kinds(&conn).contains(&"compaction".to_string()),
+        "partial line must not be consumed"
+    );
+    let quarantined: i64 = conn
+        .query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(quarantined, 0);
     let mut h = std::fs::OpenOptions::new().append(true).open(&f).unwrap();
     writeln!(h, "{half_b}").unwrap();
@@ -118,10 +178,17 @@ fn concurrent_writer_loses_race_without_duplicates() {
     let path = d.join("m.db");
     let mut a = mnem::db::open(&path).unwrap();
     let mut b = mnem::db::open(&path).unwrap();
-    let src = Source { path: fixture("codex", "rollout.jsonl"), agent: Agent::Codex };
+    let src = Source {
+        path: fixture("codex", "rollout.jsonl"),
+        agent: Agent::Codex,
+    };
     // Both processes parse from the same (empty) cursor before either commits.
-    let batch_a = ingest::parse(&src, ingest::load_cursor(&a, &src.path).unwrap()).unwrap().unwrap();
-    let batch_b = ingest::parse(&src, ingest::load_cursor(&b, &src.path).unwrap()).unwrap().unwrap();
+    let batch_a = ingest::parse(&src, ingest::load_cursor(&a, &src.path).unwrap())
+        .unwrap()
+        .unwrap();
+    let batch_b = ingest::parse(&src, ingest::load_cursor(&b, &src.path).unwrap())
+        .unwrap()
+        .unwrap();
     let ra = ingest::commit(&mut a, &batch_a, &mut Resolver::default()).unwrap();
     let rb = ingest::commit(&mut b, &batch_b, &mut Resolver::default()).unwrap();
     assert!(!ra.stale && rb.stale);
@@ -140,7 +207,155 @@ fn rewritten_file_bumps_generation_and_dedupes() {
     let rewritten = original.replacen("\"version\":3", "\"version\":3,\"rewritten\":true", 1);
     std::fs::write(&f, rewritten).unwrap();
     assert_eq!(ingest(&mut conn, &f, Agent::Pi).inserted, 0);
-    let generation: i64 = conn.query_row("SELECT generation FROM sources", [], |r| r.get(0)).unwrap();
+    let generation: i64 = conn
+        .query_row("SELECT generation FROM sources", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(generation, 1);
     assert_eq!(kinds(&conn).len(), n);
+}
+
+// Regression tests from council round 2 (code review).
+
+#[test]
+fn same_length_rewrite_with_same_header_is_detected() {
+    let d = tmpdir("samelen");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let f = d.join("s.jsonl");
+    let original = std::fs::read_to_string(fixture("pi", "session.jsonl")).unwrap();
+    std::fs::write(&f, &original).unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    // Same first line, same byte length, different content in the consumed prefix.
+    let changed = original.replace("update the header", "update the footer");
+    assert_eq!(changed.len(), original.len());
+    std::fs::write(&f, changed).unwrap();
+    assert_eq!(ingest(&mut conn, &f, Agent::Pi).inserted, 1);
+    let texts: Vec<String> = rows(&conn).into_iter().map(|r| r.2).collect();
+    assert!(
+        texts.contains(&"update the footer".to_string()),
+        "{texts:?}"
+    );
+    assert!(
+        !texts.contains(&"update the header".to_string()),
+        "stale text kept: {texts:?}"
+    );
+}
+
+#[test]
+fn quarantine_is_redacted() {
+    let d = tmpdir("quarantine");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let f = d.join("s.jsonl");
+    std::fs::write(
+        &f,
+        "{\"type\":\"session\",\"id\":\"x\"}\n{broken token=verysecret123456789\n",
+    )
+    .unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    let line: String = conn
+        .query_row("SELECT line FROM quarantine", [], |r| r.get(0))
+        .unwrap();
+    assert!(!line.contains("verysecret"), "{line}");
+}
+
+#[test]
+fn incompatible_parser_state_replays_from_zero() {
+    let d = tmpdir("state");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let f = d.join("s.jsonl");
+    let lines: Vec<&str> = include_str!("fixtures/pi/session.jsonl").lines().collect();
+    std::fs::write(&f, format!("{}\n", lines[..2].join("\n"))).unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    conn.execute("UPDATE sources SET parser_state = '{}'", [])
+        .unwrap();
+    std::fs::write(&f, format!("{}\n", lines.join("\n"))).unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    let sessions: Vec<String> = conn
+        .prepare("SELECT DISTINCT session_id FROM events")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        sessions,
+        ["pi:s-pi"],
+        "events must stay attributed to the real session"
+    );
+}
+
+#[test]
+fn losing_writer_retries_and_catches_up() {
+    let d = tmpdir("overlap");
+    let path = d.join("m.db");
+    let mut a = mnem::db::open(&path).unwrap();
+    let mut b = mnem::db::open(&path).unwrap();
+    let f = d.join("s.jsonl");
+    let lines: Vec<&str> = include_str!("fixtures/pi/session.jsonl").lines().collect();
+    std::fs::write(&f, format!("{}\n", lines[..2].join("\n"))).unwrap();
+    let src = Source {
+        path: f.clone(),
+        agent: Agent::Pi,
+    };
+    let small = ingest::parse(&src, None).unwrap().unwrap();
+    std::fs::write(&f, format!("{}\n", lines.join("\n"))).unwrap();
+    let large = ingest::parse(&src, None).unwrap().unwrap();
+    ingest::commit(&mut a, &small, &mut Resolver::default()).unwrap();
+    assert!(
+        ingest::commit(&mut b, &large, &mut Resolver::default())
+            .unwrap()
+            .stale
+    );
+    let o = ingest::ingest_file(&mut b, &src, &mut Resolver::default()).unwrap();
+    assert_eq!(o.status, ingest::Status::CaughtUp);
+    assert_eq!(
+        kinds(&a).last().unwrap(),
+        "compaction",
+        "suffix from the losing batch is not lost"
+    );
+}
+
+#[test]
+fn restored_file_clears_missing_flag() {
+    let d = tmpdir("missing");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let src = Source {
+        path: fixture("pi", "session.jsonl"),
+        agent: Agent::Pi,
+    };
+    ingest(&mut conn, &src.path, Agent::Pi);
+    assert_eq!(ingest::mark_missing(&conn, &[]).unwrap(), 1);
+    ingest::mark_missing(&conn, std::slice::from_ref(&src)).unwrap();
+    let missing: Option<i64> = conn
+        .query_row("SELECT missing_since FROM sources", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(missing, None);
+}
+
+#[test]
+fn subagent_events_carry_thread_and_merge_into_parent_session() {
+    let d = tmpdir("subagent");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let sub = d.join("s-claude/subagents");
+    std::fs::create_dir_all(&sub).unwrap();
+    let f = sub.join("agent-abc.jsonl");
+    std::fs::write(
+        &f,
+        concat!(
+            r#"{"type":"assistant","uuid":"x1","sessionId":"s-claude","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"t9","name":"Bash","input":{"command":"ls"}}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    ingest(&mut conn, &f, Agent::Claude);
+    let (sid, thread, tool, raw): (String, String, String, String) = conn
+        .query_row(
+            "SELECT session_id, thread, tool, tool_raw FROM events",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (sid.as_str(), thread.as_str(), tool.as_str(), raw.as_str()),
+        ("claude:s-claude", "agent-abc", "shell", "Bash")
+    );
 }

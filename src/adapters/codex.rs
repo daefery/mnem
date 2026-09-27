@@ -44,7 +44,11 @@ pub fn line(em: &mut Emit, v: &Value) {
             assistant(em, None, str_of(p, "message").unwrap_or_default());
         }
         (Some("event_msg"), Some("task_complete")) => {
-            assistant(em, str_of(p, "turn_id"), str_of(p, "last_agent_message").unwrap_or_default());
+            assistant(
+                em,
+                str_of(p, "turn_id"),
+                str_of(p, "last_agent_message").unwrap_or_default(),
+            );
         }
         (Some("event_msg"), Some("item_completed")) => {
             if let Some(item) = p.get("item") {
@@ -67,8 +71,9 @@ fn prompt(em: &mut Emit, turn_id: Option<&str>, raw: &str) {
     if t.is_empty() {
         return;
     }
+    // Codex turns are counted by task_started; the same prompt arrives in several envelopes.
     let key = format!("u:{}:{}", turn_key(em, turn_id), text::hash(t));
-    em.push(key, Kind::Prompt, text::clean(t, 4000));
+    em.prompt_with(key, t, false);
 }
 
 fn assistant(em: &mut Emit, turn_id: Option<&str>, raw: &str) {
@@ -89,34 +94,51 @@ fn item(em: &mut Emit, turn_id: Option<&str>, it: &Value) {
         Some("CommandExecution") => {
             let cmd = match it.get("command") {
                 // ["/bin/bash", "-lc", "<script>"]: the script is what matters.
-                Some(Value::Array(a)) => a.last().and_then(Value::as_str).unwrap_or_default().to_string(),
+                Some(Value::Array(a)) => a
+                    .last()
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
                 Some(Value::String(s)) => s.clone(),
                 _ => return,
             };
             let e = em.push(id.clone(), Kind::Command, text::clean(&cmd, 600));
-            e.tool = Some("exec".into());
+            e.tool = Some("shell".into());
+            e.tool_raw = Some("exec".into());
             let code = it.get("exit_code").and_then(Value::as_i64).unwrap_or(0);
             if code != 0 {
-                let out = str_of(it, "aggregated_output").or_else(|| str_of(it, "stderr")).unwrap_or_default();
-                let msg = format!("exit {code}: {}", text::head(&cmd, 120));
-                let e = em.push(format!("{id}:err"), Kind::Error, text::redact(&format!("{msg}\n{}", text::tail(out, 12, 800))));
-                e.is_error = true;
-                e.tool = Some("exec".into());
+                let out = str_of(it, "aggregated_output")
+                    .or_else(|| str_of(it, "stderr"))
+                    .unwrap_or_default();
+                em.error(
+                    format!("{id}:err"),
+                    Some("exec"),
+                    &format!("exit {code}: {}", text::head(&cmd, 120)),
+                    out,
+                );
             }
         }
         Some("FileChange") => {
             if let Some(Value::Object(changes)) = it.get("changes") {
                 for path in changes.keys() {
-                    let e = em.push(format!("{id}:{}", text::hash(path)), Kind::FileEdit, String::new());
-                    e.tool = Some("apply_patch".into());
+                    let e = em.push(
+                        format!("{id}:{}", text::hash(path)),
+                        Kind::FileEdit,
+                        String::new(),
+                    );
+                    e.tool = Some("edit".into());
+                    e.tool_raw = Some("apply_patch".into());
                     e.path = Some(path.clone());
                 }
             }
             if str_of(it, "status") == Some("failed") {
                 let out = str_of(it, "stderr").unwrap_or_default();
-                let e = em.push(format!("{id}:err"), Kind::Error, text::redact(&text::tail(out, 12, 800)));
-                e.is_error = true;
-                e.tool = Some("apply_patch".into());
+                em.error(
+                    format!("{id}:err"),
+                    Some("apply_patch"),
+                    "patch failed",
+                    out,
+                );
             }
         }
         Some("McpToolCall") => {

@@ -63,11 +63,22 @@ pub struct Event {
     pub text: String,
     pub is_error: bool,
     pub byte_offset: u64,
+    /// Subagent thread (e.g. "agent-a1b2"); None for the main conversation.
+    pub thread: Option<String>,
+    /// Sub-classification: prompt "harness" (injected by tooling), error class, ...
+    pub label: Option<String>,
+    /// Tool name as the agent spelled it; `tool` holds the canonical name.
+    pub tool_raw: Option<String>,
 }
 
+/// Bump when ParserState changes meaning; older persisted states force a replay from 0.
+pub const STATE_VERSION: u32 = 2;
+
 /// Per-file parser state. Persisted with the cursor so ingest can resume mid-file.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ParserState {
+    #[serde(default)]
+    pub v: u32,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     pub git_branch: Option<String>,
@@ -79,4 +90,29 @@ pub struct ParserState {
     pub turn_id: Option<String>,
     /// tool call id -> tool name, for labelling error results.
     pub pending: HashMap<String, String>,
+    #[serde(default)]
+    pub thread: Option<String>,
+    /// Hash of the last prompt, to collapse consecutive duplicates (polling loops).
+    #[serde(default)]
+    pub last_prompt: Option<String>,
+}
+
+impl Default for ParserState {
+    fn default() -> Self {
+        Self {
+            v: STATE_VERSION,
+            session_id: None,
+            cwd: None,
+            git_branch: None,
+            repo_url: None,
+            title: None,
+            started_at: None,
+            last_ts: 0,
+            turn: 0,
+            turn_id: None,
+            pending: HashMap::new(),
+            thread: None,
+            last_prompt: None,
+        }
+    }
 }

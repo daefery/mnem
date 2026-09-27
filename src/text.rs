@@ -6,7 +6,10 @@ use std::sync::LazyLock;
 static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
         (r"(?s)<private>.*?</private>", "[private]"),
+        // An unterminated block hides everything after it.
+        (r"(?s)<private>.*", "[private]"),
         (r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", "[redacted:private-key]"),
+        (r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*", "[redacted:private-key]"),
         (r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}", "[redacted:jwt]"),
         (r"\b(?:sk|pk|rk)-[A-Za-z0-9_-]{20,}", "[redacted:key]"),
         (r"\bgh[pousr]_[A-Za-z0-9]{30,}", "[redacted:github]"),
@@ -35,6 +38,80 @@ pub fn redact(s: &str) -> String {
     out
 }
 
+/// Redaction must see whole tokens. Redact a generous window cut on whitespace (so no
+/// secret straddles the window edge), then truncate the redacted text.
+const WINDOW: usize = 64 * 1024;
+
+fn window_head(s: &str) -> &str {
+    if s.len() <= WINDOW {
+        return s;
+    }
+    let mut end = WINDOW;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let cut = s[..end].rfind(char::is_whitespace).unwrap_or(0);
+    &s[..cut]
+}
+
+fn window_tail(s: &str) -> &str {
+    if s.len() <= WINDOW {
+        return s;
+    }
+    let mut start = s.len() - WINDOW;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = s[start..]
+        .find(char::is_whitespace)
+        .map(|i| start + i)
+        .unwrap_or(s.len());
+    &s[cut..]
+}
+
+/// Redacted excerpt from the start of `s`.
+pub fn clean(s: &str, max: usize) -> String {
+    head(&redact(window_head(s.trim())), max)
+}
+
+/// Redacted excerpt from the end of `s`; errors usually carry the signal at the end.
+pub fn clean_tail(s: &str, lines: usize, max: usize) -> String {
+    tail(&redact(window_tail(s)), lines, max)
+}
+
+/// Redacted error excerpt: the first `head_n` lines (what failed) and the last `tail_n`
+/// lines (the verdict), each line capped, total capped at `max`.
+pub fn clean_error(s: &str, head_n: usize, tail_n: usize, max: usize) -> String {
+    let s = s.trim();
+    let red = if s.len() <= 2 * WINDOW {
+        redact(s)
+    } else {
+        format!("{}\n…\n{}", redact(window_head(s)), redact(window_tail(s)))
+    };
+    let lines: Vec<&str> = red.lines().filter(|l| !l.trim().is_empty()).collect();
+    let pick: Vec<String> = if lines.len() <= head_n + tail_n {
+        lines.iter().map(|l| head(l, 200)).collect()
+    } else {
+        let mut v: Vec<String> = lines[..head_n].iter().map(|l| head(l, 200)).collect();
+        v.push("…".into());
+        v.extend(lines[lines.len() - tail_n..].iter().map(|l| head(l, 200)));
+        v
+    };
+    head(&pick.join("\n"), max)
+}
+
+/// Replace pasted terminal dumps with a size marker; they drown out the actual ask.
+pub fn strip_pasted(s: &str) -> String {
+    static PASTED: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?s)<pasted_content[^>]*>(.*?)</pasted_content>").expect("valid regex")
+    });
+    PASTED
+        .replace_all(s, |c: &regex::Captures| {
+            format!("[pasted {} chars]", c[1].len())
+        })
+        .into_owned()
+}
+
 /// First `max` chars, cut on a char boundary.
 pub fn head(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
@@ -55,10 +132,6 @@ pub fn tail(s: &str, lines: usize, max: usize) -> String {
         let skip = n - max;
         format!("…{}", joined.chars().skip(skip).collect::<String>())
     }
-}
-
-pub fn clean(s: &str, max: usize) -> String {
-    redact(&head(s.trim(), max))
 }
 
 pub fn hash(s: &str) -> String {
@@ -110,17 +183,61 @@ mod tests {
     #[test]
     fn parses_timestamps() {
         assert_eq!(parse_ts("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(parse_ts("2026-09-27T11:13:24.101Z"), Some(1_790_507_604_101));
-        assert_eq!(parse_ts("2026-09-27T12:13:24.101+01:00"), Some(1_790_507_604_101));
+        assert_eq!(
+            parse_ts("2026-09-27T11:13:24.101Z"),
+            Some(1_790_507_604_101)
+        );
+        assert_eq!(
+            parse_ts("2026-09-27T12:13:24.101+01:00"),
+            Some(1_790_507_604_101)
+        );
     }
 
     #[test]
     fn redacts_secrets() {
-        let s = redact("export OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123 and token: abcdefgh12345");
+        let s = redact(
+            "export OPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123 and token: abcdefgh12345",
+        );
         assert!(!s.contains("abcdefghijklmnop"), "{s}");
         assert!(!s.contains("abcdefgh12345"), "{s}");
-        assert_eq!(redact("keep <private>hidden</private> text"), "keep [private] text");
+        assert_eq!(
+            redact("keep <private>hidden</private> text"),
+            "keep [private] text"
+        );
         assert_eq!(redact("cargo test --release"), "cargo test --release");
+    }
+
+    #[test]
+    fn redacts_before_truncating() {
+        let key = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+        let s = format!("{}{key}", "x ".repeat(10));
+        let out = clean(&s, 25);
+        assert!(!out.contains("sk-abc"), "{out}");
+        let out = clean("<private>my secret plan that is long", 20);
+        assert!(!out.contains("secret"), "{out}");
+        let big = format!("{} {key} tail", "word ".repeat(20_000));
+        assert!(!clean_tail(&big, 3, 100).contains("sk-abc"));
+        assert!(!clean(&big, 200_000).contains("sk-abc"));
+    }
+
+    #[test]
+    fn error_excerpt_keeps_head_and_tail() {
+        let s = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            clean_error(&s, 2, 2, 800),
+            "line 1\nline 2\n…\nline 19\nline 20"
+        );
+    }
+
+    #[test]
+    fn strips_pasted() {
+        assert_eq!(
+            strip_pasted("see <pasted_content id=1>abc</pasted_content> now"),
+            "see [pasted 3 chars] now"
+        );
     }
 
     #[test]
