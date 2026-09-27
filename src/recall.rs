@@ -15,6 +15,8 @@ use rusqlite::{Connection, params};
 const TOP: usize = 5;
 const MAX_CHARS: usize = 600;
 const MAX_TERMS: usize = 12;
+/// A term found in fewer than this share of all memories carries real signal.
+const RARE: f64 = 0.10;
 
 const STOP: &[&str] = &[
     "the", "and", "for", "that", "this", "with", "you", "your", "are", "was", "were", "have",
@@ -79,12 +81,30 @@ pub fn rank(
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" OR ");
-    // One shared common word is not relevance: need at least two prompt terms in the memory.
+    // One shared common word is not relevance: need at least two prompt terms in the
+    // memory, and at least one of the prompt's rarer terms in its title or subtitle.
     let need = terms.len().min(2);
+    let total: f64 = conn
+        .query_row("SELECT count(*) FROM memories", [], |r| r.get::<_, i64>(0))?
+        .max(1) as f64;
+    let mut df =
+        conn.prepare_cached("SELECT count(*) FROM memories_fts WHERE memories_fts MATCH ?1")?;
+    let rare: Vec<&String> = terms
+        .iter()
+        .filter(|t| {
+            df.query_row([format!("\"{t}\"")], |r| r.get::<_, i64>(0))
+                .map(|n| (n as f64) / total < RARE)
+                .unwrap_or(false)
+        })
+        .collect();
+    if rare.is_empty() {
+        return Ok(vec![]);
+    }
     let mut st = conn.prepare_cached(
         "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0),
                 lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, '') || ' ' ||
-                      coalesce(m.narrative, '') || ' ' || coalesce(m.facts, ''))
+                      coalesce(m.narrative, '') || ' ' || coalesce(m.facts, '')),
+                lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, ''))
          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
          WHERE memories_fts MATCH ?1 AND m.project = ?2 AND m.kind != 'pinned'
            -- Personal details stay out of automatic injection; explicit search still finds them.

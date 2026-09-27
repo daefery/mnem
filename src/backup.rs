@@ -14,6 +14,8 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const KEEP: usize = 7;
+/// How long restore waits for other writers before giving up without changes.
+const RESTORE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 /// The watcher takes a new snapshot when the newest one is older than this.
 pub const INTERVAL_MS: i64 = 24 * 3_600_000;
 
@@ -237,6 +239,15 @@ fn remove_db(path: &Path) {
 /// watcher, MCP servers) wait and then see the restored data; no file is swapped or
 /// unlinked underneath them. The current database is snapshotted first.
 pub fn restore(snapshot: &Path, conn: &mut Connection, backups: &Path) -> Result<Manifest> {
+    restore_with_wait(snapshot, conn, backups, RESTORE_WAIT)
+}
+
+fn restore_with_wait(
+    snapshot: &Path,
+    conn: &mut Connection,
+    backups: &Path,
+    wait: std::time::Duration,
+) -> Result<Manifest> {
     // Stage first: the pre-restore snapshot below rotates old backups, which could
     // otherwise delete the very snapshot being restored.
     let (m, staged) = stage(snapshot)?;
@@ -246,8 +257,25 @@ pub fn restore(snapshot: &Path, conn: &mut Connection, backups: &Path) -> Result
         println!("current database saved as {}", keep.file);
         let src = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let backup = rusqlite::backup::Backup::new(&src, conn)?;
-        // One step for all pages: the copy happens under a single lock, so it is consistent.
-        backup.run_to_completion(i32::MAX, std::time::Duration::from_millis(50), None)?;
+        // One step copies every page under a single lock, so the result is consistent.
+        // A busy database is retried until RESTORE_WAIT, then restore stops before any
+        // page is written: the live database is left exactly as it was.
+        let deadline = std::time::Instant::now() + wait;
+        loop {
+            use rusqlite::backup::StepResult::{Busy, Done, Locked, More};
+            match backup.step(i32::MAX)? {
+                Done => break,
+                More => continue,
+                Busy | Locked if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(100))
+                }
+                Busy | Locked => bail!(
+                    "another process kept the database locked for {}s; nothing was changed. Retry, or stop mnem-watch.service first",
+                    wait.as_secs()
+                ),
+                _ => bail!("unexpected backup step result"),
+            }
+        }
         Ok(())
     })();
     remove_db(&staged);
@@ -344,6 +372,42 @@ mod tests {
             .collect();
         assert_ne!(files[0], files[1]);
         assert_eq!(list(&backups).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn restore_gives_up_cleanly_when_locked() {
+        let d = std::env::temp_dir().join(format!("mnem-restore-locked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let backups = d.join("backups");
+        let mut conn = db::open(&d.join("m.db")).unwrap();
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'snap', 'mnem', 'a')", [])
+            .unwrap();
+        let snap = create(&conn, &backups, 7).unwrap();
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'live', 'mnem', 'b')", [])
+            .unwrap();
+        // Another writer holds the write lock for the whole attempt.
+        let holder = db::open(&d.join("m.db")).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn.busy_timeout(std::time::Duration::from_millis(10))
+            .unwrap();
+        let t = std::time::Instant::now();
+        let r = restore_with_wait(
+            &backups.join(&snap.file),
+            &mut conn,
+            &backups,
+            std::time::Duration::from_millis(500),
+        );
+        assert!(r.is_err(), "restore must fail while locked");
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "and must not hang"
+        );
+        holder.execute_batch("ROLLBACK").unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2, "live database unchanged");
     }
 
     #[test]
