@@ -729,7 +729,69 @@ fn memory_detail(conn: &Connection, id: i64) -> Result<String> {
             }
         }
     }
+    w.push_str(&evidence(conn, id)?);
     Ok(w)
+}
+
+/// event id, hash when linked, kind, text, path, timestamp
+type EvidenceRow = (i64, Option<String>, Option<String>, String, String, i64);
+
+/// Where a memory came from: cited transcript events (flagged if they changed since),
+/// else the source range, else an explicit "no evidence" for imported history.
+fn evidence(conn: &Connection, memory_id: i64) -> Result<String> {
+    let mut st = conn.prepare(
+        "SELECT v.event_id, v.event_hash, e.kind, coalesce(e.text, ''), coalesce(e.path, ''), coalesce(e.ts, 0)
+         FROM memory_evidence v LEFT JOIN events e ON e.id = v.event_id
+         WHERE v.memory_id = ?1 ORDER BY v.event_id",
+    )?;
+    let rows: Vec<EvidenceRow> = st
+        .query_map([memory_id], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    if !rows.is_empty() {
+        let mut w = String::from("\nEvidence (open with get_observations([\"E<id>\"])):\n");
+        for (eid, hash, kind, t, path, ts) in rows {
+            let Some(kind) = kind else {
+                w.push_str(&format!("- E{eid}: event no longer stored\n"));
+                continue;
+            };
+            let changed = hash.is_some_and(|h| h != text::hash(&format!("{t}{path}")));
+            let body = if t.is_empty() { path } else { squash(&t) };
+            w.push_str(&format!(
+                "- E{eid} [{kind}] {} · {}{}\n",
+                day(ts),
+                text::head(&body, 140),
+                if changed {
+                    " (changed since this memory was written)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        return Ok(w);
+    }
+    let (origin, origin_id): (String, String) = conn.query_row(
+        "SELECT origin, origin_id FROM memories WHERE id = ?1",
+        [memory_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if origin == "mnem"
+        && let Some((session, range)) = origin_id.split_once('@')
+        && let Some((from, through)) = range.split('#').next().and_then(|r| r.split_once('-'))
+    {
+        return Ok(format!(
+            "\nEvidence: not cited per claim; distilled from events E{from}–E{through} of {session}.\n"
+        ));
+    }
+    Ok("\nEvidence: none (imported from claude-mem; its sources were not kept).\n".into())
 }
 
 fn event_detail(conn: &Connection, id: i64) -> Result<String> {

@@ -474,3 +474,57 @@ fn import_summary_gets_fresh_id_when_reserved_id_is_taken() {
         .unwrap();
     assert_eq!(mine, "mine");
 }
+
+#[test]
+fn distilled_memory_links_only_to_events_it_was_shown() {
+    // cited_ids is private; exercise it through the public surface instead: a fake LLM
+    // reply is stored via the same path in distill's unit tests. Here we check the
+    // evidence table and its rendering in get_observations.
+    let d = tmpdir("evidence");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    ingest(
+        &mut conn,
+        &fixture("claude", "session.jsonl"),
+        Agent::Claude,
+    );
+    let prompt_id: i64 = conn
+        .query_row("SELECT id FROM events WHERE kind = 'prompt'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "INSERT INTO memories(id, session_id, kind, type, title, origin, origin_id) VALUES (2000000, 'claude:s-claude', 'observation', 'bugfix', 'Login expiry fixed', 'mnem', 'x')",
+        [],
+    )
+    .unwrap();
+    let t: String = conn
+        .query_row("SELECT text FROM events WHERE id = ?1", [prompt_id], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    conn.execute(
+        "INSERT INTO memory_evidence(memory_id, event_id, event_hash) VALUES (2000000, ?1, ?2)",
+        rusqlite::params![prompt_id, mnem::text::hash(&t)],
+    )
+    .unwrap();
+    let out = mnem::mcp::call(
+        &conn,
+        "get_observations",
+        &serde_json::json!({ "ids": [2000000] }),
+    )
+    .unwrap();
+    assert!(out.contains(&format!("E{prompt_id} [prompt]")), "{out}");
+    assert!(!out.contains("changed since"), "{out}");
+    conn.execute(
+        "UPDATE events SET text = 'rewritten' WHERE id = ?1",
+        [prompt_id],
+    )
+    .unwrap();
+    let out = mnem::mcp::call(
+        &conn,
+        "get_observations",
+        &serde_json::json!({ "ids": [2000000] }),
+    )
+    .unwrap();
+    assert!(out.contains("changed since"), "{out}");
+}

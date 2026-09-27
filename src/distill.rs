@@ -36,7 +36,7 @@ operations, empty checks, and anything already obvious from the code.
 
 Return JSON only:
 {"observations": [{"type": "...", "title": "...", "subtitle": "...", "narrative": "...",
-  "facts": ["..."], "concepts": ["..."], "files_read": ["..."], "files_modified": ["..."]}],
+  "facts": ["..."], "concepts": ["..."], "files_read": ["..."], "files_modified": ["..."], "evidence": ["E123"]}],
  "summary": {"request": "...", "investigated": "...", "learned": "...", "completed": "...", "next_steps": "..."}}
 
 type: exactly one of bugfix, feature, refactor, change, discovery, decision, security_alert,
@@ -45,6 +45,8 @@ concepts: any of how-it-works, why-it-exists, what-changed, problem-solution, go
 title: under 12 words, states the outcome ("Retry loop now backs off on 429"), not the activity.
 facts: self-contained statements with concrete names, paths and values; no pronouns.
 narrative: 2-4 sentences a teammate could act on.
+evidence: the [E123] ids from the digest that support the observation (1-6 ids). Cite only ids
+that appear in the digest; never invent one.
 Use 0-5 observations; return an empty list when nothing durable happened. summary may be null."#;
 
 /// Default preference order: cheap, capable models spread across providers, so one
@@ -364,6 +366,14 @@ mod chain_tests {
     }
 
     #[test]
+    fn citations_outside_the_digest_are_dropped() {
+        let shown: std::collections::HashSet<i64> = [10, 11, 12].into_iter().collect();
+        let v = serde_json::json!(["E11", "E99", "e10", 12, "E11", "junk"]);
+        assert_eq!(cited_ids(&v, &shown), vec![10, 11, 12]);
+        assert!(cited_ids(&serde_json::json!(null), &shown).is_empty());
+    }
+
+    #[test]
     fn quota_errors_cool_down_and_move_on() {
         assert!(matches!(classify_status(429), Failure::NextModel(ms, _) if ms >= 30 * 60_000));
         assert!(matches!(classify_status(404), Failure::NextModel(ms, _) if ms > 60 * 60_000));
@@ -379,14 +389,16 @@ fn expand(p: &str) -> String {
     }
 }
 
+/// One turn of a session as the model sees it. Every item carries the id of the
+/// transcript event it came from, so the model can cite its evidence.
 #[derive(Default)]
 struct TurnDigest {
-    prompt: Option<String>,
+    prompt: Option<(i64, String)>,
     harness: bool,
-    answer: Option<String>,
-    edited: Vec<String>,
-    commands: Vec<String>,
-    errors: Vec<String>,
+    answer: Option<(i64, String)>,
+    edited: Vec<(i64, String)>,
+    commands: Vec<(i64, String)>,
+    errors: Vec<(i64, String)>,
 }
 
 struct Chunk {
@@ -394,6 +406,20 @@ struct Chunk {
     through: i64,
     at: i64,
     text: String,
+    /// Event ids shown to the model; citations outside this set are rejected.
+    shown: std::collections::HashSet<i64>,
+}
+
+impl Chunk {
+    fn empty() -> Chunk {
+        Chunk {
+            from: 0,
+            through: 0,
+            at: 0,
+            text: String::new(),
+            shown: Default::default(),
+        }
+    }
 }
 
 fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
@@ -424,57 +450,64 @@ fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
         match kind.as_str() {
             "prompt" if d.prompt.is_none() => {
                 d.harness = label.is_some();
-                d.prompt = Some(text::head(&t, 600));
+                d.prompt = Some((id, text::head(&t, 600)));
             }
-            "assistant" => d.answer = Some(t),
-            "file_edit" if !d.edited.contains(&path) => d.edited.push(path),
-            "command" if d.commands.len() < 8 => d.commands.push(text::head(&squash(&t), 140)),
-            "error" if d.errors.len() < 4 => d.errors.push(format!(
-                "{}: {}",
-                label.unwrap_or_default(),
-                text::head(t.lines().next().unwrap_or(""), 160)
+            "assistant" => d.answer = Some((id, t)),
+            "file_edit" if !d.edited.iter().any(|(_, p)| *p == path) => d.edited.push((id, path)),
+            "command" if d.commands.len() < 8 => {
+                d.commands.push((id, text::head(&squash(&t), 140)))
+            }
+            "error" if d.errors.len() < 4 => d.errors.push((
+                id,
+                format!(
+                    "{}: {}",
+                    label.unwrap_or_default(),
+                    text::head(t.lines().next().unwrap_or(""), 160)
+                ),
             )),
             // Agent-written recaps stand in for a final answer when a turn has none.
-            "compaction" | "recap" if d.answer.is_none() => d.answer = Some(t),
+            "compaction" | "recap" if d.answer.is_none() => d.answer = Some((id, t)),
             _ => {}
         }
     }
     let mut out: Vec<Chunk> = Vec::new();
-    let mut cur = Chunk {
-        from: 0,
-        through: 0,
-        at: 0,
-        text: String::new(),
-    };
+    let mut cur = Chunk::empty();
     for (turn, (first, last, ts, d)) in turns {
         let mut w = String::new();
+        let mut ids: Vec<i64> = Vec::new();
         let who = if d.harness { "Orchestrator" } else { "User" };
         writeln!(w, "## Turn {turn}")?;
-        if let Some(p) = &d.prompt {
-            writeln!(w, "{who}: {}", squash(p))?;
+        if let Some((id, p)) = &d.prompt {
+            writeln!(w, "[E{id}] {who}: {}", squash(p))?;
+            ids.push(*id);
         }
-        if let Some(a) = &d.answer {
-            writeln!(w, "Agent final answer: {}", text::head(&squash(a), 1500))?;
+        if let Some((id, a)) = &d.answer {
+            writeln!(
+                w,
+                "[E{id}] Agent final answer: {}",
+                text::head(&squash(a), 1500)
+            )?;
+            ids.push(*id);
         }
+        let list = |items: &[(i64, String)], ids: &mut Vec<i64>| {
+            ids.extend(items.iter().map(|(i, _)| *i));
+            items
+                .iter()
+                .map(|(i, t)| format!("[E{i}] {t}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
         if !d.edited.is_empty() {
-            writeln!(w, "Edited: {}", d.edited.join(", "))?;
+            writeln!(w, "Edited: {}", list(&d.edited, &mut ids))?;
         }
         if !d.commands.is_empty() {
-            writeln!(w, "Commands: {}", d.commands.join(" | "))?;
+            writeln!(w, "Commands: {}", list(&d.commands, &mut ids))?;
         }
         if !d.errors.is_empty() {
-            writeln!(w, "Errors: {}", d.errors.join(" | "))?;
+            writeln!(w, "Errors: {}", list(&d.errors, &mut ids))?;
         }
         if !cur.text.is_empty() && cur.text.len() + w.len() > CHUNK_CHARS {
-            out.push(std::mem::replace(
-                &mut cur,
-                Chunk {
-                    from: 0,
-                    through: 0,
-                    at: 0,
-                    text: String::new(),
-                },
-            ));
+            out.push(std::mem::replace(&mut cur, Chunk::empty()));
         }
         if cur.text.is_empty() {
             cur.from = first;
@@ -482,6 +515,7 @@ fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
         cur.through = last;
         cur.at = cur.at.max(ts);
         cur.text.push_str(&text::head(&w, CHUNK_CHARS));
+        cur.shown.extend(ids);
     }
     if !cur.text.is_empty() {
         out.push(cur);
@@ -627,6 +661,47 @@ fn advance_error(conn: &Connection, sid: &str, err: &str) -> Result<()> {
     Ok(())
 }
 
+/// Citations like "E123" that were actually shown to the model; anything else is dropped.
+fn cited_ids(v: &Value, shown: &std::collections::HashSet<i64>) -> Vec<i64> {
+    let mut ids: Vec<i64> = v
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| {
+            x.as_str()
+                .map(str::to_string)
+                .or_else(|| x.as_i64().map(|n| n.to_string()))
+        })
+        .filter_map(|s| s.trim().trim_start_matches(['E', 'e']).parse().ok())
+        .filter(|id| shown.contains(id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Record which events support a memory, with a hash of each event's text so a later
+/// change to the event (a transcript rewrite) is visible.
+fn link_evidence(conn: &Connection, memory_id: i64, events: &[i64]) -> Result<()> {
+    let mut ins = conn.prepare_cached(
+        "INSERT OR IGNORE INTO memory_evidence(memory_id, event_id, event_hash, relation)
+         SELECT ?1, id, ?3, 'cited' FROM events WHERE id = ?2",
+    )?;
+    for id in events {
+        let t: Option<String> = conn
+            .query_row(
+                "SELECT coalesce(text, '') || coalesce(path, '') FROM events WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(t) = t {
+            ins.execute(params![memory_id, id, text::hash(&t)])?;
+        }
+    }
+    Ok(())
+}
+
 fn strings(v: &Value) -> String {
     let items: Vec<String> = v
         .as_array()
@@ -677,6 +752,7 @@ fn store(
                 .and_then(Value::as_str)
                 .filter(|t| TYPES.contains(t))
                 .unwrap_or("discovery");
+            let cited = cited_ids(&o["evidence"], &c.shown);
             n_obs += ins.execute(params![
                 sid,
                 project,
@@ -694,6 +770,9 @@ fn store(
                 model,
                 c.at,
             ])?;
+            if tx.changes() > 0 {
+                link_evidence(&tx, tx.last_insert_rowid(), &cited)?;
+            }
         }
         if let Some(s) = v.get("summary").filter(|s| s.is_object()) {
             let parts = [

@@ -115,6 +115,17 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
   VALUES ('delete', old.id, old.title, old.subtitle, old.narrative, old.facts, old.concepts);
 END;
 
+-- Which transcript events support each distilled memory. event_hash is the event's
+-- text hash when linked, so a later rewrite of that event shows as changed evidence.
+CREATE TABLE IF NOT EXISTS memory_evidence(
+  memory_id INTEGER NOT NULL,
+  event_id INTEGER NOT NULL,
+  event_hash TEXT,
+  relation TEXT NOT NULL DEFAULT 'cited',
+  PRIMARY KEY(memory_id, event_id)
+);
+CREATE INDEX IF NOT EXISTS memory_evidence_event ON memory_evidence(event_id);
+
 -- Per-session high-water mark of events already distilled into memories.
 CREATE TABLE IF NOT EXISTS distill_state(
   session_id TEXT PRIMARY KEY,
@@ -163,7 +174,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
