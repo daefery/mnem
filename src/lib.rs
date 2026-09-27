@@ -6,6 +6,8 @@ pub mod doctor;
 pub mod hook;
 pub mod import;
 pub mod ingest;
+pub mod install;
+pub mod mcp;
 pub mod model;
 pub mod project;
 pub mod search;

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mnem::model::Agent;
-use mnem::{context, db, doctor, hook, import, ingest, project, search};
+use mnem::{context, db, doctor, hook, import, ingest, install, mcp, project, search};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -46,6 +46,33 @@ enum Cmd {
         #[arg(long, default_value_t = 8000)]
         budget: usize,
     },
+    /// Wire mnem into Claude Code, Codex and pi (backs up every file it changes)
+    Install {
+        /// Print the plan without writing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Comma-separated subset: claude,codex,pi
+        #[arg(long, default_value = "claude,codex,pi")]
+        only: String,
+        /// mnem binary to register (default: this executable)
+        #[arg(long)]
+        bin: Option<String>,
+    },
+    /// Cross-agent update for a session since it last looked (used by the pi extension)
+    Delta {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// Call an MCP tool from the shell: mnem tool search '{"query":"..."}'
+    Tool {
+        name: String,
+        #[arg(default_value = "{}")]
+        args: String,
+    },
+    /// MCP server over stdio (search, timeline, get_observations, session_start_context)
+    Mcp,
     /// Catch up a single transcript file
     Ingest { path: PathBuf },
     /// Capture health: coverage, lag, quarantine, claude-mem comparison
@@ -151,6 +178,29 @@ fn main() -> Result<()> {
                 },
             )?;
             println!("{ctx}\n---\n{}", fresh.footer());
+        }
+        Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Install { dry_run, only, bin } => {
+            let has = |a: &str| only.split(',').any(|x| x.trim() == a);
+            install::run(&install::Plan {
+                bin: bin.unwrap_or_else(install::default_bin),
+                dry_run,
+                claude: has("claude"),
+                codex: has("codex"),
+                pi: has("pi"),
+            })?;
+        }
+        Cmd::Delta { session, cwd } => {
+            hook::catch_up_recent(&mut conn, std::time::Duration::from_millis(200))?;
+            if let Some(project) = hook::project_for(&conn, Some(&session), cwd.as_deref())
+                && let Some(d) = hook::cross_agent_delta(&conn, &session, &project)?
+            {
+                println!("{d}");
+            }
+        }
+        Cmd::Tool { name, args } => {
+            let a: serde_json::Value = serde_json::from_str(&args)?;
+            println!("{}", mcp::call(&conn, &name, &a)?);
         }
         Cmd::Ingest { path } => {
             let path = std::fs::canonicalize(&path)?;
