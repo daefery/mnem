@@ -1,7 +1,9 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mnem::model::Agent;
-use mnem::{context, db, distill, doctor, hook, import, ingest, install, mcp, project, search, ui};
+use mnem::{
+    backup, context, db, distill, doctor, hook, import, ingest, install, mcp, project, search, ui,
+};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -116,6 +118,19 @@ enum Cmd {
     },
     /// Show the distillation model chain as CLIProxyAPI serves it now, with cooldowns
     Models,
+    /// Take a verified snapshot of the database now (kept: newest 7)
+    Backup {
+        #[arg(long, default_value_t = backup::KEEP)]
+        keep: usize,
+    },
+    /// List snapshots with their row counts
+    Backups,
+    /// Check a snapshot restores cleanly; with --apply, replace the live database with it
+    Restore {
+        snapshot: PathBuf,
+        #[arg(long)]
+        apply: bool,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -239,6 +254,50 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Backup { keep } => {
+            let t = Instant::now();
+            let m = backup::create(&conn, &backup::dir(), keep)?;
+            println!(
+                "backup: {} ({:.0} MB, {} sessions, {} events, {} memories, integrity ok) in {:.1}s",
+                m.file,
+                m.bytes as f64 / 1e6,
+                m.sessions,
+                m.events,
+                m.memories,
+                t.elapsed().as_secs_f64()
+            );
+        }
+        Cmd::Backups => {
+            for (p, m) in backup::list(&backup::dir())? {
+                match m {
+                    Some(m) => println!(
+                        "{}  {:.0} MB  {} ago  {} memories  {} events",
+                        m.file,
+                        m.bytes as f64 / 1e6,
+                        context::ago(db::now_ms() - m.created_at),
+                        m.memories,
+                        m.events
+                    ),
+                    None => println!("{}  (no manifest: unverified)", p.display()),
+                }
+            }
+        }
+        Cmd::Restore { snapshot, apply } => {
+            if apply {
+                let m = backup::restore(&snapshot, &path, conn)?;
+                println!(
+                    "restored {} ({} memories, {} events)",
+                    m.file, m.memories, m.events
+                );
+            } else {
+                let m = backup::verify(&snapshot)?;
+                println!(
+                    "verified {}: integrity ok, checksum and counts match, search works ({} memories, {} events). Use --apply to restore.",
+                    m.file, m.memories, m.events
+                );
+            }
+            return Ok(());
+        }
         Cmd::Models => {
             let llm = distill::Llm::from_config()?;
             llm.load_cooldowns(&conn);
@@ -280,6 +339,15 @@ fn main() -> Result<()> {
                         let _ = ingest::mark_missing(&conn, &sources);
                     }
                     Err(e) => hook::log(&format!("watch sweep: {e:#}")),
+                }
+                if backup::newest_age(&backup::dir()).is_none_or(|age| age > backup::INTERVAL_MS) {
+                    match backup::create(&conn, &backup::dir(), backup::KEEP) {
+                        Ok(m) => hook::log(&format!(
+                            "watch backup: {} ({} memories)",
+                            m.file, m.memories
+                        )),
+                        Err(e) => hook::log(&format!("watch backup FAILED: {e:#}")),
+                    }
                 }
                 if distill_every > 0 && last_distill.elapsed().as_secs() >= distill_every {
                     last_distill = Instant::now();

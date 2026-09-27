@@ -114,6 +114,25 @@ pub fn run(conn: &Connection) -> Result<bool> {
         .collect::<rusqlite::Result<_>>()?;
     println!("  {}", kinds.join(" "));
 
+    match crate::backup::newest_age(&crate::backup::dir()) {
+        Some(age) if age <= 2 * crate::backup::INTERVAL_MS => {
+            println!(
+                "backup: newest verified snapshot {} ago",
+                crate::context::ago(age)
+            )
+        }
+        Some(age) => {
+            healthy = false;
+            println!(
+                "backup: STALE, newest verified snapshot {} ago (run `mnem backup`)",
+                crate::context::ago(age)
+            );
+        }
+        None => {
+            healthy = false;
+            println!("backup: NONE, run `mnem backup` (the watch service does this nightly)");
+        }
+    }
     claude_mem_comparison(conn)?;
     println!(
         "status: {}",

@@ -1,4 +1,5 @@
 pub mod adapters;
+pub mod backup;
 pub mod config;
 pub mod context;
 pub mod db;
