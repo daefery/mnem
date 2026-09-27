@@ -109,8 +109,9 @@ fn recent_sessions(conn: &Connection, o: &Options) -> Result<Vec<SessionView>> {
                 continue;
             }
             // Many subagents start from the same brief; one of them is enough.
+            // Briefs differ only by a file name deep in the text; compare their openings.
             if let Some(f) = first
-                && !first_prompts.insert(crate::text::hash(f))
+                && !first_prompts.insert(f.chars().take(40).collect::<String>().to_lowercase())
             {
                 continue;
             }

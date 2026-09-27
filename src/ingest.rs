@@ -61,13 +61,23 @@ pub fn roots() -> Vec<(PathBuf, Agent)> {
 }
 
 pub fn discover() -> Vec<Source> {
+    discover_until(None).0
+}
+
+/// Walk the transcript roots, stopping early once `deadline` passes. The flag is true
+/// when the walk was cut short (callers must then report capture as incomplete).
+pub fn discover_until(deadline: Option<std::time::Instant>) -> (Vec<Source>, bool) {
     let mut out = Vec::new();
     for (root, agent) in roots() {
-        for e in WalkDir::new(&root)
+        for (n, e) in WalkDir::new(&root)
             .follow_links(false)
             .into_iter()
             .filter_map(Result::ok)
+            .enumerate()
         {
+            if n % 128 == 0 && deadline.is_some_and(|d| std::time::Instant::now() > d) {
+                return (out, true);
+            }
             if e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "jsonl") {
                 out.push(Source {
                     path: e.into_path(),
@@ -76,7 +86,7 @@ pub fn discover() -> Vec<Source> {
             }
         }
     }
-    out
+    (out, false)
 }
 
 pub fn agent_for(path: &Path) -> Option<Agent> {

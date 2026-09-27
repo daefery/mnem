@@ -123,7 +123,16 @@ CREATE TABLE IF NOT EXISTS distill_state(
   error TEXT
 );
 
--- Per-session high-water mark of events already shown by the cross-agent delta.
+-- What each session has already been shown of each other session (cross-agent delta).
+-- Sessions not shown yet keep their mark and appear on a later prompt.
+CREATE TABLE IF NOT EXISTS delta_seen(
+  viewer TEXT NOT NULL,
+  other TEXT NOT NULL,
+  through INTEGER NOT NULL,
+  PRIMARY KEY(viewer, other)
+);
+
+-- Per-session floor: events before the session started are never "meanwhile" news.
 CREATE TABLE IF NOT EXISTS injections(
   session_id TEXT PRIMARY KEY,
   watermark INTEGER NOT NULL
@@ -152,16 +161,33 @@ pub fn home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
+/// without taking a write lock.
+const SCHEMA_VERSION: i64 = 7;
+
 pub fn open(path: &Path) -> Result<Connection> {
+    open_with(path, Duration::from_secs(5))
+}
+
+/// Open with a caller-chosen lock wait. Hooks use a short one so an agent's turn never
+/// stalls behind a long write.
+pub fn open_with(path: &Path, busy: Duration) -> Result<Connection> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let conn = Connection::open(path)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
-    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.busy_timeout(busy)?;
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+    }
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.execute_batch(SCHEMA)?;
-    migrate(&conn)?;
+    let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    if version != SCHEMA_VERSION {
+        conn.execute_batch(SCHEMA)?;
+        migrate(&conn)?;
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    }
     Ok(conn)
 }
 

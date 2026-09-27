@@ -16,6 +16,7 @@ pub struct Plan {
     pub claude: bool,
     pub codex: bool,
     pub pi: bool,
+    pub watch: bool,
 }
 
 pub fn run(p: &Plan) -> Result<()> {
@@ -27,6 +28,9 @@ pub fn run(p: &Plan) -> Result<()> {
     }
     if p.pi {
         pi(p)?;
+    }
+    if p.watch {
+        watch_service(p)?;
     }
     if p.dry_run {
         println!("\n(dry run: nothing written)");
@@ -324,6 +328,37 @@ export default function (pi: ExtensionAPI) {
 }
 "#;
 
+fn watch_service(p: &Plan) -> Result<()> {
+    println!("watch service");
+    let unit = db::home().join(".config/systemd/user/mnem-watch.service");
+    let body = format!(
+        "[Unit]\nDescription=mnem transcript watcher\n\n[Service]\nExecStart={} watch\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n",
+        p.bin
+    );
+    if p.dry_run {
+        println!("  would write {} and enable it", unit.display());
+        return Ok(());
+    }
+    std::fs::create_dir_all(unit.parent().expect("has parent"))?;
+    std::fs::write(&unit, body)?;
+    let ok = |args: &[&str]| {
+        Command::new("systemctl")
+            .args(args)
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    if ok(&["--user", "daemon-reload"]) && ok(&["--user", "enable", "--now", "mnem-watch.service"])
+    {
+        println!("  enabled and started mnem-watch.service");
+    } else {
+        println!(
+            "  wrote {}; start it with: systemctl --user enable --now mnem-watch.service",
+            unit.display()
+        );
+    }
+    Ok(())
+}
+
 /// Remove everything `install` added. Backs up each file first.
 pub fn uninstall(dry_run: bool) -> Result<()> {
     let p = Plan {
@@ -332,6 +367,7 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
         claude: true,
         codex: true,
         pi: true,
+        watch: false,
     };
     for (name, path) in [
         ("Claude Code", db::home().join(".claude/settings.json")),
@@ -361,6 +397,21 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
                 std::fs::write(&cfg, stripped)?;
                 println!("  removed [mcp_servers.mnem] from {}", cfg.display());
             }
+        }
+    }
+    let unit = db::home().join(".config/systemd/user/mnem-watch.service");
+    if unit.exists() {
+        if dry_run {
+            println!("  would stop and remove {}", unit.display());
+        } else {
+            let _ = Command::new("systemctl")
+                .args(["--user", "disable", "--now", "mnem-watch.service"])
+                .output();
+            std::fs::remove_file(&unit)?;
+            let _ = Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .output();
+            println!("  removed {}", unit.display());
         }
     }
     let ext = db::home().join(".pi/agent/extensions/mnem");

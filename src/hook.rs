@@ -101,7 +101,8 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
     }
     // Size or mtime changed (or never read): ingest decides whether it is an append or
     // a rewrite. Size alone would miss same-length rewrites.
-    let mut changed: Vec<(i64, u64, u64, Source)> = ingest::discover()
+    let (sources, cut_short) = ingest::discover_until(Some(deadline));
+    let mut changed: Vec<(i64, u64, u64, Source)> = sources
         .into_iter()
         .filter_map(|s| {
             let m = s.path.metadata().ok()?;
@@ -118,9 +119,15 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
         .collect();
     changed.sort_by_key(|c| std::cmp::Reverse(c.0));
     let mut resolver = Resolver::default();
-    let mut f = Freshness::default();
+    let mut f = Freshness {
+        budget_hit: cut_short,
+        files_behind: cut_short as usize,
+        ..Default::default()
+    };
+    let mut busy = false;
     for (_, len, unread, src) in changed {
-        if Instant::now() > deadline || unread > HOOK_MAX_UNREAD {
+        // After one lock timeout, further writes would wait again; leave them to later.
+        if busy || Instant::now() > deadline || unread > HOOK_MAX_UNREAD {
             f.budget_hit |= Instant::now() > deadline;
             f.files_behind += 1;
             f.bytes_behind += unread.min(len);
@@ -130,12 +137,37 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
             Ok(o) if o.status == Status::CaughtUp => {}
             Ok(_) => f.files_behind += 1,
             Err(e) => {
+                busy |= is_busy(&e);
                 log(&format!("catch-up {}: {e:#}", src.path.display()));
                 f.files_behind += 1;
             }
         }
     }
     Ok(f)
+}
+
+/// Bytes of this transcript not yet ingested.
+fn own_unread(conn: &Connection, path: &std::path::Path) -> u64 {
+    let size = path.metadata().map(|m| m.len()).unwrap_or(0);
+    let off: i64 = conn
+        .query_row(
+            "SELECT byte_offset FROM sources WHERE path = ?1",
+            params![path.to_string_lossy()],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    size.saturating_sub(off as u64)
+}
+
+fn is_busy(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<rusqlite::Error>().is_some_and(|r| {
+            matches!(
+                r.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+            )
+        })
+    })
 }
 
 pub fn session_key(agent: Agent, native: &str) -> String {
@@ -163,6 +195,7 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
     let session = input.session_id.as_deref().map(|s| session_key(agent, s));
     if let Some(tp) = &input.transcript_path
         && tp.exists()
+        && own_unread(conn, tp) <= HOOK_MAX_UNREAD
     {
         let mut r = Resolver::default();
         if let Err(e) = ingest::ingest_file(
@@ -178,7 +211,14 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
     }
     match event {
         "session-start" => {
-            let fresh = catch_up_recent(conn, Duration::from_millis(400))?;
+            // Nothing in catch-up may keep the context from being emitted.
+            let fresh = catch_up_recent(conn, Duration::from_millis(400)).unwrap_or_else(|e| {
+                log(&format!("catch-up: {e:#}"));
+                Freshness {
+                    files_behind: 1,
+                    ..Default::default()
+                }
+            });
             let Some(project) = project_for(conn, session.as_deref(), input.cwd.as_deref()) else {
                 return Ok(());
             };
@@ -206,14 +246,18 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                 }
             }
             ctx.push_str(&format!("\n---\n{footer}\n"));
-            if let Some(s) = &session {
-                set_watermark(conn, s)?;
-            }
             emit("SessionStart", &ctx);
+            if let Some(s) = &session
+                && let Err(e) = set_watermark(conn, s)
+            {
+                log(&format!("watermark: {e:#}"));
+            }
         }
         "prompt" => {
             let Some(s) = &session else { return Ok(()) };
-            catch_up_recent(conn, Duration::from_millis(200))?;
+            if let Err(e) = catch_up_recent(conn, Duration::from_millis(200)) {
+                log(&format!("catch-up: {e:#}"));
+            }
             let Some(project) = project_for(conn, Some(s), input.cwd.as_deref()) else {
                 return Ok(());
             };
@@ -288,9 +332,9 @@ fn set_watermark(conn: &Connection, session: &str) -> Result<()> {
 /// What other sessions in this project did since this session last looked.
 ///
 /// Only live work counts: events from transcripts (not imported history), human prompts
-/// (not harness), newer than six hours. At most three sessions are shown in full; any
-/// others are counted in a "+N more" line, so the watermark can advance past everything
-/// without silently dropping anything. Groups are never cut mid-way.
+/// (not harness), newer than six hours and newer than this session's start. Each other
+/// session has its own "seen through" mark, advanced only when that session is shown,
+/// so sessions beyond the per-prompt cap stay pending and appear on a later prompt.
 pub fn cross_agent_delta(
     conn: &Connection,
     session: &str,
@@ -298,25 +342,28 @@ pub fn cross_agent_delta(
 ) -> Result<Option<String>> {
     const MAX_SESSIONS: usize = 3;
     const MAX_CHARS: usize = 1600;
-    let wm: Option<i64> = conn
+    let floor: Option<i64> = conn
         .query_row(
             "SELECT watermark FROM injections WHERE session_id = ?1",
             params![session],
             |r| r.get(0),
         )
         .optional()?;
-    let Some(wm) = wm else {
+    let Some(floor) = floor else {
         set_watermark(conn, session)?;
         return Ok(None);
     };
     let mut s = conn.prepare(
-        "SELECT s.id, s.agent, e.kind, e.path, e.text, e.label, e.id FROM events e JOIN sessions s ON s.id = e.session_id
-         WHERE e.id > ?1 AND s.project = ?2 AND s.id != ?3 AND e.thread IS NULL
-           AND e.source_path IS NOT NULL AND e.ts > ?4
+        "SELECT s.id, s.agent, e.kind, e.path, e.text, e.label, e.id
+         FROM events e JOIN sessions s ON s.id = e.session_id
+         LEFT JOIN delta_seen d ON d.viewer = ?3 AND d.other = s.id
+         WHERE e.id > max(?1, coalesce(d.through, 0)) AND s.project = ?2 AND s.id != ?3
+           AND e.thread IS NULL AND e.source_path IS NOT NULL AND e.ts > ?4
            AND (e.kind IN ('assistant', 'file_edit', 'error') OR (e.kind = 'prompt' AND e.label IS NULL))
          ORDER BY e.id",
     )?;
     struct Other {
+        id: String,
         agent: String,
         last_id: i64,
         prompt: Option<String>,
@@ -324,32 +371,33 @@ pub fn cross_agent_delta(
         files: Vec<String>,
         error: Option<String>,
     }
-    let mut by: Vec<(String, Other)> = Vec::new();
-    let mut max_id = wm;
-    let mut rows = s.query(params![wm, project, session, db::now_ms() - 6 * 3_600_000])?;
+    let mut by: Vec<Other> = Vec::new();
+    let mut rows = s.query(params![
+        floor,
+        project,
+        session,
+        db::now_ms() - 6 * 3_600_000
+    ])?;
     while let Some(r) = rows.next()? {
         let (sid, agent, kind): (String, String, String) = (r.get(0)?, r.get(1)?, r.get(2)?);
         let (path, text, label, id): (Option<String>, String, Option<String>, i64) =
             (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?);
-        max_id = max_id.max(id);
-        let i = match by.iter().position(|(k, _)| *k == sid) {
+        let i = match by.iter().position(|o| o.id == sid) {
             Some(i) => i,
             None => {
-                by.push((
-                    sid,
-                    Other {
-                        agent,
-                        last_id: id,
-                        prompt: None,
-                        answer: None,
-                        files: vec![],
-                        error: None,
-                    },
-                ));
+                by.push(Other {
+                    id: sid,
+                    agent,
+                    last_id: id,
+                    prompt: None,
+                    answer: None,
+                    files: vec![],
+                    error: None,
+                });
                 by.len() - 1
             }
         };
-        let o = &mut by[i].1;
+        let o = &mut by[i];
         o.last_id = id;
         match kind.as_str() {
             "prompt" => o.prompt = Some(text),
@@ -372,23 +420,20 @@ pub fn cross_agent_delta(
         }
     }
     drop(rows);
-    // Everything up to max_id is either shown below or counted in "+N more".
-    conn.execute(
-        "UPDATE injections SET watermark = ?2 WHERE session_id = ?1",
-        params![session, max_id],
-    )?;
-    // Most recently active first; sessions with an answer or edits carry the most signal.
-    by.retain(|(_, o)| o.prompt.is_some() || o.answer.is_some() || !o.files.is_empty());
     if by.is_empty() {
         return Ok(None);
     }
-    by.sort_by_key(|(_, o)| {
-        std::cmp::Reverse((o.answer.is_some() || !o.files.is_empty(), o.last_id))
+    // Most recently active first; sessions that produced something beat pure chatter.
+    by.sort_by_key(|o| {
+        std::cmp::Reverse((
+            o.answer.is_some() || !o.files.is_empty() || o.error.is_some(),
+            o.last_id,
+        ))
     });
     let mut w = String::from("mnem: meanwhile in this project (other sessions, newest first)\n");
-    let mut shown = 0;
-    for (_, o) in &by {
-        if shown == MAX_SESSIONS {
+    let mut shown: Vec<&Other> = Vec::new();
+    for o in &by {
+        if shown.len() == MAX_SESSIONS {
             break;
         }
         let mut g = format!("- {}", o.agent);
@@ -411,16 +456,23 @@ pub fn cross_agent_delta(
         if let Some(e) = &o.error {
             g.push_str(&format!("  last error: {}\n", crate::text::head(e, 140)));
         }
-        if w.len() + g.len() > MAX_CHARS {
+        if !shown.is_empty() && w.len() + g.len() > MAX_CHARS {
             break;
         }
-        w.push_str(&g);
-        shown += 1;
+        w.push_str(&crate::text::head(&g, MAX_CHARS));
+        shown.push(o);
     }
-    if by.len() > shown {
+    let mut mark = conn.prepare_cached(
+        "INSERT INTO delta_seen(viewer, other, through) VALUES (?1, ?2, ?3)
+         ON CONFLICT(viewer, other) DO UPDATE SET through = max(through, excluded.through)",
+    )?;
+    for o in &shown {
+        mark.execute(params![session, o.id, o.last_id])?;
+    }
+    if by.len() > shown.len() {
         w.push_str(&format!(
-            "+{} more session(s) active here; search memory for details\n",
-            by.len() - shown
+            "+{} more session(s) with new work; shown on your next prompts\n",
+            by.len() - shown.len()
         ));
     }
     Ok(Some(w))

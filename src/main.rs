@@ -57,6 +57,9 @@ enum Cmd {
         /// mnem binary to register (default: this executable)
         #[arg(long)]
         bin: Option<String>,
+        /// Also install and start the `mnem watch` systemd user service
+        #[arg(long)]
+        watch: bool,
     },
     /// Remove mnem's hooks, MCP entries and pi extension (keeps the database)
     Uninstall {
@@ -94,6 +97,15 @@ enum Cmd {
         #[arg(long)]
         quiet: bool,
     },
+    /// Keep capture and distillation current in the background (runs as a user service)
+    Watch {
+        /// Seconds between transcript reconciliations
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
+        /// Seconds between distillation passes over idle sessions (0 = never)
+        #[arg(long, default_value_t = 300)]
+        distill_every: u64,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -117,14 +129,21 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.db.unwrap_or_else(|| db::data_dir().join("mnem.db"));
-    let mut conn = db::open(&path)?;
     // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
-    if matches!(
+    let in_turn = matches!(
         cli.cmd,
         Cmd::Hook { .. } | Cmd::Delta { .. } | Cmd::Context { .. }
-    ) {
-        conn.busy_timeout(std::time::Duration::from_millis(1500))?;
-    }
+    );
+    let busy = std::time::Duration::from_millis(if in_turn { 500 } else { 5000 });
+    let mut conn = match db::open_with(&path, busy) {
+        Ok(c) => c,
+        // A hook must never fail the agent, not even when the database is unavailable.
+        Err(e) if matches!(cli.cmd, Cmd::Hook { .. }) => {
+            hook::log(&format!("open {}: {e:#}", path.display()));
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     match cli.cmd {
         Cmd::Backfill => {
             let t = Instant::now();
@@ -210,6 +229,51 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Watch {
+            interval,
+            distill_every,
+        } => {
+            let mut last_distill = Instant::now();
+            loop {
+                let sources = ingest::discover();
+                match ingest::sweep(&mut conn, sources.clone()) {
+                    Ok(s) => {
+                        if s.changed > 0 || !s.errors.is_empty() {
+                            hook::log(&format!(
+                                "watch: {} changed, {} inserted, {} still behind, {} errors",
+                                s.changed,
+                                s.inserted,
+                                s.stale,
+                                s.errors.len()
+                            ));
+                        }
+                        let _ = ingest::mark_missing(&conn, &sources);
+                    }
+                    Err(e) => hook::log(&format!("watch sweep: {e:#}")),
+                }
+                if distill_every > 0 && last_distill.elapsed().as_secs() >= distill_every {
+                    last_distill = Instant::now();
+                    let o = distill::Options {
+                        session: None,
+                        since_days: 2,
+                        limit: 5,
+                        dry_run: false,
+                        include_active: false,
+                    };
+                    match distill::run(&mut conn, &o) {
+                        Ok(s) if s.calls > 0 || !s.errors.is_empty() => hook::log(&format!(
+                            "watch distill: {} calls, {} observations, {} errors",
+                            s.calls,
+                            s.observations,
+                            s.errors.len()
+                        )),
+                        Ok(_) => {}
+                        Err(e) => hook::log(&format!("watch distill: {e:#}")),
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_secs(interval.max(5)));
+            }
+        }
         Cmd::Distill {
             session,
             since_days,
@@ -248,7 +312,12 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Install { dry_run, only, bin } => {
+        Cmd::Install {
+            dry_run,
+            only,
+            bin,
+            watch,
+        } => {
             let has = |a: &str| only.split(',').any(|x| x.trim() == a);
             install::run(&install::Plan {
                 bin: bin.unwrap_or_else(install::default_bin),
@@ -256,6 +325,7 @@ fn main() -> Result<()> {
                 claude: has("claude"),
                 codex: has("codex"),
                 pi: has("pi"),
+                watch,
             })?;
         }
         Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
