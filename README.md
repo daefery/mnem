@@ -19,6 +19,8 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 | `mnem doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, claude-mem comparison |
 | `mnem context --cwd DIR` | The context injected at session start |
 | `mnem search <query>` | Full-text search over captured events |
+| `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
+| `mnem watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
 | `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `session_start_context` |
 | `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 

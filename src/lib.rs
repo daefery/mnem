@@ -13,3 +13,4 @@ pub mod model;
 pub mod project;
 pub mod search;
 pub mod text;
+pub mod ui;

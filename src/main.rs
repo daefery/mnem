@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mnem::model::Agent;
-use mnem::{context, db, distill, doctor, hook, import, ingest, install, mcp, project, search};
+use mnem::{context, db, distill, doctor, hook, import, ingest, install, mcp, project, search, ui};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -105,6 +105,14 @@ enum Cmd {
         /// Seconds between distillation passes over idle sessions (0 = never)
         #[arg(long, default_value_t = 300)]
         distill_every: u64,
+        /// Also serve the web viewer on this port (0 = off)
+        #[arg(long, default_value_t = 37777)]
+        ui_port: u16,
+    },
+    /// Web viewer for memory (local only): http://127.0.0.1:37777
+    Ui {
+        #[arg(long, default_value_t = 37777)]
+        port: u16,
     },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
@@ -229,10 +237,23 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Ui { port } => {
+            drop(conn);
+            ui::serve(path, port)?;
+        }
         Cmd::Watch {
             interval,
             distill_every,
+            ui_port,
         } => {
+            if ui_port != 0 {
+                let ui_path = path.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = ui::serve(ui_path, ui_port) {
+                        hook::log(&format!("watch ui: {e:#}"));
+                    }
+                });
+            }
             let mut last_distill = Instant::now();
             loop {
                 let sources = ingest::discover();
