@@ -140,3 +140,52 @@ fn oversized_group_is_shown_whole() {
     assert!(d.contains("CRITICAL-ERROR-OMITTED"), "{d}");
     assert!(d.len() <= 1600, "{}", d.len());
 }
+
+#[test]
+fn recall_matches_prompt_once_per_session() {
+    let c = db("recall");
+    for (i, title) in [
+        "Backup restore now stages the live database",
+        "Viewer shows capture health",
+        "Codex hooks need trust approval",
+    ]
+    .iter()
+    .enumerate()
+    {
+        c.execute(
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'mnem', ?2, ?3)",
+            params![title, format!("o{i}"), mnem::db::now_ms()],
+        )
+        .unwrap();
+    }
+    let prompt = "why does the backup restore refuse while the watch service is running";
+    let r = mnem::recall::recall(&c, "claude:me", "proj", prompt)
+        .unwrap()
+        .expect("a match");
+    assert!(r.contains("Backup restore"), "{r}");
+    assert!(!r.contains("Viewer"), "{r}");
+    assert!(
+        mnem::recall::recall(&c, "claude:me", "proj", prompt)
+            .unwrap()
+            .is_none(),
+        "not repeated"
+    );
+    assert!(
+        mnem::recall::recall(&c, "claude:other", "proj", prompt)
+            .unwrap()
+            .is_some(),
+        "other sessions still get it"
+    );
+    assert!(
+        mnem::recall::recall(&c, "claude:x", "proj", "yes")
+            .unwrap()
+            .is_none(),
+        "short prompts skip recall"
+    );
+    assert!(
+        mnem::recall::recall(&c, "claude:x", "elsewhere", prompt)
+            .unwrap()
+            .is_none(),
+        "project scoped"
+    );
+}

@@ -143,6 +143,13 @@ CREATE TABLE IF NOT EXISTS delta_seen(
   PRIMARY KEY(viewer, other)
 );
 
+-- Memories already offered to a session by prompt-time recall (never repeated).
+CREATE TABLE IF NOT EXISTS recall_seen(
+  session_id TEXT NOT NULL,
+  memory_id INTEGER NOT NULL,
+  PRIMARY KEY(session_id, memory_id)
+);
+
 -- Per-session floor: events before the session started are never "meanwhile" news.
 CREATE TABLE IF NOT EXISTS injections(
   session_id TEXT PRIMARY KEY,
@@ -174,7 +181,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

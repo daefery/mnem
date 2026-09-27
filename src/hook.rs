@@ -24,6 +24,8 @@ pub struct Input {
     pub session_id: Option<String>,
     pub transcript_path: Option<PathBuf>,
     pub cwd: Option<String>,
+    /// The user's prompt (UserPromptSubmit).
+    pub prompt: Option<String>,
 }
 
 impl Input {
@@ -36,6 +38,7 @@ impl Input {
             session_id: s("session_id"),
             transcript_path: s("transcript_path").map(PathBuf::from),
             cwd: s("cwd"),
+            prompt: s("prompt"),
         }
     }
 }
@@ -261,8 +264,8 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             let Some(project) = project_for(conn, Some(s), input.cwd.as_deref()) else {
                 return Ok(());
             };
-            if let Some(delta) = cross_agent_delta(conn, s, &project)? {
-                emit("UserPromptSubmit", &delta);
+            if let Some(update) = prompt_update(conn, s, &project, input.prompt.as_deref()) {
+                emit("UserPromptSubmit", &update);
             }
         }
         // Turn ended: distil it in a detached process so the agent never waits on an LLM.
@@ -286,6 +289,28 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// What to add to a prompt: other sessions' news, then memories matching the prompt.
+/// Either part failing only drops that part.
+pub fn prompt_update(
+    conn: &Connection,
+    session: &str,
+    project: &str,
+    prompt: Option<&str>,
+) -> Option<String> {
+    let delta = cross_agent_delta(conn, session, project).unwrap_or_else(|e| {
+        log(&format!("delta: {e:#}"));
+        None
+    });
+    let recalled = prompt.and_then(|p| {
+        crate::recall::recall(conn, session, project, p).unwrap_or_else(|e| {
+            log(&format!("recall: {e:#}"));
+            None
+        })
+    });
+    let parts: Vec<String> = [delta, recalled].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 fn spawn_distill(session: &str) {

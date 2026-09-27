@@ -13,6 +13,7 @@ pub mod install;
 pub mod mcp;
 pub mod model;
 pub mod project;
+pub mod recall;
 pub mod search;
 pub mod text;
 pub mod ui;

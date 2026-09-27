@@ -315,16 +315,21 @@ export default function (pi: ExtensionAPI) {
 
 	// Context rides along as a custom message in the transcript: sent once, kept in the
 	// conversation, and leaves pi's own system prompt untouched.
-	pi.on("before_agent_start", async (_event, ctx) => {
+	pi.on("before_agent_start", async (event, ctx) => {
 		const file = ctx.sessionManager.getSessionFile();
 		if (file) await run(["ingest", file]);
-		let content = "";
+		const parts: string[] = [];
 		if (!delivered && startContext) {
 			delivered = true;
-			content = startContext;
-		} else if (session) {
-			content = await run(["delta", "--session", session, "--cwd", ctx.cwd]);
+			parts.push(startContext);
 		}
+		if (session) {
+			const args = ["delta", "--session", session, "--cwd", ctx.cwd];
+			if (typeof event.prompt === "string" && event.prompt) args.push("--prompt", event.prompt);
+			const update = await run(args);
+			if (update) parts.push(update);
+		}
+		const content = parts.join("\n\n");
 		if (content) {
 			return { message: { customType: "mnem-context", content, display: false } };
 		}

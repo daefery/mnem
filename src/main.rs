@@ -74,6 +74,9 @@ enum Cmd {
         session: String,
         #[arg(long)]
         cwd: Option<String>,
+        /// The user's prompt, for prompt-time recall
+        #[arg(long)]
+        prompt: Option<String>,
     },
     /// Call an MCP tool from the shell: mnem tool search '{"query":"..."}'
     Tool {
@@ -439,12 +442,17 @@ fn main() -> Result<()> {
             })?;
         }
         Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
-        Cmd::Delta { session, cwd } => {
+        Cmd::Delta {
+            session,
+            cwd,
+            prompt,
+        } => {
             hook::catch_up_recent(&mut conn, std::time::Duration::from_millis(200))?;
             if let Some(project) = hook::project_for(&conn, Some(&session), cwd.as_deref())
-                && let Some(d) = hook::cross_agent_delta(&conn, &session, &project)?
+                && let Some(update) =
+                    hook::prompt_update(&conn, &session, &project, prompt.as_deref())
             {
-                println!("{d}");
+                println!("{update}");
             }
         }
         Cmd::Tool { name, args } => {
