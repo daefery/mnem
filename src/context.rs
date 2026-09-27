@@ -201,7 +201,8 @@ struct Obs {
 fn memories(conn: &Connection, project: &str, limit: usize) -> Result<(Vec<Obs>, Option<Summary>)> {
     let mut s = conn.prepare(
         "SELECT id, coalesce(type, kind), coalesce(title, ''), coalesce(created_at, 0) FROM memories
-         WHERE project = ?1 AND kind = 'observation' ORDER BY created_at DESC LIMIT ?2",
+         WHERE project = ?1 AND kind = 'observation' AND coalesce(type, '') != 'sensitive'
+         ORDER BY created_at DESC LIMIT ?2",
     )?;
     let obs = s
         .query_map(params![project, limit as i64], |r| {

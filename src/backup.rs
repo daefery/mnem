@@ -7,7 +7,7 @@
 
 use crate::db;
 use anyhow::{Context, Result, bail, ensure};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Read;
@@ -150,16 +150,28 @@ pub fn newest_age(dir: &Path) -> Option<i64> {
 }
 
 /// Prove a snapshot restores: copy it to a scratch file, check integrity and counts
-/// against its manifest, and run a real search on it. Returns the verified manifest.
+/// against its manifest, run migrations, check the full-text indexes and search for a
+/// word that is known to be in them. Returns the verified manifest.
 pub fn verify(snapshot: &Path) -> Result<Manifest> {
+    let (m, staged) = stage(snapshot)?;
+    remove_db(&staged);
+    Ok(m)
+}
+
+/// Verified copy of `snapshot` outside the backups directory (so rotation can never
+/// delete it), plus its manifest. The caller removes the copy.
+fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
     let want: Option<Manifest> = std::fs::read_to_string(manifest_path(snapshot))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
-    let scratch =
-        std::env::temp_dir().join(format!("mnem-restore-check-{}.db", std::process::id()));
-    std::fs::copy(snapshot, &scratch)?;
+    let staged = std::env::temp_dir().join(format!(
+        "mnem-restore-{}-{}.db",
+        std::process::id(),
+        db::now_ms()
+    ));
+    std::fs::copy(snapshot, &staged).with_context(|| format!("copy {}", snapshot.display()))?;
     let result = (|| -> Result<Manifest> {
-        let got = inspect(&scratch)?;
+        let got = inspect(&staged)?;
         if let Some(w) = &want {
             ensure!(got.sha256 == w.sha256, "checksum differs from manifest");
             ensure!(
@@ -168,55 +180,79 @@ pub fn verify(snapshot: &Path) -> Result<Manifest> {
             );
         }
         // Opening through mnem runs migrations exactly as a restored database would.
-        let c = db::open(&scratch)?;
-        let hits: i64 = c.query_row(
-            "SELECT count(*) FROM (SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'the' LIMIT 5)",
-            [],
-            |r| r.get(0),
-        )?;
-        ensure!(
-            got.memories == 0 || hits > 0,
-            "full-text index returned nothing"
-        );
+        let c = db::open(&staged)?;
+        for t in ["memories_fts", "events_fts"] {
+            c.execute(
+                &format!("INSERT INTO {t}({t}) VALUES ('integrity-check')"),
+                [],
+            )
+            .with_context(|| format!("{t} index is inconsistent"))?;
+        }
+        // Search for a word taken from a stored title, not an assumed English word.
+        let word: Option<String> = c
+            .query_row(
+                "SELECT title FROM memories WHERE length(coalesce(title, '')) > 3 LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|t| {
+                t.split(|ch: char| !ch.is_alphanumeric())
+                    .find(|w| w.len() >= 3)
+                    .map(str::to_lowercase)
+            });
+        if let Some(w) = word {
+            let hits: i64 = c.query_row(
+                "SELECT count(*) FROM (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1 LIMIT 1)",
+                [format!("\"{w}\"")],
+                |r| r.get(0),
+            )?;
+            ensure!(hits > 0, "full-text search found nothing for a stored word");
+        }
         Ok(got)
     })();
+    match result {
+        Ok(got) => {
+            let file = snapshot
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            Ok((Manifest { file, ..got }, staged))
+        }
+        Err(e) => {
+            remove_db(&staged);
+            Err(e)
+        }
+    }
+}
+
+fn remove_db(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", scratch.display()));
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
-    let file = snapshot
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    result.map(|m| Manifest { file, ..m })
 }
 
-/// Replace the live database with a verified snapshot. The current database is kept as
-/// a pre-restore snapshot first. Refuses while another mnem process may be writing.
-pub fn restore(snapshot: &Path, live: &Path, conn: Connection) -> Result<Manifest> {
-    let m = verify(snapshot)?;
-    if watch_is_running() {
-        bail!(
-            "mnem-watch.service is running; stop it first: systemctl --user stop mnem-watch.service"
-        );
-    }
-    let keep = create(&conn, &dir(), KEEP + 1)
-        .context("could not snapshot the current database before restoring")?;
-    println!("current database saved as {}", keep.file);
-    drop(conn);
-    swap_in(snapshot, live)?;
+/// Restore a verified snapshot into the live database with SQLite's online-backup API.
+/// The copy happens inside SQLite's own locking, so other connections (hooks, the
+/// watcher, MCP servers) wait and then see the restored data; no file is swapped or
+/// unlinked underneath them. The current database is snapshotted first.
+pub fn restore(snapshot: &Path, conn: &mut Connection, backups: &Path) -> Result<Manifest> {
+    // Stage first: the pre-restore snapshot below rotates old backups, which could
+    // otherwise delete the very snapshot being restored.
+    let (m, staged) = stage(snapshot)?;
+    let result = (|| -> Result<()> {
+        let keep = create(conn, backups, KEEP + 1)
+            .context("could not snapshot the current database before restoring")?;
+        println!("current database saved as {}", keep.file);
+        let src = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let backup = rusqlite::backup::Backup::new(&src, conn)?;
+        // One step for all pages: the copy happens under a single lock, so it is consistent.
+        backup.run_to_completion(i32::MAX, std::time::Duration::from_millis(50), None)?;
+        Ok(())
+    })();
+    remove_db(&staged);
+    result?;
     Ok(m)
-}
-
-/// Copy the snapshot next to the live file, drop the live WAL, then rename over it,
-/// so the live path always holds either the old database or the complete new one.
-fn swap_in(snapshot: &Path, live: &Path) -> Result<()> {
-    let staged = live.with_extension("db.restoring");
-    std::fs::copy(snapshot, &staged)?;
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", live.display()));
-    }
-    std::fs::rename(&staged, live)?;
-    Ok(())
 }
 
 /// Exclusive backup lock (a file created with create_new); stale after 30 minutes.
@@ -258,13 +294,6 @@ impl Drop for Lock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
-}
-
-fn watch_is_running() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "mnem-watch.service"])
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 /// yyyymmdd-hhmmss (UTC) without a date library.
@@ -351,15 +380,46 @@ mod tests {
             [],
         )
         .unwrap();
-        drop(conn);
-        swap_in(&listed[1].0, &d.join("m.db")).unwrap();
-        let back = db::open(&d.join("m.db")).unwrap();
-        let n: i64 = back
+        // A second connection stays open across the restore, as MCP servers would.
+        let reader = db::open(&d.join("m.db")).unwrap();
+        let mut conn = conn;
+        let older = listed[1].0.clone();
+        restore(&older, &mut conn, &backups).unwrap();
+        let n: i64 = reader
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(n, 1, "restored state, not the later write");
+        assert_eq!(
+            n, 1,
+            "open connections see the restored state, not the later write"
+        );
+        // Restoring must not have deleted its own source through rotation.
+        assert!(older.exists() || list(&backups).unwrap().len() <= 3);
+        let listed = list(&backups).unwrap();
         // Corrupt the newest snapshot: verification must refuse it.
         std::fs::write(&listed[0].0, b"not a database").unwrap();
         assert!(verify(&listed[0].0).is_err());
+    }
+
+    #[test]
+    fn restoring_the_oldest_snapshot_survives_rotation() {
+        let d = std::env::temp_dir().join(format!("mnem-restore-oldest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let backups = d.join("backups");
+        let mut conn = db::open(&d.join("m.db")).unwrap();
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'first', 'mnem', 'a')", [])
+            .unwrap();
+        // Fill the rotation window so the pre-restore snapshot pushes the oldest out.
+        let mut made = Vec::new();
+        for _ in 0..(KEEP + 1) {
+            made.push(create(&conn, &backups, KEEP + 1).unwrap());
+            std::thread::sleep(std::time::Duration::from_millis(1050));
+        }
+        let oldest = backups.join(&made[0].file);
+        restore(&oldest, &mut conn, &backups).unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 }

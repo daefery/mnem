@@ -19,6 +19,14 @@ use std::time::Instant;
 
 pub fn export(conn: &Connection, out: &mut dyn Write, project: Option<&str>) -> Result<usize> {
     let mut n = 0;
+    let schema: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    writeln!(
+        out,
+        "{}",
+        json!({ "record": "meta", "tool": "mnem", "version": env!("CARGO_PKG_VERSION"), "schema": schema,
+                "exported_at": crate::db::now_ms(), "project": project })
+    )?;
+    n += 1;
     let mut dump = |sql: &str, ty: &str, out: &mut dyn Write| -> Result<()> {
         let mut st = conn.prepare(sql)?;
         let cols: Vec<String> = st.column_names().iter().map(|c| c.to_string()).collect();
@@ -134,6 +142,8 @@ pub fn build(conn: &Connection, n: usize, path: &Path) -> Result<usize> {
 
 pub struct Report {
     pub cases: usize,
+    /// Cases whose target is a sensitive memory (excluded from automatic recall).
+    pub skipped: usize,
     pub hit1: usize,
     pub hit5: usize,
     pub mrr: f64,
@@ -157,7 +167,20 @@ pub fn run(conn: &Connection, path: &Path) -> Result<Report> {
     let (mut hit1, mut hit5, mut mrr) = (0, 0, 0.0);
     let mut times = Vec::new();
     let mut misses = Vec::new();
+    let mut skipped = 0;
     for c in &cases {
+        // Sensitive memories are kept out of automatic recall on purpose; not a miss.
+        let sensitive: bool = conn
+            .query_row(
+                "SELECT coalesce(type, '') = 'sensitive' FROM memories WHERE id = ?1",
+                [c.id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if sensitive {
+            skipped += 1;
+            continue;
+        }
         let t = Instant::now();
         let ranked = recall::rank(conn, &c.project, &c.question, None, 10)?;
         times.push(t.elapsed().as_secs_f64() * 1000.0);
@@ -181,13 +204,14 @@ pub fn run(conn: &Connection, path: &Path) -> Result<Report> {
             .unwrap_or(0.0)
     };
     Ok(Report {
-        cases: cases.len(),
+        cases: cases.len() - skipped,
+        skipped,
         hit1,
         hit5,
-        mrr: if cases.is_empty() {
+        mrr: if cases.len() == skipped {
             0.0
         } else {
-            mrr / cases.len() as f64
+            mrr / (cases.len() - skipped) as f64
         },
         p50_ms: pct(0.5),
         p95_ms: pct(0.95),

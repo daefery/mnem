@@ -615,3 +615,57 @@ fn pinned_facts_open_the_context() {
         "{other}"
     );
 }
+
+#[test]
+fn reimport_never_resurrects_forgotten_data() {
+    let d = tmpdir("reimport");
+    let src = d.join("cm.db");
+    let cm = Connection::open(&src).unwrap();
+    cm.execute_batch(
+        "CREATE TABLE sdk_sessions(memory_session_id TEXT, content_session_id TEXT, platform_source TEXT, project TEXT,
+           started_at_epoch INTEGER, completed_at_epoch INTEGER, custom_title TEXT);
+         CREATE TABLE observations(id INTEGER, memory_session_id TEXT, project TEXT, type TEXT, title TEXT, subtitle TEXT,
+           narrative TEXT, facts TEXT, concepts TEXT, files_read TEXT, files_modified TEXT, generated_by_model TEXT, created_at_epoch INTEGER);
+         CREATE TABLE session_summaries(id INTEGER, memory_session_id TEXT, project TEXT, request TEXT, investigated TEXT, learned TEXT,
+           completed TEXT, next_steps TEXT, notes TEXT, files_read TEXT, files_edited TEXT, created_at_epoch INTEGER);
+         CREATE TABLE user_prompts(id INTEGER, content_session_id TEXT, prompt_number INTEGER, prompt_text TEXT, created_at_epoch INTEGER);
+         INSERT INTO sdk_sessions VALUES ('m1', 'c1', 'claude', 'p', 1, 2, NULL);
+         INSERT INTO sdk_sessions VALUES ('m2', 'c2', 'claude', 'p', 1, 2, NULL);
+         INSERT INTO observations VALUES (1, 'm1', 'p', 'bugfix', 'kept', '', '', '[]', '[]', '[]', '[]', NULL, 5);
+         INSERT INTO observations VALUES (2, 'm2', 'p', 'bugfix', 'session gone', '', '', '[]', '[]', '[]', '[]', NULL, 5);
+         INSERT INTO user_prompts VALUES (10, 'c1', 1, 'please fix the flaky login test today', 5);
+         INSERT INTO user_prompts VALUES (11, 'c1', 2, 'and then update the changelog entry', 6);",
+    )
+    .unwrap();
+    drop(cm);
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    mnem::import::claude_mem(&mut conn, &src).unwrap();
+    let prompt: i64 = conn
+        .query_row(
+            "SELECT id FROM events WHERE record_key = 'cm:prompt:10'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    mnem::forget::forget(&mut conn, &[format!("E{prompt}")], Some("claude:c2"), None).unwrap();
+    // Re-import: the forgotten prompt and the forgotten session's observation stay gone.
+    conn.execute("DELETE FROM events WHERE session_id = 'claude:c1'", [])
+        .unwrap();
+    mnem::import::claude_mem(&mut conn, &src).unwrap();
+    let keys: Vec<String> = conn
+        .prepare("SELECT record_key FROM events ORDER BY record_key")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(keys, ["cm:prompt:11"]);
+    let titles: Vec<String> = conn
+        .prepare("SELECT title FROM memories ORDER BY title")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(titles, ["kept"]);
+}

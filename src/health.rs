@@ -13,16 +13,75 @@ use std::collections::HashMap;
 /// Capture that is behind for longer than this is an alert, not normal lag.
 const STUCK_MS: i64 = 5 * 60_000;
 
-/// Problems worth interrupting the user for. Empty when all is well.
+/// Full check, including the costly parts (a stat per transcript, a systemctl call).
+/// For `mnem doctor`, the viewer and the watcher; hooks use `for_hook`.
 pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
     let mut out = Vec::new();
-    let now = db::now_ms();
-
     if stuck_files > 0 {
-        out.push(format!(
-            "capture is stuck: {stuck_files} transcript(s) changed over 5 minutes ago and are still not indexed (run `mnem doctor`)"
-        ));
+        out.push(stuck_message(stuck_files));
     }
+    out.extend(cheap(conn));
+    if watch_installed() && !watch_active() {
+        out.push(
+            "mnem-watch.service is not running (systemctl --user start mnem-watch.service)".into(),
+        );
+    }
+    out
+}
+
+fn stuck_message(n: usize) -> String {
+    format!(
+        "capture is stuck: {n} transcript(s) changed over 5 minutes ago and are still not indexed (run `mnem doctor`)"
+    )
+}
+
+/// The watcher records the costly checks here every pass.
+pub fn record_watch_report(conn: &Connection, stuck_files: usize) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES ('health.watch', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [serde_json::json!({ "at": db::now_ms(), "stuck": stuck_files }).to_string()],
+    )?;
+    Ok(())
+}
+
+/// Hot-path check for hooks: SQL and a directory listing only. The costly checks come
+/// from the watcher's last report; a stale report means the watcher is not running.
+pub fn for_hook(conn: &Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    let report: Option<serde_json::Value> = conn
+        .query_row("SELECT v FROM meta WHERE k = 'health.watch'", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .optional()
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    if watch_installed() {
+        match report {
+            Some(r) => {
+                let age = db::now_ms() - r["at"].as_i64().unwrap_or(0);
+                if age > 5 * 60_000 {
+                    out.push(format!(
+                        "mnem-watch has not reported for {} (is it running? systemctl --user status mnem-watch.service)",
+                        ago(age)
+                    ));
+                } else if let Some(n) = r["stuck"].as_u64().filter(|n| *n > 0) {
+                    out.push(stuck_message(n as usize));
+                }
+            }
+            None => out.push(
+                "mnem-watch has never reported (systemctl --user status mnem-watch.service)".into(),
+            ),
+        }
+    }
+    out.extend(cheap(conn));
+    out
+}
+
+/// Checks that cost only SQL and a directory listing.
+fn cheap(conn: &Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    let now = db::now_ms();
 
     // Backups.
     match backup::newest_age(&backup::dir()) {
@@ -84,12 +143,6 @@ pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
         out.push(format!("summaries failing: {}", crate::text::head(&e, 140)));
     }
 
-    // The watcher does reconciliation, nightly backups and the viewer.
-    if watch_installed() && !watch_active() {
-        out.push(
-            "mnem-watch.service is not running (systemctl --user start mnem-watch.service)".into(),
-        );
-    }
     out
 }
 

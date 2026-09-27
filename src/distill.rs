@@ -371,6 +371,39 @@ mod chain_tests {
     }
 
     #[test]
+    fn forgotten_session_is_not_recreated_by_a_late_answer() {
+        let d = std::env::temp_dir().join(format!("mnem-late-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mut conn = db::open(&d.join("m.db")).unwrap();
+        conn.execute(
+            "INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:s', 'pi', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        crate::forget::forget(&mut conn, &[], Some("pi:s"), None).unwrap();
+        let chunk = Chunk {
+            from: 1,
+            through: 2,
+            at: 1,
+            text: "[E1] x".into(),
+            shown: [1].into_iter().collect(),
+        };
+        let reply = serde_json::json!({
+            "observations": [{ "type": "bugfix", "title": "late", "evidence": ["E1"] }],
+            "summary": { "request": "late summary" }
+        });
+        assert_eq!(
+            store(&mut conn, "pi:s", "p", "m", &chunk, &reply).unwrap(),
+            (0, 0)
+        );
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
     fn citations_outside_the_digest_are_dropped() {
         let shown: std::collections::HashSet<i64> = [10, 11, 12].into_iter().collect();
         let v = serde_json::json!(["E11", "E99", "e10", 12, "E11", "junk"]);
@@ -520,7 +553,11 @@ fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
         cur.through = last;
         cur.at = cur.at.max(ts);
         cur.text.push_str(&text::head(&w, CHUNK_CHARS));
-        cur.shown.extend(ids);
+        // Only ids whose tag survived truncation were actually sent to the model.
+        cur.shown.extend(
+            ids.into_iter()
+                .filter(|id| cur.text.contains(&format!("[E{id}]"))),
+        );
     }
     if !cur.text.is_empty() {
         out.push(cur);
@@ -735,6 +772,11 @@ fn store(
 ) -> Result<(usize, usize)> {
     let tx = conn.transaction()?;
     let base = format!("{sid}@{}-{}", c.from, c.through);
+    // The session may have been forgotten while the model was answering: store nothing
+    // and leave no distill state behind.
+    if crate::forget::session_blocked(&tx, sid, Some(project))? {
+        return Ok((0, 0));
+    }
     let (mut n_obs, mut n_sum) = (0, 0);
     {
         let mut ins = tx.prepare_cached(
@@ -797,7 +839,9 @@ fn store(
                 .collect::<Vec<_>>()
                 .join("\n");
             let request = field(s, "request");
-            if !(request.is_empty() && narrative.is_empty()) {
+            if !(request.is_empty() && narrative.is_empty())
+                && !crate::forget::memory_forgotten(&tx, "mnem", &format!("{base}#summary"))?
+            {
                 n_sum = ins.execute(params![
                     sid,
                     project,

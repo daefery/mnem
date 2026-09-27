@@ -243,7 +243,7 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                 footer.push_str(&format!(" · {pending} session(s) awaiting distillation"));
             }
             // Problems go to the user directly (systemMessage), not only to the agent.
-            let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+            let alerts = crate::health::for_hook(conn);
             for a in &alerts {
                 footer.push_str(&format!("\nmnem warning: {a}"));
             }
@@ -278,10 +278,9 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                     .ok()
                     .flatten()
                 });
-                if let Some(cwd) = cwd
-                    && let Err(e) = crate::gitstate::record(conn, s, std::path::Path::new(&cwd))
-                {
-                    log(&format!("git snapshot: {e:#}"));
+                // git can be slow on big or network repos; never make the agent wait for it.
+                if let Some(cwd) = cwd {
+                    spawn_detached(&["snapshot", "--session", s, "--cwd", &cwd]);
                 }
                 spawn_distill(s);
             }
@@ -318,10 +317,7 @@ fn spawn_distill(session: &str) {
     if c.on_stop == Some(false) || (c.api_key_env.is_none() && c.api_key_json.is_none()) {
         return;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let args = [
+    spawn_detached(&[
         "distill",
         "--session",
         session,
@@ -329,26 +325,31 @@ fn spawn_distill(session: &str) {
         "--quiet",
         "--limit",
         "1",
-    ];
-    // setsid detaches from the agent's process group so the hook returns immediately.
-    let spawned = std::process::Command::new("setsid")
-        .arg("-f")
-        .arg(&exe)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .or_else(|_| {
-            std::process::Command::new(&exe)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-        });
+    ]);
+}
+
+/// Run this binary with `args` in the background, detached from the agent's process
+/// group (setsid), so the hook returns immediately.
+fn spawn_detached(args: &[&str]) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let quiet = |c: &mut std::process::Command| {
+        c.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+    };
+    let mut detached = std::process::Command::new("setsid");
+    detached.arg("-f").arg(&exe).args(args);
+    quiet(&mut detached);
+    let spawned = detached.spawn().or_else(|_| {
+        let mut plain = std::process::Command::new(&exe);
+        plain.args(args);
+        quiet(&mut plain);
+        plain.spawn()
+    });
     if let Err(e) = spawned {
-        log(&format!("spawn distill: {e}"));
+        log(&format!("spawn {}: {e}", args.first().unwrap_or(&"")));
     }
 }
 

@@ -167,6 +167,9 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
             );
             let memory: String = r.get(1)?;
             let project: String = r.get(2)?;
+            if blocked(&tx, by_memory.get(&memory), &proj(&project))? {
+                continue;
+            }
             let red = |i: usize| -> rusqlite::Result<Option<String>> {
                 Ok(r.get::<_, Option<String>>(i)?.map(|s| text::redact(&s)))
             };
@@ -230,7 +233,9 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
                 "request": request, "investigated": investigated, "learned": learned,
                 "completed": completed, "next_steps": next, "notes": notes,
             });
-            if crate::forget::memory_forgotten(&tx, "claude-mem", &format!("sum:{id}"))? {
+            if crate::forget::memory_forgotten(&tx, "claude-mem", &format!("sum:{id}"))?
+                || blocked(&tx, by_memory.get(&memory), &proj(&project))?
+            {
                 continue;
             }
             // The reserved id may already belong to a memory mnem distilled after an
@@ -303,6 +308,10 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
                 continue;
             }
             last = Some(key);
+            let prompt_id: i64 = r.get(0)?;
+            if crate::forget::event_forgotten(&tx, sid, &format!("cm:prompt:{prompt_id}"))? {
+                continue;
+            }
             let id: i64 = r.get(0)?;
             stats.prompts += add.execute(params![
                 sid,
@@ -335,6 +344,15 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
     tx.commit()?;
     let _ = std::fs::remove_file(&snap);
     Ok(stats)
+}
+
+/// A memory's session or project was forgotten or excluded.
+fn blocked(conn: &Connection, session: Option<&String>, project: &str) -> Result<bool> {
+    crate::forget::session_blocked(
+        conn,
+        session.map(String::as_str).unwrap_or(""),
+        Some(project),
+    )
 }
 
 /// claude-mem names projects by folder basename ("firstmate", but also "code" or a home

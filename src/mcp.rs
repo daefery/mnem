@@ -824,7 +824,7 @@ fn evidence(conn: &Connection, memory_id: i64) -> Result<String> {
         && let Some((from, through)) = range.split('#').next().and_then(|r| r.split_once('-'))
     {
         return Ok(format!(
-            "\nEvidence: not cited per claim; distilled from events E{from}–E{through} of {session}.\n"
+            "\nSource range: distilled from events E{from}–E{through} of {session} (no per-claim citations; memory predates evidence links).\n"
         ));
     }
     Ok("\nEvidence: none (imported from claude-mem; its sources were not kept).\n".into())

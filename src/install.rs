@@ -337,7 +337,8 @@ export default function (pi: ExtensionAPI) {
 
 	// End of a turn: record the git working tree so the next session knows what is in progress.
 	pi.on("agent_end", async (_event, ctx) => {
-		if (session) await run(["snapshot", "--session", session, "--cwd", ctx.cwd]);
+		// Not awaited: git on a big repo must never delay the next turn.
+		if (session) void run(["snapshot", "--session", session, "--cwd", ctx.cwd]);
 	});
 
 	const tool = (name: string, description: string, parameters: any) =>

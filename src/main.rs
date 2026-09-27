@@ -172,6 +172,8 @@ enum Cmd {
         #[arg(long)]
         build: Option<usize>,
     },
+    /// List pinned facts (forget one with `mnem forget <id>`)
+    Pins,
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -295,6 +297,27 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Pins => {
+            let mut st = conn.prepare(
+                "SELECT id, project, coalesce(narrative, title) FROM memories WHERE kind = 'pinned' ORDER BY project, created_at",
+            )?;
+            let rows = st.query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            for r in rows {
+                let (id, project, fact) = r?;
+                let scope = if project == "*" {
+                    "every project".to_string()
+                } else {
+                    project
+                };
+                println!("#{id}  [{scope}]  {fact}");
+            }
+        }
         Cmd::Export { out, project } => {
             let n = match &out {
                 Some(p) => {
@@ -315,8 +338,9 @@ fn main() -> Result<()> {
             }
             let r = mnem::eval::run(&conn, &path)?;
             println!(
-                "recall eval: {} cases · hit@1 {:.0}% · hit@5 {:.0}% · MRR {:.2} · p50 {:.1} ms · p95 {:.1} ms",
+                "recall eval: {} cases ({} sensitive skipped) · hit@1 {:.0}% · hit@5 {:.0}% · MRR {:.2} · p50 {:.1} ms · p95 {:.1} ms",
                 r.cases,
+                r.skipped,
                 100.0 * r.hit1 as f64 / r.cases.max(1) as f64,
                 100.0 * r.hit5 as f64 / r.cases.max(1) as f64,
                 r.mrr,
@@ -400,7 +424,7 @@ fn main() -> Result<()> {
         }
         Cmd::Restore { snapshot, apply } => {
             if apply {
-                let m = backup::restore(&snapshot, &path, conn)?;
+                let m = backup::restore(&snapshot, &mut conn, &backup::dir())?;
                 println!(
                     "restored {} ({} memories, {} events)",
                     m.file, m.memories, m.events
@@ -455,6 +479,12 @@ fn main() -> Result<()> {
                         let _ = ingest::mark_missing(&conn, &sources);
                     }
                     Err(e) => hook::log(&format!("watch sweep: {e:#}")),
+                }
+                // Costly health checks happen here, not in hooks.
+                if let Err(e) =
+                    mnem::health::record_watch_report(&conn, mnem::health::stuck_files(&conn))
+                {
+                    hook::log(&format!("watch health: {e:#}"));
                 }
                 if backup::newest_age(&backup::dir()).is_none_or(|age| age > backup::INTERVAL_MS) {
                     match backup::create(&conn, &backup::dir(), backup::KEEP) {

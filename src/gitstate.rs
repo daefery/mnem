@@ -13,11 +13,12 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const GIT_TIMEOUT: Duration = Duration::from_secs(3);
+/// Budget for all git calls of one snapshot together.
+const GIT_BUDGET: Duration = Duration::from_secs(3);
 const MAX_FILES: usize = 12;
 
-/// Run git in `cwd`, giving up after GIT_TIMEOUT so a slow repo never stalls a hook.
-fn git(cwd: &Path, args: &[&str]) -> Option<String> {
+/// Run git in `cwd`, giving up at `deadline`.
+fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Option<String> {
     let mut child = Command::new("git")
         .arg("-C")
         .arg(cwd)
@@ -28,7 +29,6 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + GIT_TIMEOUT;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
@@ -47,14 +47,12 @@ fn git(cwd: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// A compact, human-readable description of the working tree, or None outside git.
+/// All git calls together share one GIT_BUDGET.
 pub fn describe(cwd: &Path) -> Option<(String, String)> {
-    let root = git(cwd, &["rev-parse", "--show-toplevel"])?
-        .trim()
-        .to_string();
-    let status = git(
-        cwd,
-        &["status", "--porcelain=v1", "-b", "--untracked-files=normal"],
-    )?;
+    let deadline = Instant::now() + GIT_BUDGET;
+    let run = |args: &[&str]| git(cwd, args, deadline);
+    let root = run(&["rev-parse", "--show-toplevel"])?.trim().to_string();
+    let status = run(&["status", "--porcelain=v1", "-b", "--untracked-files=normal"])?;
     let mut lines = status.lines();
     // "## main...origin/main [ahead 2, behind 1]" or "## HEAD (no branch)"
     let branch = lines
@@ -63,11 +61,11 @@ pub fn describe(cwd: &Path) -> Option<(String, String)> {
         .trim_start_matches("## ")
         .to_string();
     let files: Vec<&str> = lines.filter(|l| !l.trim().is_empty()).collect();
-    let head = git(cwd, &["log", "-1", "--format=%h %s"]).unwrap_or_default();
-    let unpushed = git(cwd, &["log", "--oneline", "@{upstream}..HEAD"])
+    let head = run(&["log", "-1", "--format=%h %s"]).unwrap_or_default();
+    let unpushed = run(&["log", "--oneline", "@{upstream}..HEAD"])
         .map(|s| s.lines().count())
         .unwrap_or(0);
-    let stat = git(cwd, &["diff", "HEAD", "--shortstat"]).unwrap_or_default();
+    let stat = run(&["diff", "HEAD", "--shortstat"]).unwrap_or_default();
 
     let mut w = format!("branch {branch}\nHEAD {}", head.trim());
     if unpushed > 0 {

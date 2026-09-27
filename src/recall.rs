@@ -79,10 +79,16 @@ pub fn rank(
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" OR ");
+    // One shared common word is not relevance: need at least two prompt terms in the memory.
+    let need = terms.len().min(2);
     let mut st = conn.prepare_cached(
-        "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0)
+        "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0),
+                lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, '') || ' ' ||
+                      coalesce(m.narrative, '') || ' ' || coalesce(m.facts, ''))
          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
          WHERE memories_fts MATCH ?1 AND m.project = ?2 AND m.kind != 'pinned'
+           -- Personal details stay out of automatic injection; explicit search still finds them.
+           AND coalesce(m.type, '') != 'sensitive'
            AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)
          -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `mnem eval`.
          ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
@@ -90,10 +96,29 @@ pub fn rank(
     )?;
     let rows = st
         .query_map(
-            params![query, project, exclude_session.unwrap_or(""), limit as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            params![
+                query,
+                project,
+                exclude_session.unwrap_or(""),
+                (limit * 4) as i64
+            ],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            },
         )?
-        .collect::<rusqlite::Result<_>>()?;
+        .filter_map(Result::ok)
+        .filter(|row: &(i64, String, String, i64, String)| {
+            terms.iter().filter(|t| row.4.contains(t.as_str())).count() >= need
+        })
+        .take(limit)
+        .map(|(id, kind, title, at, _)| (id, kind, title, at))
+        .collect();
     Ok(rows)
 }
 

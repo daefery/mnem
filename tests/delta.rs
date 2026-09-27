@@ -242,9 +242,9 @@ fn export_labels_every_record() {
         .collect();
     assert_eq!(n, rows.len());
     let kinds: Vec<&str> = rows.iter().map(|r| r["record"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["session", "event", "memory"]);
+    assert_eq!(kinds, ["meta", "session", "event", "memory"]);
     assert_eq!(
-        rows[2]["type"], "bugfix",
+        rows[3]["type"], "bugfix",
         "the memory's own type is preserved"
     );
 }
