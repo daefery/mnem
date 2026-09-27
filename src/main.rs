@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use mnem::{db, doctor, import, ingest, project, search};
+use mnem::model::Agent;
+use mnem::{context, db, doctor, hook, import, ingest, project, search};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -26,6 +27,24 @@ enum Cmd {
     Import {
         #[arg(long)]
         from: Option<PathBuf>,
+    },
+    /// Agent hook entry point; reads the hook JSON on stdin. Never fails the agent.
+    Hook {
+        agent: Agent,
+        /// session-start | prompt | stop | session-end
+        event: String,
+    },
+    /// Print the session-start context for a project (what hooks inject)
+    Context {
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        /// Caller's mnem session id, excluded from "recent" (e.g. claude:<uuid>)
+        #[arg(long)]
+        session: Option<String>,
+        #[arg(long, default_value_t = 8000)]
+        budget: usize,
     },
     /// Catch up a single transcript file
     Ingest { path: PathBuf },
@@ -93,6 +112,45 @@ fn main() -> Result<()> {
                 s.projects_mapped,
                 t.elapsed().as_secs_f64()
             );
+        }
+        Cmd::Hook { agent, event } => {
+            let t = Instant::now();
+            if let Err(e) = hook::run(&mut conn, agent, &event) {
+                hook::log(&format!("{} {event}: {e:#}", agent.as_str()));
+            }
+            hook::log(&format!(
+                "{} {event} took {} ms",
+                agent.as_str(),
+                t.elapsed().as_millis()
+            ));
+        }
+        Cmd::Context {
+            cwd,
+            project,
+            session,
+            budget,
+        } => {
+            let cwd = cwd.or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            });
+            let project = project
+                .or_else(|| hook::project_for(&conn, session.as_deref(), cwd.as_deref()))
+                .ok_or_else(|| anyhow::anyhow!("cannot resolve a project; pass --project"))?;
+            let fresh = hook::catch_up_recent(&mut conn, std::time::Duration::from_millis(400))?;
+            let ctx = context::build(
+                &conn,
+                &context::Options {
+                    project: &project,
+                    current: session.as_deref(),
+                    budget_chars: budget,
+                    sessions: 5,
+                    turns: 3,
+                    observations: 30,
+                },
+            )?;
+            println!("{ctx}\n---\n{}", fresh.footer());
         }
         Cmd::Ingest { path } => {
             let path = std::fs::canonicalize(&path)?;

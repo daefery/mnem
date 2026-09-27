@@ -42,17 +42,24 @@ impl Emit<'_> {
         self.prompt_with(key, raw, true);
     }
 
-    /// Record a user prompt. Wrappers are dropped, tooling-injected prompts are labelled
-    /// "harness", and a prompt identical to the previous one (polling loops) is skipped.
+    /// Record a user prompt. Wrappers are dropped and tooling-injected prompts are
+    /// labelled "harness"; a harness prompt already seen recently (polling loops that
+    /// alternate a few texts) is skipped. Human prompts are never deduplicated: "yes"
+    /// twice is two turns.
     pub fn prompt_with(&mut self, key: String, raw: &str, new_turn: bool) {
         let Some((t, label)) = classify_prompt(raw) else {
             return;
         };
-        let h = text::hash(&t);
-        if self.st.last_prompt.as_deref() == Some(h.as_str()) {
-            return;
+        if label.is_some() {
+            let h = text::hash(&t);
+            if self.st.recent_harness.contains(&h) {
+                return;
+            }
+            self.st.recent_harness.push(h);
+            if self.st.recent_harness.len() > 32 {
+                self.st.recent_harness.remove(0);
+            }
         }
-        self.st.last_prompt = Some(h);
         if new_turn {
             self.st.turn += 1;
         }
@@ -149,8 +156,14 @@ pub fn classify_prompt(raw: &str) -> Option<(String, Option<&'static str>)> {
     }
     // Orchestrators mark their messages with an invisible separator (U+2063), wrap task
     // files, or replay delegated history. They are real instructions, just not typed by a human.
-    if let Some(rest) = t.strip_prefix('\u{2063}') {
-        return Some((rest.trim().to_string(), Some("harness")));
+    if crate::config::HARNESS.iter().any(|r| r.is_match(t)) {
+        return Some((t.to_string(), Some("harness")));
+    }
+    if t.contains('\u{2063}') {
+        return Some((
+            t.replace('\u{2063}', "").trim().to_string(),
+            Some("harness"),
+        ));
     }
     if t.starts_with("<file name=") || t.starts_with("The following is the Codex agent history") {
         return Some((t.to_string(), Some("harness")));
@@ -195,21 +208,24 @@ pub fn classify_error(out: &str) -> Option<&'static str> {
             "failed to apply",
         ]) {
             "edit_mismatch"
-        } else if has(&[
-            "test result: failed",
-            "tests failed",
-            "assertionerror",
-            "failures:",
-            "short test summary",
-            "npm err! test",
-            "✗",
-            " failed",
-        ]) {
+        } else if out.contains("FAILED")
+            || has(&[
+                "tests failed",
+                "failed tests",
+                "assertionerror",
+                "assertion failed",
+                "short test summary",
+                "npm err! test",
+                " failing",
+            ])
+        {
             "test_fail"
         } else if has(&[
             "no such file or directory",
             "command not found",
-            "not found",
+            "cannot find module",
+            "modulenotfounderror",
+            "enoent",
         ]) {
             "not_found"
         } else if has(&["timed out", "timeout"]) {

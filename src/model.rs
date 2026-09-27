@@ -9,6 +9,21 @@ pub enum Agent {
     Pi,
 }
 
+impl std::str::FromStr for Agent {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s {
+            "claude" | "claude-code" => Ok(Agent::Claude),
+            "codex" => Ok(Agent::Codex),
+            "pi" => Ok(Agent::Pi),
+            other => Err(format!(
+                "unknown agent {other:?} (expected claude, codex or pi)"
+            )),
+        }
+    }
+}
+
 impl Agent {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -72,7 +87,7 @@ pub struct Event {
 }
 
 /// Bump when ParserState changes meaning; older persisted states force a replay from 0.
-pub const STATE_VERSION: u32 = 2;
+pub const STATE_VERSION: u32 = 3;
 
 /// Per-file parser state. Persisted with the cursor so ingest can resume mid-file.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -92,9 +107,9 @@ pub struct ParserState {
     pub pending: HashMap<String, String>,
     #[serde(default)]
     pub thread: Option<String>,
-    /// Hash of the last prompt, to collapse consecutive duplicates (polling loops).
+    /// Hashes of recent harness prompts, to drop polling repeats.
     #[serde(default)]
-    pub last_prompt: Option<String>,
+    pub recent_harness: Vec<String>,
 }
 
 impl Default for ParserState {
@@ -112,7 +127,7 @@ impl Default for ParserState {
             turn_id: None,
             pending: HashMap::new(),
             thread: None,
-            last_prompt: None,
+            recent_harness: Vec::new(),
         }
     }
 }

@@ -1,6 +1,9 @@
 pub mod adapters;
+pub mod config;
+pub mod context;
 pub mod db;
 pub mod doctor;
+pub mod hook;
 pub mod import;
 pub mod ingest;
 pub mod model;

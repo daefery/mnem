@@ -359,3 +359,73 @@ fn subagent_events_carry_thread_and_merge_into_parent_session() {
         ("claude:s-claude", "agent-abc", "shell", "Bash")
     );
 }
+
+#[test]
+fn nested_workflow_subagent_gets_thread() {
+    let d = tmpdir("nested");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let dir = d.join("s-claude/subagents/workflows/wf_1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("agent-xyz.jsonl");
+    std::fs::write(
+        &f,
+        concat!(
+            r#"{"type":"assistant","uuid":"y1","sessionId":"s-claude","isSidechain":true,"message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/x/a.rs"}}]}}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    ingest(&mut conn, &f, Agent::Claude);
+    let thread: String = conn
+        .query_row("SELECT thread FROM events", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(thread, "agent-xyz");
+}
+
+#[test]
+fn human_repeats_are_turns_but_harness_polling_collapses() {
+    let d = tmpdir("repeats");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let f = d.join("s.jsonl");
+    let msg = |id: &str, t: &str| {
+        format!(
+            r#"{{"type":"message","id":"{id}","message":{{"role":"user","content":[{{"type":"text","text":"{t}"}}]}}}}"#
+        )
+    };
+    let lines = [
+        r#"{"type":"session","id":"s","cwd":"/x"}"#.to_string(),
+        msg("1", "yes"),
+        msg("2", "yes"),
+        msg("3", "⁣poll A"),
+        msg("4", "⁣poll B"),
+        msg("5", "⁣poll A"),
+    ];
+    std::fs::write(&f, lines.join("\n") + "\n").unwrap();
+    ingest(&mut conn, &f, Agent::Pi);
+    let prompts: Vec<(String, Option<String>)> = conn
+        .prepare("SELECT text, label FROM events WHERE kind = 'prompt' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let texts: Vec<&str> = prompts.iter().map(|p| p.0.as_str()).collect();
+    assert_eq!(texts, ["yes", "yes", "poll A", "poll B"]);
+    assert_eq!(prompts[2].1.as_deref(), Some("harness"));
+}
+
+#[test]
+fn final_answer_is_last_text_of_the_turn() {
+    let d = tmpdir("final");
+    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    ingest(
+        &mut conn,
+        &fixture("claude", "session.jsonl"),
+        Agent::Claude,
+    );
+    let a = mnem::context::final_answer(&conn, "claude:s-claude", 1).unwrap();
+    assert_eq!(
+        a.as_deref(),
+        Some("Fixed: token expiry used < instead of <=.")
+    );
+}

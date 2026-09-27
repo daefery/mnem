@@ -95,10 +95,32 @@ pub fn is_excluded(path: &Path, cwd: Option<&str>) -> bool {
     cwd.is_some_and(|c| Path::new(c).starts_with(&cm))
 }
 
+/// Consume through the next newline, returning bytes consumed, or None at EOF (the
+/// record is still being written).
+fn skip_line(r: &mut impl BufRead) -> Result<Option<u64>> {
+    let mut total = 0u64;
+    loop {
+        let buf = r.fill_buf()?;
+        if buf.is_empty() {
+            return Ok(None);
+        }
+        if let Some(i) = buf.iter().position(|&b| b == b'\n') {
+            r.consume(i + 1);
+            return Ok(Some(total + i as u64 + 1));
+        }
+        let n = buf.len();
+        total += n as u64;
+        r.consume(n);
+    }
+}
+
 /// Claude Code writes subagent runs to <session>/subagents/agent-<id>.jsonl.
 fn subagent_thread(path: &Path) -> Option<String> {
-    let parent = path.parent()?;
-    (parent.file_name()? == "subagents").then(|| path.file_stem()?.to_str().map(str::to_string))?
+    // Also nested: <session>/subagents/workflows/wf_*/agent-<id>.jsonl
+    path.ancestors()
+        .skip(1)
+        .any(|a| a.file_name().is_some_and(|n| n == "subagents"))
+        .then(|| path.file_stem()?.to_str().map(str::to_string))?
 }
 
 pub fn load_cursor(conn: &Connection, path: &Path) -> Result<Option<Cursor>> {
@@ -192,9 +214,8 @@ pub fn parse(src: &Source, cur: Option<Cursor>) -> Result<Option<Batch>> {
     if size == start && generation == base.1 {
         return Ok(None);
     }
-    if start == 0 {
-        state.thread = subagent_thread(&src.path);
-    }
+    // Derived from the path, so correct even when resuming a state written without it.
+    state.thread = subagent_thread(&src.path);
 
     f.seek(SeekFrom::Start(start))?;
     let mut reader = BufReader::with_capacity(1 << 20, (&mut f).take(size - start));
@@ -204,17 +225,31 @@ pub fn parse(src: &Source, cur: Option<Cursor>) -> Result<Option<Batch>> {
     let mut pos = start;
     loop {
         line.clear();
-        let n = reader.read_until(b'\n', &mut line)?;
-        // Only consume complete, newline-terminated records; a partial tail waits.
-        if n == 0 || line.last() != Some(&b'\n') {
+        // Bounded read: never buffer more than MAX_LINE bytes of one record.
+        let n = (&mut reader)
+            .take(MAX_LINE as u64 + 1)
+            .read_until(b'\n', &mut line)?;
+        if n == 0 {
             break;
+        }
+        if line.last() != Some(&b'\n') {
+            if n <= MAX_LINE {
+                break; // Partial tail: wait for the writer to finish the line.
+            }
+            // Oversized: skip to the end of the record without buffering it.
+            let Some(rest) = skip_line(&mut reader)? else {
+                break;
+            };
+            bad.push((
+                pos,
+                format!("oversized record: {} bytes", n as u64 + rest),
+                String::new(),
+            ));
+            pos += n as u64 + rest;
+            continue;
         }
         let off = pos;
         pos += n as u64;
-        if n > MAX_LINE {
-            bad.push((off, format!("oversized record: {n} bytes"), String::new()));
-            continue;
-        }
         let s = String::from_utf8_lossy(&line);
         let s = s.trim();
         if s.is_empty() {

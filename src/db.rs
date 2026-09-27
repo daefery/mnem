@@ -114,6 +114,12 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
   VALUES ('delete', old.id, old.title, old.subtitle, old.narrative, old.facts, old.concepts);
 END;
 
+-- Per-session high-water mark of events already shown by the cross-agent delta.
+CREATE TABLE IF NOT EXISTS injections(
+  session_id TEXT PRIMARY KEY,
+  watermark INTEGER NOT NULL
+);
+
 -- Lines that failed to parse. Kept for replay once an adapter learns the format.
 CREATE TABLE IF NOT EXISTS quarantine(
   source_path TEXT NOT NULL,

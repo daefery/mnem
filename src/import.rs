@@ -317,12 +317,21 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
     Ok(stats)
 }
 
-/// claude-mem names projects by folder basename ("code", "firstmate"). Map each name to
-/// the mnem project (git identity) most often seen for the sessions both systems know.
+/// claude-mem names projects by folder basename ("firstmate", but also "code" or a home
+/// directory). A name maps to a mnem project (git identity) only when the repo name
+/// matches it; among several such repos, the one most often seen for sessions both
+/// systems know wins. Folder names like "code" stay as they are.
 fn map_projects(conn: &Connection, sessions: &[CmSession]) -> Result<HashMap<String, String>> {
-    let mut votes: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    let tail = |p: &str| {
+        p.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(p)
+            .to_lowercase()
+    };
+    let mut votes: HashMap<(String, String), usize> = HashMap::new();
     // Only transcript-backed sessions vote; sessions created by a previous import carry
-    // the raw claude-mem name and would map every name to itself.
+    // the raw claude-mem name.
     let mut q = conn.prepare_cached(
         "SELECT s.project FROM sessions s
          WHERE s.id = ?1 AND s.project IS NOT NULL AND EXISTS (SELECT 1 FROM sources WHERE session_id = s.id)",
@@ -332,43 +341,31 @@ fn map_projects(conn: &Connection, sessions: &[CmSession]) -> Result<HashMap<Str
             .query_row(params![s.mnem_id], |r| r.get::<_, String>(0))
             .optional()?
         {
-            *votes
-                .entry(s.project.clone())
-                .or_default()
-                .entry(p)
-                .or_default() += 1;
+            *votes.entry((s.project.clone(), p)).or_default() += 1;
         }
     }
-    let mut map: HashMap<String, String> = votes
-        .into_iter()
-        .filter_map(|(name, v)| {
-            v.into_iter()
-                .max_by_key(|(_, n)| *n)
-                .map(|(p, _)| (name, p))
-        })
-        .collect();
-    // Names never seen alongside a transcript: match on the repo name when unambiguous
-    // ("webapp" -> "gitlab.example.org/team/webapp").
-    let mut q = conn.prepare("SELECT DISTINCT project FROM sessions s WHERE project IS NOT NULL AND EXISTS (SELECT 1 FROM sources WHERE session_id = s.id)")?;
-    let known: Vec<String> = q
+    let mut q = conn.prepare(
+        "SELECT DISTINCT project FROM sessions s
+         WHERE project IS NOT NULL AND project NOT LIKE '/%'
+           AND EXISTS (SELECT 1 FROM sources WHERE session_id = s.id)",
+    )?;
+    let repos: Vec<String> = q
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut map = HashMap::new();
     for s in sessions {
         if map.contains_key(&s.project) {
             continue;
         }
-        let tail = s
-            .project
-            .rsplit('/')
-            .next()
-            .unwrap_or(&s.project)
-            .to_lowercase();
-        let hits: Vec<&String> = known
-            .iter()
-            .filter(|p| !p.starts_with('/') && p.rsplit('/').next() == Some(tail.as_str()))
-            .collect();
-        if let [only] = hits[..] {
-            map.insert(s.project.clone(), only.clone());
+        let name = tail(&s.project);
+        let best = repos.iter().filter(|r| tail(r) == name).max_by_key(|r| {
+            votes
+                .get(&(s.project.clone(), (*r).clone()))
+                .copied()
+                .unwrap_or(0)
+        });
+        if let Some(r) = best {
+            map.insert(s.project.clone(), r.clone());
         }
     }
     Ok(map)

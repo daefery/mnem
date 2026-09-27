@@ -42,15 +42,32 @@ pub fn redact(s: &str) -> String {
 /// secret straddles the window edge), then truncate the redacted text.
 const WINDOW: usize = 64 * 1024;
 
+/// Longest secret we expect to see as one unbroken token. When a window edge falls
+/// inside a whitespace-free run, this much is skipped so no partial secret survives.
+const MAX_TOKEN: usize = 512;
+
+fn floor_boundary(s: &str, mut i: usize) -> usize {
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_boundary(s: &str, mut i: usize) -> usize {
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
 fn window_head(s: &str) -> &str {
     if s.len() <= WINDOW {
         return s;
     }
-    let mut end = WINDOW;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    let cut = s[..end].rfind(char::is_whitespace).unwrap_or(0);
+    let end = floor_boundary(s, WINDOW);
+    let cut = s[..end]
+        .rfind(char::is_whitespace)
+        .unwrap_or_else(|| floor_boundary(s, end.saturating_sub(MAX_TOKEN)));
     &s[..cut]
 }
 
@@ -58,24 +75,33 @@ fn window_tail(s: &str) -> &str {
     if s.len() <= WINDOW {
         return s;
     }
-    let mut start = s.len() - WINDOW;
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
+    let start = ceil_boundary(s, s.len() - WINDOW);
     let cut = s[start..]
         .find(char::is_whitespace)
         .map(|i| start + i)
-        .unwrap_or(s.len());
+        .unwrap_or_else(|| ceil_boundary(s, (start + MAX_TOKEN).min(s.len())));
     &s[cut..]
+}
+
+/// Multi-line protected spans can start outside a window; redact those texts whole.
+fn has_span(s: &str) -> bool {
+    s.contains("<private>") || s.contains("PRIVATE KEY-----")
 }
 
 /// Redacted excerpt from the start of `s`.
 pub fn clean(s: &str, max: usize) -> String {
-    head(&redact(window_head(s.trim())), max)
+    let s = s.trim();
+    if has_span(s) {
+        return head(&redact(s), max);
+    }
+    head(&redact(window_head(s)), max)
 }
 
 /// Redacted excerpt from the end of `s`; errors usually carry the signal at the end.
 pub fn clean_tail(s: &str, lines: usize, max: usize) -> String {
+    if has_span(s) {
+        return tail(&redact(s), lines, max);
+    }
     tail(&redact(window_tail(s)), lines, max)
 }
 
@@ -83,7 +109,7 @@ pub fn clean_tail(s: &str, lines: usize, max: usize) -> String {
 /// lines (the verdict), each line capped, total capped at `max`.
 pub fn clean_error(s: &str, head_n: usize, tail_n: usize, max: usize) -> String {
     let s = s.trim();
-    let red = if s.len() <= 2 * WINDOW {
+    let red = if s.len() <= 2 * WINDOW || has_span(s) {
         redact(s)
     } else {
         format!("{}\n…\n{}", redact(window_head(s)), redact(window_tail(s)))
@@ -103,13 +129,18 @@ pub fn clean_error(s: &str, head_n: usize, tail_n: usize, max: usize) -> String 
 /// Replace pasted terminal dumps with a size marker; they drown out the actual ask.
 pub fn strip_pasted(s: &str) -> String {
     static PASTED: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"(?s)<pasted_content[^>]*>(.*?)</pasted_content>").expect("valid regex")
+        Regex::new(r"(?s)<pasted_content[^>]*>(.*?)</pasted_content[^>]*>").expect("valid regex")
     });
-    PASTED
-        .replace_all(s, |c: &regex::Captures| {
-            format!("[pasted {} chars]", c[1].len())
-        })
-        .into_owned()
+    // Unterminated (e.g. truncated upstream): everything after the tag is the paste.
+    static OPEN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?s)<pasted_content[^>]*>(.*)$").expect("valid regex"));
+    let s = PASTED.replace_all(s, |c: &regex::Captures| {
+        format!("[pasted {} chars]", c[1].len())
+    });
+    OPEN.replace(&s, |c: &regex::Captures| {
+        format!("[pasted {}+ chars]", c[1].len())
+    })
+    .into_owned()
 }
 
 /// First `max` chars, cut on a char boundary.
@@ -229,6 +260,37 @@ mod tests {
         assert_eq!(
             clean_error(&s, 2, 2, 800),
             "line 1\nline 2\n…\nline 19\nline 20"
+        );
+    }
+
+    #[test]
+    fn windows_never_drop_signal_or_leak_spans() {
+        // No whitespace anywhere: tail must still carry the end of the text.
+        let blob = format!("{}END", "x".repeat(200_000));
+        assert!(clean_tail(&blob, 3, 100).ends_with("END"));
+        assert!(!clean(&blob, 100).is_empty());
+        // A private block longer than two windows must not leak its tail.
+        let private = format!(
+            "<private>\n{}\nSECRET-IN-PRIVATE\n</private>",
+            "hidden data ".repeat(15_000)
+        );
+        assert!(!clean_error(&private, 3, 3, 800).contains("SECRET"));
+        assert!(!clean_tail(&private, 3, 800).contains("SECRET"));
+    }
+
+    #[test]
+    fn strips_pasted_with_attributes() {
+        assert_eq!(
+            strip_pasted(r#"see <pasted_content id="9">abc</pasted_content id="9"> now"#),
+            "see [pasted 3 chars] now"
+        );
+    }
+
+    #[test]
+    fn strips_unterminated_pasted() {
+        assert_eq!(
+            strip_pasted("look <pasted_content id=1>abc"),
+            "look [pasted 3+ chars]"
         );
     }
 
