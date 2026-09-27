@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mnem vs claude-mem &amp; co</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+  :root {
+    --paper: #f4f6f7;
+    --panel: #ffffff;
+    --ink: #14212b;
+    --ink-2: #3c4b57;
+    --ink-3: #6a7a86;
+    --rule: #d8dfe4;
+    --rule-2: #e8edf0;
+    --teal: #0f766e;
+    --teal-soft: #d6efec;
+    --amber: #b45309;
+    --amber-soft: #fbeedd;
+    --yes: #1a7f37;
+    --yes-soft: #dcf2e3;
+    --no: #b42318;
+    --no-soft: #fbe3e1;
+    --part: #8a6100;
+    --part-soft: #f6ecd2;
+    --code-bg: #eef2f4;
+    --display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --paper: #0e1418; --panel: #151e24; --ink: #e6edf1; --ink-2: #b7c4cc; --ink-3: #82939e;
+      --rule: #2a3740; --rule-2: #1f2a31; --teal: #3fc2b3; --teal-soft: #123a37;
+      --amber: #f0a64a; --amber-soft: #3a2a14; --yes: #4fc57a; --yes-soft: #15321f;
+      --no: #f07a6f; --no-soft: #3a1a17; --part: #e2b85c; --part-soft: #33290f; --code-bg: #1b252c;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --paper: #0e1418; --panel: #151e24; --ink: #e6edf1; --ink-2: #b7c4cc; --ink-3: #82939e;
+    --rule: #2a3740; --rule-2: #1f2a31; --teal: #3fc2b3; --teal-soft: #123a37;
+    --amber: #f0a64a; --amber-soft: #3a2a14; --yes: #4fc57a; --yes-soft: #15321f;
+    --no: #f07a6f; --no-soft: #3a1a17; --part: #e2b85c; --part-soft: #33290f; --code-bg: #1b252c;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 16px/1.6 var(--body);
+    padding-inline: 20px;
+    padding-block: 0 64px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  .prose { max-width: 68ch; }
+  h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; letter-spacing: -0.01em; }
+  h1 { font-size: clamp(2.2rem, 5vw, 3.6rem); line-height: 1.02; font-weight: 700; }
+  h2 { font-size: clamp(1.5rem, 3vw, 2rem); font-weight: 600; line-height: 1.15; }
+  h3 { font-size: 1.15rem; font-weight: 600; }
+  p { margin: 0; }
+  code, .mono { font-family: var(--mono); font-size: 0.88em; }
+  code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
+  a { color: var(--teal); }
+  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.72rem; font-weight: 600; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--teal);
+  }
+  section { padding-block: 56px 0; display: grid; gap: 20px; }
+  .section-head { display: grid; gap: 8px; border-top: 1px solid var(--rule); padding-top: 22px; }
+
+  /* Masthead: a transcript line, because transcripts are the product */
+  .mast { padding-block: 40px 0; display: grid; gap: 22px; }
+  .jsonl {
+    font-family: var(--mono); font-size: 0.78rem; color: var(--ink-3);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    border-bottom: 1px dashed var(--rule); padding-bottom: 10px;
+  }
+  .jsonl b { color: var(--teal); font-weight: 500; }
+  .lede { font-size: 1.2rem; color: var(--ink-2); max-width: 60ch; }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .stat { background: var(--panel); padding: 16px 18px; display: grid; gap: 4px; }
+  .stat .n { font-family: var(--mono); font-size: 1.7rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .l { font-size: 0.85rem; color: var(--ink-3); }
+  .stat.warn .n { color: var(--amber); }
+  .stat.good .n { color: var(--teal); }
+
+  /* Write-path diagram */
+  .paths { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+  .path { background: var(--panel); border: 1px solid var(--rule); padding: 18px; display: grid; gap: 12px; }
+  .path h3 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .path h3 .tag { font-family: var(--mono); font-size: 0.72rem; font-weight: 500; padding: 2px 8px; border-radius: 999px; }
+  .tag.bad { background: var(--no-soft); color: var(--no); }
+  .tag.good { background: var(--yes-soft); color: var(--yes); }
+  .path svg { width: 100%; height: auto; display: block; }
+  .path p { font-size: 0.92rem; color: var(--ink-2); }
+
+  /* Matrix */
+  .matrix-wrap { overflow-x: auto; border: 1px solid var(--rule); background: var(--panel); }
+  table { border-collapse: collapse; width: 100%; min-width: 1180px; font-size: 0.86rem; }
+  thead th:first-child, tbody th { width: 150px; }
+  thead th:nth-child(4) { width: 150px; }
+  th, td { padding: 10px 12px; border-bottom: 1px solid var(--rule-2); text-align: left; vertical-align: top; }
+  thead th { font-family: var(--display); font-weight: 600; font-size: 0.95rem; background: var(--paper); position: sticky; top: 0; }
+  tbody th { font-weight: 600; white-space: nowrap; }
+  tbody th small { display: block; font-weight: 400; color: var(--ink-3); font-family: var(--mono); font-size: 0.72rem; }
+  tr.us { background: var(--teal-soft); }
+  tr.us th { color: var(--teal); }
+  .c { display: inline; font-weight: 500; }
+  .c::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 0; }
+  .c.y { color: var(--yes); } .c.y::before { background: var(--yes); }
+  .c.n { color: var(--no); } .c.n::before { background: var(--no); }
+  .c.p { color: var(--part); } .c.p::before { background: var(--part); }
+  .c.u { color: var(--ink-3); } .c.u::before { background: var(--rule); }
+  td .note { display: block; color: var(--ink-3); font-size: 0.78rem; }
+  .legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.82rem; color: var(--ink-3); }
+
+  /* Claims and gaps */
+  .two { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+  .claims { display: grid; gap: 14px; }
+  .claim { display: grid; gap: 4px; padding-left: 14px; border-left: 2px solid var(--teal); }
+  .claim b { font-family: var(--display); font-size: 1.05rem; font-weight: 600; }
+  .claim span { color: var(--ink-2); font-size: 0.93rem; }
+  .gap { border-left-color: var(--amber); }
+
+  /* Roadmap */
+  .road { display: grid; gap: 10px; counter-reset: step; }
+  .item {
+    background: var(--panel); border: 1px solid var(--rule); padding: 14px 16px;
+    display: grid; grid-template-columns: 2.2rem 1fr auto; gap: 4px 12px; align-items: start;
+  }
+  .item::before {
+    counter-increment: step; content: counter(step);
+    font-family: var(--mono); font-weight: 600; color: var(--teal); font-size: 1.1rem; grid-row: span 2;
+  }
+  .item h3 { font-size: 1.05rem; }
+  .item .effort { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-3); white-space: nowrap; }
+  .item p { grid-column: 2 / 4; color: var(--ink-2); font-size: 0.92rem; }
+  .item .how { display: block; margin-top: 4px; font-family: var(--mono); font-size: 0.78rem; color: var(--ink-3); }
+  .item.done { border-color: var(--teal); }
+  .item.done .effort { color: var(--teal); }
+  .nice { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+  .nice div { background: var(--panel); border: 1px solid var(--rule); padding: 12px 14px; display: grid; gap: 4px; }
+  .nice b { font-family: var(--display); font-weight: 600; }
+  .nice span { font-size: 0.88rem; color: var(--ink-2); }
+
+  .verdict { background: var(--ink); color: var(--paper); padding: 26px 24px; display: grid; gap: 12px; }
+  .verdict .eyebrow { color: var(--teal-soft); }
+  .verdict h2 { color: var(--paper); }
+  .verdict p { color: var(--paper); opacity: 0.88; max-width: 70ch; }
+
+  .sources { font-size: 0.8rem; color: var(--ink-3); display: grid; gap: 6px; }
+  .sources ol { margin: 0; padding-left: 20px; display: grid; gap: 3px; }
+  .sources a { word-break: break-all; }
+
+  @media (max-width: 560px) {
+    .item { grid-template-columns: 1.8rem 1fr; }
+    .item .effort { grid-column: 2; }
+    .item p { grid-column: 1 / 3; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .path .flow { stroke-dasharray: 5 5; animation: dash 1.4s linear infinite; }
+    @keyframes dash { to { stroke-dashoffset: -20; } }
+  }
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+  <header class="mast">
+    <div class="jsonl" aria-hidden="true">{"type":"user","uuid":"<b>c4f1…</b>","sessionId":"a5c18562…","cwd":"~/code/mnem","message":{"role":"user","content":"i want to build claude-mem replacement…"}}</div>
+    <div class="eyebrow">Memory for coding agents · comparison, September 2026</div>
+    <h1>The agents already write everything down. mnem just reads it.</h1>
+    <p class="lede">Claude Code, Codex and pi each append every prompt, answer, command and edit to a transcript on disk. mnem indexes those files directly, so capture never waits on an LLM, a worker, or a queue, and one memory is shared by every agent you run.</p>
+    <div class="stats" id="stats">
+
+      <div class="stat warn"><span class="n">32%</span><span class="l">of sessions claude-mem stored nothing for (157 of 493, last 30 days, this machine)</span></div>
+      <div class="stat good"><span class="n">0</span><span class="l">duplicates after re-reading all 1.45 GB of transcripts from zero</span></div>
+      <div class="stat"><span class="n">11 ms</span><span class="l">median prompt hook; full 1.45 GB backfill in 6.4 s</span></div>
+      <div class="stat"><span class="n">19.5 MB</span><span class="l">RAM for the always-on service (capture, distillation, viewer)</span></div>
+      <div class="stat"><span class="n">10.8 MB</span><span class="l">single Rust binary; no Node, Python, Docker or vector DB</span></div>
+    </div>
+  </header>
+
+  <section id="paths">
+    <div class="section-head">
+      <div class="eyebrow">Why memory goes missing</div>
+      <h2>Where the write path breaks</h2>
+    </div>
+    <div class="paths">
+      <div class="path">
+        <h3>LLM on the write path <span class="tag bad">claude-mem and most tools</span></h3>
+        <svg viewBox="0 0 440 150" role="img" aria-label="Hook sends to a worker queue, which waits on an LLM before anything is saved">
+          <g font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor">
+            <rect x="4" y="52" width="74" height="40" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="41" y="76" text-anchor="middle">hook</text>
+            <rect x="112" y="52" width="92" height="40" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="158" y="70" text-anchor="middle">worker</text><text x="158" y="84" text-anchor="middle">queue (RAM)</text>
+            <rect x="238" y="52" width="80" height="40" rx="4" fill="var(--no-soft)" stroke="var(--no)"/><text x="278" y="76" text-anchor="middle" fill="var(--no)">LLM call</text>
+            <rect x="352" y="52" width="84" height="40" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="394" y="76" text-anchor="middle">database</text>
+            <line class="flow" x1="78" y1="72" x2="112" y2="72" stroke="var(--ink-3)" stroke-width="1.5"/>
+            <line class="flow" x1="204" y1="72" x2="238" y2="72" stroke="var(--ink-3)" stroke-width="1.5"/>
+            <line x1="318" y1="72" x2="352" y2="72" stroke="var(--no)" stroke-width="1.5" stroke-dasharray="2 4"/>
+            <text x="278" y="118" text-anchor="middle" fill="var(--no)">quota / timeout / crash</text>
+            <text x="278" y="134" text-anchor="middle" fill="var(--no)">= memory never saved</text>
+            <text x="158" y="36" text-anchor="middle" fill="var(--ink-3)">lost on restart</text>
+          </g>
+        </svg>
+        <p>On this machine, claude-mem stored nothing for <b>157 of 493 sessions (32%)</b> in the 30 days before the switch, and left 883 sessions stuck as active. Its observer also ran 1,451 hidden Claude Code sessions to summarise the real ones.</p>
+      </div>
+      <div class="path">
+        <h3>Transcripts as the log <span class="tag good">mnem</span></h3>
+        <svg viewBox="0 0 440 150" role="img" aria-label="Agents append transcripts; mnem reads new lines into SQLite; an LLM summarises later, off the write path">
+          <g font-family="IBM Plex Mono, monospace" font-size="11" fill="currentColor">
+            <rect x="4" y="18" width="92" height="30" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="50" y="37" text-anchor="middle">Claude Code</text>
+            <rect x="4" y="57" width="92" height="30" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="50" y="76" text-anchor="middle">Codex</text>
+            <rect x="4" y="96" width="92" height="30" rx="4" fill="var(--panel)" stroke="var(--rule)"/><text x="50" y="115" text-anchor="middle">pi</text>
+            <rect x="132" y="42" width="96" height="60" rx="4" fill="var(--teal-soft)" stroke="var(--teal)"/><text x="180" y="66" text-anchor="middle" fill="var(--teal)">transcripts</text><text x="180" y="81" text-anchor="middle" fill="var(--teal)">on disk</text>
+            <rect x="262" y="42" width="84" height="60" rx="4" fill="var(--panel)" stroke="var(--teal)"/><text x="304" y="66" text-anchor="middle">SQLite</text><text x="304" y="81" text-anchor="middle" fill="var(--ink-3)">+ cursor</text>
+            <rect x="370" y="52" width="66" height="40" rx="4" fill="var(--panel)" stroke="var(--rule)" stroke-dasharray="3 3"/><text x="403" y="76" text-anchor="middle" fill="var(--ink-3)">LLM</text>
+            <line class="flow" x1="96" y1="33" x2="132" y2="62" stroke="var(--teal)" stroke-width="1.5"/>
+            <line class="flow" x1="96" y1="72" x2="132" y2="72" stroke="var(--teal)" stroke-width="1.5"/>
+            <line class="flow" x1="96" y1="111" x2="132" y2="82" stroke="var(--teal)" stroke-width="1.5"/>
+            <line class="flow" x1="228" y1="72" x2="262" y2="72" stroke="var(--teal)" stroke-width="1.5"/>
+            <line x1="346" y1="72" x2="370" y2="72" stroke="var(--ink-3)" stroke-width="1.2" stroke-dasharray="2 3"/>
+            <text x="304" y="126" text-anchor="middle" fill="var(--teal)">one transaction:</text>
+            <text x="304" y="140" text-anchor="middle" fill="var(--teal)">events + read position</text>
+            <text x="403" y="110" text-anchor="middle" fill="var(--ink-3)">later,</text><text x="403" y="124" text-anchor="middle" fill="var(--ink-3)">retried</text>
+          </g>
+        </svg>
+        <p>A crash, a skipped hook or a model outage delays capture; it cannot lose it. mnem re-read all 1.45 GB of this machine's transcripts from zero and stored <b>0 duplicates</b>. It also recovered <b>30 of 30</b> Codex sessions claude-mem had missed.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="matrix">
+    <div class="section-head">
+      <div class="eyebrow">Side by side</div>
+      <h2>How the field compares</h2>
+      <p class="prose" id="matrix-note">Thirteen tools checked on 28 September 2026 against their own READMEs, docs and the GitHub API. Cells marked partial carry a note. Where a fact could only be inferred, the note says so. Cursor's Memories feature is left out: it is missing from Cursor's current docs and appears to have been removed in 2.1.</p>
+    </div>
+    <div class="legend">
+      <span class="c y">Yes</span><span class="c p">Partial or optional</span><span class="c n">No</span><span class="c u">Unknown</span>
+    </div>
+    <div class="matrix-wrap">
+      <table>
+<thead><tr><th scope="col">Tool</th><th scope="col">Capture</th><th scope="col">Saved without an LLM call</th><th scope="col">Agents</th><th scope="col">One store across agents</th><th scope="col">Recovers from old transcripts</th><th scope="col">Search</th><th scope="col">Runtime</th><th scope="col">Licence · cost</th></tr></thead><tbody><tr class="us"><th scope="row">mnem<small>unreleased · this machine</small></th><td><span class="c y">Automatic</span><span class="note">indexes transcript files; hooks + 30 s watcher</span></td><td><span class="c y">Yes</span><span class="note">LLM distils later, optional; any OpenAI-compatible endpoint with model fallback</span></td><td>Claude Code (all profiles), Codex, pi</td><td><span class="c y">Yes</span><span class="note">plus per-prompt “meanwhile” updates</span></td><td><span class="c y">Yes</span><span class="note">Claude Code, Codex, pi transcripts; claude-mem DB import</span></td><td><span class="c p">Full-text</span><span class="note">FTS5 BM25 + recency; no vectors yet</span></td><td><span class="c y">One binary</span><span class="note">Rust, SQLite; nothing else to run</span></td><td>Licence not chosen yet · free</td></tr><tr><th scope="row">claude-mem<small>94,795★</small></th><td><span class="c y">Automatic</span><span class="note">lifecycle hooks</span></td><td><span class="c n">No</span><span class="note">AI compresses each observation before it is stored</span></td><td>8+ hosts incl. Claude Code, Codex, Cursor</td><td><span class="c y">Yes</span><span class="note">inferred</span></td><td><span class="c u">Unknown</span><span class="note">import requested in issue #3763</span></td><td><span class="c y">Hybrid</span><span class="note">FTS5 + Chroma vectors</span></td><td><span class="c n">Heavy</span><span class="note">Node 20+, Bun, Python/uv for Chroma</span></td><td>Apache-2.0 · Pro $30/mo</td></tr><tr><th scope="row">agentmemory<small>28,937★</small></th><td><span class="c y">Automatic</span><span class="note">12 hooks in Claude Code, 6 in Codex</span></td><td><span class="c y">Yes</span><span class="note">LLM compression optional</span></td><td>9 incl. Claude Code, Codex, Cursor, Gemini CLI, pi</td><td><span class="c y">Yes</span></td><td><span class="c p">Claude Code</span><span class="note">import-jsonl for Claude Code transcripts</span></td><td><span class="c y">BM25 → hybrid</span><span class="note">hybrid once embeddings are configured</span></td><td><span class="c p">Node + engine</span><span class="note">Node 20+ and the iii-engine binary</span></td><td>Apache-2.0 · free</td></tr><tr><th scope="row">claude-mem-lite<small>61★</small></th><td><span class="c y">Automatic</span><span class="note">7 hooks plus /lesson, /bug</span></td><td><span class="c y">Yes</span><span class="note">LLM batched per episode, saved even if it fails</span></td><td>Claude Code only</td><td><span class="c n">No</span></td><td><span class="c y">Yes</span><span class="note">Claude Code transcripts</span></td><td><span class="c p">Full-text</span><span class="note">FTS5 BM25 with query expansion</span></td><td><span class="c p">Node</span><span class="note">Node 22+, SQLite</span></td><td>MIT · free</td></tr><tr><th scope="row">Mem0<small>66,085★</small></th><td><span class="c p">Hooks + tools</span><span class="note">plugin hooks at session boundaries; MCP tools the agent calls</span></td><td><span class="c p">Optional</span><span class="note">fact extraction by default; infer=False skips it</span></td><td>Claude Code, Codex, Cursor, Windsurf, OpenCode</td><td><span class="c y">Yes</span><span class="note">per account, inferred</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td><span class="c y">Hybrid</span><span class="note">semantic + BM25 + entity</span></td><td><span class="c p">Service</span><span class="note">Docker self-host or cloud API</span></td><td>Apache-2.0 · cloud tiers</td></tr><tr><th scope="row">Supermemory<small>30,949★</small></th><td><span class="c y">Automatic</span><span class="note">plugin capture</span></td><td><span class="c n">No</span><span class="note">processed server-side, inferred</span></td><td>Claude Code, Cursor, Codex, OpenCode +2</td><td><span class="c y">Yes</span><span class="note">per account, inferred</span></td><td><span class="c u">Unknown</span></td><td><span class="c y">Vector + graph</span><span class="note">inferred</span></td><td><span class="c p">Cloud-first</span><span class="note">self-host possible</span></td><td>MIT · credits</td></tr><tr><th scope="row">Hindsight<small>37,059★</small></th><td><span class="c p">API calls</span><span class="note">retain API and integrations</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td>Claude Code, Codex, Cursor, Copilot +</td><td><span class="c y">Yes</span><span class="note">inferred</span></td><td><span class="c u">Unknown</span></td><td><span class="c y">Hybrid</span><span class="note">semantic + BM25 + graph + temporal</span></td><td><span class="c n">Heavy</span><span class="note">Docker, Postgres, LLM key</span></td><td>MIT · paid cloud</td></tr><tr><th scope="row">Graphiti / Zep<small>31,211★</small></th><td><span class="c p">Tool calls</span><span class="note">agent calls MCP or app adds episodes</span></td><td><span class="c n">No</span><span class="note">entities extracted by an LLM</span></td><td>Any MCP client</td><td><span class="c y">Yes</span><span class="note">inferred</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td><span class="c y">Hybrid</span><span class="note">semantic + BM25 + graph</span></td><td><span class="c n">Heavy</span><span class="note">Python, Neo4j/FalkorDB, OpenAI key</span></td><td>Apache-2.0 · Zep Cloud paid</td></tr><tr><th scope="row">Basic Memory<small>4,050★</small></th><td><span class="c p">Agent writes</span><span class="note">write_note over MCP</span></td><td><span class="c y">Yes</span><span class="note">inferred</span></td><td>Claude, Codex, Cursor, any MCP client</td><td><span class="c y">Yes</span></td><td><span class="c p">Chat exports</span><span class="note">Claude.ai / ChatGPT exports, not CLI transcripts</span></td><td><span class="c y">Hybrid</span><span class="note">full-text + FastEmbed</span></td><td><span class="c p">Python</span><span class="note">via uv</span></td><td>AGPL-3.0 · cloud $15/mo</td></tr><tr><th scope="row">ByteRover<small>4,966★ · ex-Cipher</small></th><td><span class="c p">Curate + review</span><span class="note">user or agent curates, then approves</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td>22+ agents</td><td><span class="c y">Yes</span></td><td><span class="c u">Unknown</span></td><td><span class="c u">Unknown</span></td><td><span class="c p">Node</span><span class="note">bundled binary or Node 20+, LLM provider</span></td><td>Elastic 2.0 (not OSI) · Pro $15/mo</td></tr><tr><th scope="row">Letta Code<small>3,434★</small></th><td><span class="c p">Self-editing</span><span class="note">agent rewrites its own memory blocks</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td>Its own harness only</td><td><span class="c n">No</span><span class="note">inferred</span></td><td><span class="c u">Unknown</span></td><td><span class="c u">Unknown</span><span class="note">message search</span></td><td><span class="c p">Node + server</span><span class="note">Letta Cloud by default</span></td><td>Apache-2.0 · cloud plans</td></tr><tr><th scope="row">Claude Code built-in<small>auto memory</small></th><td><span class="c p">Model decides</span><span class="note">writes Markdown during the session</span></td><td><span class="c y">Yes</span><span class="note">no separate call, inferred</span></td><td>Claude Code</td><td><span class="c n">No</span></td><td><span class="c n">No</span><span class="note">inferred</span></td><td><span class="c n">None</span><span class="note">first 200 lines / 25 KB loaded</span></td><td><span class="c y">Built in</span></td><td>Included</td></tr><tr><th scope="row">Codex memories<small>off by default</small></th><td><span class="c y">Automatic</span><span class="note">background summaries once sessions go idle</span></td><td><span class="c n">No</span></td><td>Codex app, CLI, IDE</td><td><span class="c n">No</span></td><td><span class="c y">Yes</span><span class="note">built from past sessions</span></td><td><span class="c n">None</span><span class="note">summary injected, ~5k tokens</span></td><td><span class="c y">Built in</span></td><td>Included</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="why">
+    <div class="section-head">
+      <div class="eyebrow">The case</div>
+      <h2>Why mnem, and where it is behind</h2>
+    </div>
+    <div class="two">
+      <div class="claims">
+<h3>Where mnem leads</h3><div class="claim"><b>Capture cannot silently fail</b><span>Every other tool depends on a hook or an API call succeeding at the moment work happens. mnem reads the transcript the agent already wrote and commits the read position with the events, so a missed hook or crash only delays capture. <code>mnem doctor</code> reports lag and lost bytes instead of staying quiet.</span></div><div class="claim"><b>One memory, live across agents</b><span>Claude Code, Codex and pi read and write the same store. On every prompt, a session is told what other sessions in the same project did since it last looked. agentmemory also shares one store across agents; no tool we checked documents per-prompt “meanwhile” updates.</span></div><div class="claim"><b>Nothing to babysit</b><span>One 10.8 MB binary and a 19.5 MB background service. No Node, Bun, Python, Docker, vector database or cloud account. The closest light alternative, claude-mem-lite, supports Claude Code only.</span></div><div class="claim"><b>Your models, no extra subscription</b><span>Summaries go through any OpenAI-compatible endpoint (here CLIProxyAPI) with an ordered model chain. A model that hits quota cools down and the next one takes over; tested live when gemini-3.5-flash-lite returned HTTP 503.</span></div><div class="claim"><b>Moving from claude-mem loses nothing</b><span>Import kept all 58,797 observations with their original ids and all 4,536 summaries, then backfill recovered sessions claude-mem never captured.</span></div>
+      </div>
+      <div class="claims">
+<h3>Where mnem is behind</h3><div class="claim gap"><b>No semantic search yet</b><span>Full-text only. claude-mem, Mem0, Basic Memory, Hindsight and Graphiti all combine keywords with vectors. Planned once a recall test set shows where full-text misses.</span></div><div class="claim gap"><b>No knowledge graph or fact validity</b><span>Graphiti and Hindsight track entities and when a fact stopped being true. mnem stores observations with timestamps only.</span></div><div class="claim gap"><b>Three agents, not nine</b><span>agentmemory supports 9 agents and claude-mem 8+ hosts. mnem covers Claude Code, Codex and pi, the three used here.</span></div><div class="claim gap"><b>Single machine, single user</b><span>No sync, no team sharing, no cloud option.</span></div><div class="claim gap"><b>Brand new and unproven outside this machine</b><span>Private repository, no licence chosen, one user, no public benchmark. Mem0 publishes a LongMemEval score of 94.4 for its managed platform.</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="roadmap">
+    <div class="section-head">
+      <div class="eyebrow">Roadmap · reviewed by a three-model council</div>
+      <h2>Essential now</h2>
+      <p class="prose">Ordered by value to a daily user divided by effort. GPT-6 Astra, Gemini Pro Agent and Claude Fable 5.1 reviewed and reordered this list; where they disagreed, the reasoning is in the item.</p>
+    </div>
+    <div class="road">
+<div class="item"><h3>Backups with a tested restore</h3><span class="effort">½ day</span><p>mnem.db is now the only copy of the imported claude-mem history. The council ranked this first unanimously; a backup nobody has restored does not count.<span class="how">watch takes a nightly VACUUM INTO snapshot, keeps 7, records row counts and integrity; mnem restore --verify restores into a scratch copy and runs sample searches. A manual snapshot was taken today (372 MB, integrity ok).</span></p></div><div class="item"><h3>Evidence links for every memory</h3><span class="effort">½–1 day</span><p>Each distilled memory records the transcript events it came from, so an agent can check a claim against what actually happened. Cheap now with 110 distilled memories, costly to retrofit later.<span class="how">memory_evidence(memory_id, event_id, event_hash); digests carry E-ids and distill validates the citations; get_observations prints the evidence; imported memories are marked as having no evidence rather than guessed.</span></p></div><div class="item"><h3>Working-tree snapshot at the end of each turn</h3><span class="effort">½ day</span><p>Answers the first question of every session: what was I in the middle of? Uncommitted files, unpushed commits and the branch, captured from git.<span class="how">Stop hook runs git status --porcelain -b, rev-list @{u}.., diff --stat; stored as a git_state event; session-start context opens with a “Working tree” section.</span></p></div><div class="item"><h3>Recall based on what you just asked</h3><span class="effort">1 day</span><p>Today the session-start context is ordered by recency. This adds the memories that match the words and file paths in each prompt, within a small budget and without repeats.<span class="how">One retrieval function shared by hooks, MCP and pi; FTS on prompt terms + paths, top 5, at most 600 characters; recall_seen(session, memory) prevents repeats.</span></p></div><div class="item"><h3>Forget, exclude, remember</h3><span class="effort">1 day</span><p>Delete a memory or a whole project and have it stay deleted, then pin facts that every agent should always see.<span class="how">Tombstones checked by backfill, import and distill so nothing comes back; excluded project patterns; remember(text, scope) as an MCP tool and CLI; a “Pinned” context section.</span></p></div><div class="item"><h3>Health alerts you cannot miss</h3><span class="effort">½ day</span><p>The original problem was silent failure. If capture lags by more than 5 minutes, every model is cooling down, or the last backup is stale, the next session says so.<span class="how">Checks shared by doctor, the context footer and the viewer health pill.</span></p></div><div class="item"><h3>Export and a recall test set</h3><span class="effort">1 day</span><p>An open memory tool must let data leave. A small labelled test set turns “search feels better” into a number before adding embeddings.<span class="how">mnem export to JSONL (memories, events, sessions); 30–50 real questions with expected ids; report hit rate and hook p95 in CI.</span></p></div>
+    </div>
+    <h2 style="margin-top:28px">Nice to have</h2>
+    <div class="nice">
+<div><b>Semantic search</b><span>Local embeddings stored next to the full-text index, added when the test set shows misses.</span></div><div><b>File-aware recall</b><span>First as an MCP tool, recall(path); automatic injection on file reads only if it proves useful. The council moved this down: claude-mem’s version added tokens to every read.</span></div><div><b>Staleness and decay</b><span>Flag a memory about a file that changed after the memory was written; rank by how often memories are actually fetched.</span></div><div><b>Retention</b><span>Prune raw events after a set age. The database is 362 MB, well within what SQLite handles.</span></div><div><b>More agents</b><span>Cursor, Gemini CLI, OpenCode and Copilot CLI adapters, mostly for open-source reach.</span></div><div><b>Multi-machine sync</b><span>Encrypted replication of the event log between machines.</span></div><div><b>Release packaging</b><span>Licence, public repository, prebuilt binaries and an install script.</span></div><div><b>Viewer timelines</b><span>Per-session timeline, pin and delete buttons, a capture-health page.</span></div>
+    </div>
+  </section>
+
+  <section id="verdict">
+    <div class="verdict">
+      <div class="eyebrow">Verdict</div>
+      <h2>Memory you can git blame</h2>
+<p>mnem is the best fit for this setup today: three agents on one machine, models through CLIProxyAPI, and zero tolerance for silently lost sessions. It is not yet the best at search. Mem0, Hindsight and Graphiti retrieve more cleverly, and agentmemory covers more agents.</p>
+      <p>The position worth owning is evidence. Capture that cannot lose data, plus a link from every memory to the transcript event behind it, plus the live “meanwhile” updates, makes mnem the one tool whose memories an agent can verify instead of trust. Every competitor summarises first and keeps no source; they cannot add this without storing full transcripts.</p>
+      <p><b>First move:</b> automate the nightly backup and prove a restore, then build evidence links before more summaries pile up, then the working-tree snapshot and prompt recall. That is about four days of work.</p>
+    </div>
+  </section>
+
+  <section id="sources">
+    <div class="section-head">
+      <div class="eyebrow">Method and sources</div>
+    </div>
+    <div class="sources">
+<p>Facts marked inferred in the matrix could not be confirmed from a primary source. Prices for Mem0, Letta and Zep come from third-party listings. Roadmap order reflects council round 8 (GPT-6 Astra, Gemini Pro Agent, Claude Fable 5.1), adjudicated by Claude Opus 5.5.</p><ol><li><b>mnem measurements</b>: this machine, 27–28 Sep 2026: mnem doctor, hook log, backfill timings, test suite (44 tests), systemd service RSS</li><li><b>claude-mem loss figures</b>: claude-mem.db on this machine before removal, 30-day window ending 27 Sep 2026</li><li><b>GitHub API (stars, licences, last push)</b>: accessed 28 Sep 2026 for thedotmack/claude-mem, rohitg00/agentmemory, sdsrss/claude-mem-lite, mem0ai/mem0, supermemoryai/supermemory, vectorize-io/hindsight, getzep/graphiti, basicmachines-co/basic-memory, campfirein/byterover-cli, letta-ai/letta-code</li><li><a href="https://docs.claude-mem.ai/">https://docs.claude-mem.ai/</a></li><li><a href="https://cmem.ai/pricing">https://cmem.ai/pricing</a></li><li><a href="https://github.com/thedotmack/claude-mem/issues/3763">https://github.com/thedotmack/claude-mem/issues/3763</a></li><li><a href="https://code.claude.com/docs/en/memory">https://code.claude.com/docs/en/memory</a></li><li><a href="https://learn.chatgpt.com/docs/customization/memories">https://learn.chatgpt.com/docs/customization/memories</a></li><li><a href="https://mem0.ai/blog/how-memory-works-in-codex-cli">https://mem0.ai/blog/how-memory-works-in-codex-cli</a></li><li><a href="https://mem0.ai/blog/claude-code-memory">https://mem0.ai/blog/claude-code-memory</a></li><li><a href="https://supermemory.ai/docs/integrations/claude-code">https://supermemory.ai/docs/integrations/claude-code</a></li><li><a href="https://supermemory.ai/changelog/coding-plugins-now-free/">https://supermemory.ai/changelog/coding-plugins-now-free/</a></li><li><a href="https://www.byterover.dev/pricing">https://www.byterover.dev/pricing</a></li><li><a href="https://docs.letta.com/guides/cloud/plans/">https://docs.letta.com/guides/cloud/plans/</a></li><li><a href="https://www.getzep.com/pricing/">https://www.getzep.com/pricing/</a></li><li><a href="https://cursor.com/docs/context/memories">https://cursor.com/docs/context/memories</a></li><li><a href="https://forum.cursor.com/t/custom-modes-and-memories-gone-in-2-1/143744">https://forum.cursor.com/t/custom-modes-and-memories-gone-in-2-1/143744</a></li></ol>
+    </div>
+  </section>
+
+</div>
+
+</body>
+</html>
