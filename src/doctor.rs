@@ -133,11 +133,21 @@ pub fn run(conn: &Connection) -> Result<bool> {
             println!("backup: NONE, run `mnem backup` (the watch service does this nightly)");
         }
     }
+    let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+    if !alerts.is_empty() {
+        healthy = false;
+        println!("alerts");
+        for a in &alerts {
+            println!("  ! {a}");
+        }
+    }
     claude_mem_comparison(conn)?;
     println!(
         "status: {}",
         if healthy {
             "OK, fully caught up"
+        } else if !alerts.is_empty() {
+            "ATTENTION, see alerts above"
         } else {
             "BEHIND, run `mnem backfill`"
         }

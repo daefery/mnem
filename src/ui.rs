@@ -462,6 +462,7 @@ fn stats(conn: &Connection) -> Result<Value> {
         "files_behind": files_behind,
         "pending_distill": pending,
         "last_distill_error": err,
+        "alerts": crate::health::alerts(conn, crate::health::stuck_files(conn)),
     }))
 }
 

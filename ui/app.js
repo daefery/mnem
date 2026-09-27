@@ -276,15 +276,18 @@
     try {
       const s = await getJSON("/api/stats");
       const h = $("health");
-      const behind = s.files_behind > 0;
+      const alerts = s.alerts || [];
+      const behind = s.files_behind > 0 || alerts.length > 0;
       h.classList.toggle("behind", behind);
-      $("health-label").textContent = behind
-        ? `${s.files_behind} behind`
-        : `${s.memories.toLocaleString()} memories · ${s.sessions.toLocaleString()} sessions`;
+      $("health-label").textContent = alerts.length
+        ? `${alerts.length} alert${alerts.length > 1 ? "s" : ""}`
+        : s.files_behind > 0
+          ? `${s.files_behind} behind`
+          : `${s.memories.toLocaleString()} memories · ${s.sessions.toLocaleString()} sessions`;
       h.title =
-        `Capture ${behind ? "behind" : "caught up"} · newest event ${s.newest_event_ago} ago · ` +
-        `${s.events.toLocaleString()} events · ${s.pending_distill} session(s) awaiting distillation` +
-        (s.last_distill_error ? ` · last distill error: ${s.last_distill_error}` : "");
+        (alerts.length ? alerts.map((a) => `⚠ ${a}`).join("\n") + "\n" : "") +
+        `Capture ${s.files_behind > 0 ? "behind" : "caught up"} · newest event ${s.newest_event_ago} ago · ` +
+        `${s.events.toLocaleString()} events · ${s.pending_distill} session(s) awaiting distillation`;
     } catch (e) {
       console.error(e);
     }

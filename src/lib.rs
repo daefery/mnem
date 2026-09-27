@@ -7,6 +7,7 @@ pub mod distill;
 pub mod doctor;
 pub mod forget;
 pub mod gitstate;
+pub mod health;
 pub mod hook;
 pub mod import;
 pub mod ingest;

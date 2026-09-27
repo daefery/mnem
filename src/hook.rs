@@ -237,19 +237,19 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                 },
             )?;
             let mut footer = fresh.footer(conn);
-            if let Ok((pending, err)) = crate::distill::pending(conn) {
-                if pending > 0 {
-                    footer.push_str(&format!(" · {pending} session(s) awaiting distillation"));
-                }
-                if let Some(e) = err {
-                    footer.push_str(&format!(
-                        " · last distill error: {}",
-                        crate::text::head(&e, 80)
-                    ));
-                }
+            if let Ok((pending, _)) = crate::distill::pending(conn)
+                && pending > 0
+            {
+                footer.push_str(&format!(" · {pending} session(s) awaiting distillation"));
+            }
+            // Problems go to the user directly (systemMessage), not only to the agent.
+            let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+            for a in &alerts {
+                footer.push_str(&format!("\nmnem warning: {a}"));
             }
             ctx.push_str(&format!("\n---\n{footer}\n"));
-            emit("SessionStart", &ctx);
+            let notice = (!alerts.is_empty()).then(|| format!("mnem: {}", alerts.join(" | ")));
+            emit_with("SessionStart", &ctx, notice.as_deref());
             if let Some(s) = &session
                 && let Err(e) = set_watermark(conn, s)
             {
@@ -353,7 +353,16 @@ fn spawn_distill(session: &str) {
 }
 
 fn emit(event: &str, ctx: &str) {
-    let out = json!({ "hookSpecificOutput": { "hookEventName": event, "additionalContext": ctx } });
+    emit_with(event, ctx, None);
+}
+
+/// `system_message` is shown to the user by Claude Code and Codex.
+fn emit_with(event: &str, ctx: &str, system_message: Option<&str>) {
+    let mut out =
+        json!({ "hookSpecificOutput": { "hookEventName": event, "additionalContext": ctx } });
+    if let Some(m) = system_message {
+        out["systemMessage"] = json!(m);
+    }
     println!("{out}");
 }
 

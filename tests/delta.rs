@@ -189,3 +189,37 @@ fn recall_matches_prompt_once_per_session() {
         "project scoped"
     );
 }
+
+#[test]
+fn half_written_line_is_not_an_alert() {
+    let dir = std::env::temp_dir().join(format!("mnem-health-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = mnem::db::open(&dir.join("m.db")).unwrap();
+    let f = dir.join("t.jsonl");
+    std::fs::write(&f, "{\"a\":1}\n{\"half\":").unwrap();
+    // Cursor sits after the first line; the rest is an unterminated record.
+    c.execute(
+        "INSERT INTO sources(path, agent, byte_offset, size_seen) VALUES (?1, 'pi', 8, 18)",
+        params![f.to_string_lossy()],
+    )
+    .unwrap();
+    // Age the file past the stuck threshold.
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(600);
+    std::fs::File::options()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(mnem::health::stuck_files(&c), 0);
+    // A complete unread line that old is stuck.
+    std::fs::write(&f, "{\"a\":1}\n{\"b\":2}\n").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&f)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(mnem::health::stuck_files(&c), 1);
+}
