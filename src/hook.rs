@@ -268,6 +268,18 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
         // Turn ended: distil it in a detached process so the agent never waits on an LLM.
         "stop" => {
             if let Some(s) = &session {
+                let cwd = input.cwd.clone().or_else(|| {
+                    conn.query_row("SELECT cwd FROM sessions WHERE id = ?1", params![s], |r| {
+                        r.get(0)
+                    })
+                    .ok()
+                    .flatten()
+                });
+                if let Some(cwd) = cwd
+                    && let Err(e) = crate::gitstate::record(conn, s, std::path::Path::new(&cwd))
+                {
+                    log(&format!("git snapshot: {e:#}"));
+                }
                 spawn_distill(s);
             }
         }

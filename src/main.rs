@@ -131,6 +131,13 @@ enum Cmd {
         #[arg(long)]
         apply: bool,
     },
+    /// Record the git working tree for a session (the pi extension calls this per turn)
+    Snapshot {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        cwd: PathBuf,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -157,7 +164,7 @@ fn main() -> Result<()> {
     // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
     let in_turn = matches!(
         cli.cmd,
-        Cmd::Hook { .. } | Cmd::Delta { .. } | Cmd::Context { .. }
+        Cmd::Hook { .. } | Cmd::Delta { .. } | Cmd::Context { .. } | Cmd::Snapshot { .. }
     );
     let busy = std::time::Duration::from_millis(if in_turn { 500 } else { 5000 });
     let mut conn = match db::open_with(&path, busy) {
@@ -254,6 +261,10 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Snapshot { session, cwd } => {
+            let recorded = mnem::gitstate::record(&conn, &session, &cwd)?;
+            println!("{}", if recorded { "recorded" } else { "unchanged" });
+        }
         Cmd::Backup { keep } => {
             let t = Instant::now();
             let m = backup::create(&conn, &backup::dir(), keep)?;

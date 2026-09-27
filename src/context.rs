@@ -34,11 +34,13 @@ struct SessionView {
 pub fn build(conn: &Connection, o: &Options) -> Result<String> {
     let sessions = recent_sessions(conn, o)?;
     let (obs, summary) = memories(conn, o.project, o.observations)?;
+    let git = crate::gitstate::latest(conn, o.project)?;
     // Shrink until it fits: fewer observations, then fewer turns, then fewer sessions.
     let (mut n_obs, mut n_turns, mut n_sess) = (obs.len(), o.turns, sessions.len());
     loop {
         let out = render(
             o,
+            &git,
             &sessions[..n_sess],
             n_turns,
             &obs[..n_obs],
@@ -220,8 +222,11 @@ fn memories(conn: &Connection, project: &str, limit: usize) -> Result<(Vec<Obs>,
     Ok((obs, summary))
 }
 
+type GitView = (String, i64, String, String);
+
 fn render(
     o: &Options,
+    git: &Option<GitView>,
     sessions: &[SessionView],
     turns: usize,
     obs: &[Obs],
@@ -230,6 +235,14 @@ fn render(
     let now = db::now_ms();
     let mut w = String::new();
     writeln!(w, "# mnem memory · {}", o.project)?;
+    if let Some((agent, age, _root, desc)) = git {
+        writeln!(
+            w,
+            "\n## Working tree (last seen {} ago by {agent}; run git status to confirm)",
+            ago(*age)
+        )?;
+        writeln!(w, "{desc}")?;
+    }
     if !sessions.is_empty() {
         writeln!(w, "\n## Recent sessions (newest first, all agents)")?;
     }
