@@ -54,41 +54,57 @@ pub fn terms(prompt: &str) -> Vec<String> {
 }
 
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
-pub fn recall(
+/// Memory ids in `project` ranked for `prompt`, best first; `exclude_session` hides
+/// memories already offered to that session. Empty when the prompt carries no query.
+pub fn rank(
     conn: &Connection,
-    session: &str,
     project: &str,
     prompt: &str,
-) -> Result<Option<String>> {
+    exclude_session: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(i64, String, String, i64)>> {
     // Harness wrappers and very short prompts ("yes", "continue") carry no query.
     let Some((clean, label)) = classify_prompt(prompt) else {
-        return Ok(None);
+        return Ok(vec![]);
     };
     if label.is_some() || clean.split_whitespace().count() < 4 {
-        return Ok(None);
+        return Ok(vec![]);
     }
     let terms = terms(&clean);
     if terms.len() < 2 {
-        return Ok(None);
+        return Ok(vec![]);
     }
     let query = terms
         .iter()
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" OR ");
-    let mut st = conn.prepare(
+    let mut st = conn.prepare_cached(
         "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0)
          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
-         WHERE memories_fts MATCH ?1 AND m.project = ?2
+         WHERE memories_fts MATCH ?1 AND m.project = ?2 AND m.kind != 'pinned'
            AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)
-         ORDER BY bm25(memories_fts) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
+         -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `mnem eval`.
+         ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
          LIMIT ?4",
     )?;
-    let rows: Vec<(i64, String, String, i64)> = st
-        .query_map(params![query, project, session, TOP as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-        })?
+    let rows = st
+        .query_map(
+            params![query, project, exclude_session.unwrap_or(""), limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?
         .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
+pub fn recall(
+    conn: &Connection,
+    session: &str,
+    project: &str,
+    prompt: &str,
+) -> Result<Option<String>> {
+    let rows = rank(conn, project, prompt, Some(session), TOP)?;
     if rows.is_empty() {
         return Ok(None);
     }

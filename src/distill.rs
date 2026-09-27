@@ -239,9 +239,14 @@ impl Llm {
     /// Run the prompt on the first model that answers with valid JSON.
     /// Returns the parsed JSON and the model that produced it.
     fn complete(&self, user: &str) -> Result<(Value, String)> {
+        self.ask(SYSTEM, user)
+    }
+
+    /// Any JSON task through the same model chain, fallback and cooldowns.
+    pub fn ask(&self, system: &str, user: &str) -> Result<(Value, String)> {
         let mut tried = Vec::new();
         for model in self.candidates() {
-            match self.call(&model, user) {
+            match self.call(&model, system, user) {
                 Ok(v) => return Ok((v, model)),
                 Err(Failure::NextModel(cool_ms, why)) => {
                     if cool_ms > 0 {
@@ -260,10 +265,10 @@ impl Llm {
         bail!("every model failed: {}", tried.join("; "))
     }
 
-    fn call(&self, model: &str, user: &str) -> std::result::Result<Value, Failure> {
+    fn call(&self, model: &str, system: &str, user: &str) -> std::result::Result<Value, Failure> {
         let body = json!({
             "model": model,
-            "messages": [{ "role": "system", "content": SYSTEM }, { "role": "user", "content": user }],
+            "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
             "response_format": { "type": "json_object" },
         });
         let resp = Self::agent(180)
@@ -309,7 +314,7 @@ impl Llm {
         }
     }
 
-    fn save_cooldowns(&self, conn: &Connection) -> Result<()> {
+    pub fn save_cooldowns(&self, conn: &Connection) -> Result<()> {
         let now = db::now_ms();
         let live: HashMap<String, i64> = self
             .cooldowns

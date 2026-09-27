@@ -159,6 +159,19 @@ enum Cmd {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Export sessions, events, memories and evidence as JSONL (stdout or --out)
+    Export {
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Measure prompt recall on a known-item test set (built with --build N)
+    Eval {
+        /// Build a new test set of N questions with the distillation models first
+        #[arg(long)]
+        build: Option<usize>,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -282,6 +295,38 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Export { out, project } => {
+            let n = match &out {
+                Some(p) => {
+                    let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
+                    mnem::eval::export(&conn, &mut f, project.as_deref())?
+                }
+                None => {
+                    mnem::eval::export(&conn, &mut std::io::stdout().lock(), project.as_deref())?
+                }
+            };
+            eprintln!("export: {n} records");
+        }
+        Cmd::Eval { build } => {
+            let path = mnem::eval::eval_path();
+            if let Some(n) = build {
+                let written = mnem::eval::build(&conn, n, &path)?;
+                println!("built {written} questions in {}", path.display());
+            }
+            let r = mnem::eval::run(&conn, &path)?;
+            println!(
+                "recall eval: {} cases · hit@1 {:.0}% · hit@5 {:.0}% · MRR {:.2} · p50 {:.1} ms · p95 {:.1} ms",
+                r.cases,
+                100.0 * r.hit1 as f64 / r.cases.max(1) as f64,
+                100.0 * r.hit5 as f64 / r.cases.max(1) as f64,
+                r.mrr,
+                r.p50_ms,
+                r.p95_ms
+            );
+            for (id, q) in r.misses.iter().take(8) {
+                println!("  miss #{id}: {q}");
+            }
+        }
         Cmd::Forget {
             ids,
             session,
