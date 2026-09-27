@@ -1,7 +1,7 @@
 //! Export and recall evaluation.
 //!
-//! `export` writes everything mnem knows as JSONL, one object per line with a `type`
-//! field, so data can always leave. `eval` measures prompt-time recall with a
+//! `export` writes everything mnem knows as JSONL, one object per line with a `record`
+//! field (session, event, memory, evidence), so data can always leave. `eval` measures prompt-time recall with a
 //! known-item test: for sampled memories the model writes the question each one
 //! answers (without reusing its title words), and recall must find that memory.
 //! The test set lives in ~/.mnem/eval/ because it contains private work.
@@ -25,7 +25,8 @@ pub fn export(conn: &Connection, out: &mut dyn Write, project: Option<&str>) -> 
         let mut rows = st.query(params![project])?;
         while let Some(r) = rows.next()? {
             let mut obj = serde_json::Map::new();
-            obj.insert("type".into(), json!(ty));
+            // `record` names the kind of row; tables have their own `type` column.
+            obj.insert("record".into(), json!(ty));
             for (i, c) in cols.iter().enumerate() {
                 let v: rusqlite::types::Value = r.get(i)?;
                 obj.insert(

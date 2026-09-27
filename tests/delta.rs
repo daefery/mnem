@@ -223,3 +223,28 @@ fn half_written_line_is_not_an_alert() {
         .unwrap();
     assert_eq!(mnem::health::stuck_files(&c), 1);
 }
+
+#[test]
+fn export_labels_every_record() {
+    let c = db("export");
+    seed(&c, "pi:s", "prompt", "hello there");
+    c.execute(
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id) VALUES ('observation', 'bugfix', 't', 'proj', 'mnem', 'x')",
+        [],
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let n = mnem::eval::export(&c, &mut out, None).unwrap();
+    let rows: Vec<serde_json::Value> = String::from_utf8(out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(n, rows.len());
+    let kinds: Vec<&str> = rows.iter().map(|r| r["record"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["session", "event", "memory"]);
+    assert_eq!(
+        rows[2]["type"], "bugfix",
+        "the memory's own type is preserved"
+    );
+}
