@@ -74,7 +74,10 @@ something since, a short "meanwhile" update.
   of jina-reranker-v1-turbo-en, bge-reranker-base or jina-reranker-v2-base-multilingual
   separated helpful from unhelpful candidates clearly better than MiniLM (AUC 0.728,
   0.702, 0.745 against 0.713, all within noise), and each took 0.9-3.4 s per prompt on
-  this CPU. `mnem eval --rerank <model> --dump <file>` re-runs the comparison.
+  this CPU. That screen only let a reranker reorder and filter the keyword top ten;
+  two uses stay untested: scoring a wider pool (keyword ranks 11-60 and meaning-only
+  hits) and reordering MCP search results, where seconds of latency are acceptable.
+  `mnem eval --rerank <model> --dump <file>` re-runs the comparison.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
   and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge
