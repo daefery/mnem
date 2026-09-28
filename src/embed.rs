@@ -114,10 +114,9 @@ impl Embedder {
                 .with_max_length(MAX_TOKENS)
                 .with_show_download_progress(false);
             let mut te = fastembed::TextEmbedding::try_new(opts)?;
-            // Key vectors by what the loaded model does, wherever its files live: embed
-            // fixed probes (one longer than the input limit) as documents and hash the
-            // rounded output together with the prefixes. New weights, tokenizer, input
-            // length or prefixes give a new key, so old vectors are never compared.
+            // Key vectors by what produced them: every file the loader reads (resolved as
+            // it resolves them), the input length and the prefixes, plus the model's
+            // output for fixed probes (one longer than the input limit) as a second check.
             let prefixes = prefixes(m);
             let long = "memory fingerprint probe sentence ".repeat(80);
             let probes: Vec<String> = [
@@ -133,7 +132,11 @@ impl Embedder {
                 bail!("fastembed model {m} returned empty embeddings");
             }
             let mut h = Sha256::new();
-            h.update(format!("{}|{}|", prefixes.0, prefixes.1).as_bytes());
+            for (file, path) in onnx_assets(&info)? {
+                h.update(file.as_bytes());
+                h.update(std::fs::read(&path).with_context(|| format!("read {}", path.display()))?);
+            }
+            h.update(format!("{MAX_TOKENS}|{}|{}|", prefixes.0, prefixes.1).as_bytes());
             for v in &out {
                 for x in v {
                     h.update(((x * 100.0).round() as i32).to_le_bytes());
@@ -190,6 +193,43 @@ impl Embedder {
 /// Input length for ONNX models, in tokens (memories are embedded from their head).
 #[cfg(feature = "fastembed")]
 const MAX_TOKENS: usize = 256;
+
+/// The files fastembed loads for a model, found the way its Hugging Face cache finds
+/// them: HF_HOME if set, else mnem's model cache; `refs/main` names the snapshot.
+/// Any missing file is an error: an incomplete fingerprint would not tell models apart.
+#[cfg(feature = "fastembed")]
+fn onnx_assets(
+    info: &fastembed::ModelInfo<fastembed::EmbeddingModel>,
+) -> Result<Vec<(String, PathBuf)>> {
+    let root = std::env::var("HF_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| db::data_dir().join("models").join("fastembed"));
+    let repo = root.join(format!("models--{}", info.model_code.replace('/', "--")));
+    let rev = std::fs::read_to_string(repo.join("refs").join("main"))
+        .with_context(|| format!("no snapshot of {} in {}", info.model_code, root.display()))?;
+    let snap = repo.join("snapshots").join(rev.trim());
+    let mut files = vec![info.model_file.clone()];
+    files.extend(info.additional_files.iter().cloned());
+    for f in [
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ] {
+        files.push(f.to_string());
+    }
+    files
+        .into_iter()
+        .map(|f| {
+            let p = snap.join(&f);
+            if p.is_file() {
+                Ok((f, p))
+            } else {
+                bail!("model file {} missing from {}", f, snap.display())
+            }
+        })
+        .collect()
+}
 
 /// Query and document prefixes the model was trained with.
 #[cfg(feature = "fastembed")]
