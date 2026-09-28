@@ -59,7 +59,10 @@ pub fn terms(prompt: &str) -> Vec<String> {
 pub enum Mode {
     Keyword,
     Vector,
+    /// Reciprocal rank fusion of keyword and vector lists.
     Hybrid,
+    /// Keyword order kept; vector hits only fill the remaining slots.
+    Fill,
 }
 
 fn semantic_enabled() -> bool {
@@ -68,7 +71,9 @@ fn semantic_enabled() -> bool {
 
 /// The semantic model loaded in this process (for eval and CLI use).
 pub fn semantic_embedder() -> Option<crate::embed::Embedder> {
-    semantic_enabled().then(|| crate::embed::Embedder::load().ok()).flatten()
+    semantic_enabled()
+        .then(|| crate::embed::Embedder::load().ok())
+        .flatten()
 }
 
 type Hit = (i64, String, String, i64);
@@ -88,7 +93,9 @@ pub fn rank(
         return keyword_rank(conn, project, prompt, exclude_session, limit);
     };
     // Same gate as keywords: harness text and very short prompts carry no query.
-    let Some((clean, label)) = classify_prompt(prompt) else { return Ok(vec![]) };
+    let Some((clean, label)) = classify_prompt(prompt) else {
+        return Ok(vec![]);
+    };
     if label.is_some() || clean.split_whitespace().count() < 4 {
         return Ok(vec![]);
     }
@@ -100,10 +107,12 @@ pub fn rank(
     )?;
     let mut vector: Vec<Hit> = Vec::new();
     for (id, cos) in crate::embed::search(conn, q, project, pool * 2)? {
-        if cos < std::env::var("MNEM_MIN_COS").ok().and_then(|v| v.parse().ok()).unwrap_or(MIN_COSINE) {
+        if cos < MIN_COSINE {
             break;
         }
-        if let Ok(h) = info.query_row(params![id, exclude_session.unwrap_or("")], |r| Ok((id, r.get(0)?, r.get(1)?, r.get(2)?))) {
+        if let Ok(h) = info.query_row(params![id, exclude_session.unwrap_or("")], |r| {
+            Ok((id, r.get(0)?, r.get(1)?, r.get(2)?))
+        }) {
             vector.push(h);
             if vector.len() == pool {
                 break;
@@ -114,10 +123,21 @@ pub fn rank(
         vector.truncate(limit);
         return Ok(vector);
     }
+    if mode == Mode::Fill {
+        let mut out = keyword_rank(conn, project, prompt, exclude_session, limit)?;
+        for h in vector {
+            if out.len() >= limit {
+                break;
+            }
+            if !out.iter().any(|x| x.0 == h.0) {
+                out.push(h);
+            }
+        }
+        return Ok(out);
+    }
     let keyword = keyword_rank(conn, project, prompt, exclude_session, pool)?;
     let mut fused: Vec<(f64, Hit)> = Vec::new();
-    let vec_weight: f64 = std::env::var("MNEM_VEC_WEIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(VECTOR_WEIGHT);
-    for (list, weight) in [(&keyword, 1.0), (&vector, vec_weight)] {
+    for (list, weight) in [(&keyword, 1.0), (&vector, VECTOR_WEIGHT)] {
         for (r, h) in list.iter().enumerate() {
             let score = weight / (RRF_K + r as f64 + 1.0);
             match fused.iter_mut().find(|(_, x)| x.0 == h.0) {
@@ -132,8 +152,8 @@ pub fn rank(
 
 /// Reciprocal-rank-fusion constant (the usual 60).
 const RRF_K: f64 = 60.0;
-/// Weight of the vector list relative to keywords in the fusion.
-const VECTOR_WEIGHT: f64 = 1.0;
+/// Weight of the vector list relative to keywords in hybrid fusion (best in `mnem eval`).
+const VECTOR_WEIGHT: f64 = 0.5;
 /// Vector hits below this cosine similarity are not considered related.
 const MIN_COSINE: f32 = 0.0;
 
@@ -232,8 +252,20 @@ pub fn recall(
     prompt: &str,
 ) -> Result<Option<String>> {
     // Hooks are short-lived: ask the watch service, which keeps the model loaded.
-    let query = semantic_enabled().then(|| crate::embed::query_from_service(prompt)).flatten();
-    let rows = rank(conn, project, prompt, Some(session), TOP, query.as_ref(), Mode::Hybrid)?;
+    let query = semantic_enabled()
+        .then(|| crate::embed::query_from_service(prompt))
+        .flatten();
+    // Fill: keyword order is kept (it scores best at top 5 in `mnem eval`); meaning-based
+    // hits only fill slots keywords leave empty, e.g. for vague prompts.
+    let rows = rank(
+        conn,
+        project,
+        prompt,
+        Some(session),
+        TOP,
+        query.as_ref(),
+        Mode::Fill,
+    )?;
     if rows.is_empty() {
         return Ok(None);
     }

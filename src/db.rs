@@ -154,11 +154,12 @@ CREATE TABLE IF NOT EXISTS forgotten(
 
 -- Semantic vectors for memories, int8 with a per-vector scale, per embedding model.
 CREATE TABLE IF NOT EXISTS memory_vectors(
-  memory_id INTEGER PRIMARY KEY,
+  memory_id INTEGER NOT NULL,
   model TEXT NOT NULL,
   dim INTEGER NOT NULL,
   scale REAL NOT NULL,
-  vec BLOB NOT NULL
+  vec BLOB NOT NULL,
+  PRIMARY KEY(memory_id, model)
 );
 
 -- Memories already offered to a session by prompt-time recall (never repeated).
@@ -199,7 +200,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 12;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -266,5 +267,19 @@ fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS events_turn ON events(session_id, turn, kind);",
     )?;
+    // memory_vectors was first keyed by memory_id alone, so a second model overwrote the
+    // first. Rebuild it keyed by (memory_id, model); vectors are cheap to recompute.
+    let keyed_by_model: bool = conn.query_row(
+        "SELECT count(*) FROM pragma_table_info('memory_vectors') WHERE name = 'model' AND pk > 0",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !keyed_by_model {
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS memory_vectors;
+             CREATE TABLE memory_vectors(memory_id INTEGER NOT NULL, model TEXT NOT NULL, dim INTEGER NOT NULL,
+               scale REAL NOT NULL, vec BLOB NOT NULL, PRIMARY KEY(memory_id, model));",
+        )?;
+    }
     Ok(())
 }

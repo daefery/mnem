@@ -322,7 +322,11 @@ fn main() -> Result<()> {
             if let Some(p) = probe {
                 let t = Instant::now();
                 let v = e.embed(&[p]);
-                println!("query embedding: {} dims in {} µs", v[0].len(), t.elapsed().as_micros());
+                println!(
+                    "query embedding: {} dims in {} µs",
+                    v[0].len(),
+                    t.elapsed().as_micros()
+                );
             }
             let t = Instant::now();
             let n = mnem::embed::backfill(&mut conn, &e, limit)?;
@@ -365,6 +369,7 @@ fn main() -> Result<()> {
             let mode = match mode.as_str() {
                 "keyword" => mnem::recall::Mode::Keyword,
                 "vector" => mnem::recall::Mode::Vector,
+                "fill" => mnem::recall::Mode::Fill,
                 _ => mnem::recall::Mode::Hybrid,
             };
             let path = mnem::eval::eval_path();

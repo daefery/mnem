@@ -172,7 +172,11 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
                     let query = e.query(text);
                     Response::json(&json!({ "model": query.model, "vector": query.vec }))
                 }
-                None => Response::text("503 Service Unavailable", "text/plain", "no embedding model loaded\n"),
+                None => Response::text(
+                    "503 Service Unavailable",
+                    "text/plain",
+                    "no embedding model loaded\n",
+                ),
             }
         }
         "/api/context" => {

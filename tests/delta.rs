@@ -248,3 +248,50 @@ fn export_labels_every_record() {
         "the memory's own type is preserved"
     );
 }
+
+#[test]
+fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
+    let c = db("fill");
+    let add = |title: &str, v: [f32; 4]| {
+        c.execute(
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'mnem', ?1, ?2)",
+            params![title, mnem::db::now_ms()],
+        )
+        .unwrap();
+        let id = c.last_insert_rowid();
+        let (scale, q) = mnem::embed::quantize(&v);
+        c.execute(
+            "INSERT INTO memory_vectors(memory_id, model, dim, scale, vec) VALUES (?1, 'test-model', 4, ?2, ?3)",
+            params![id, scale, q],
+        )
+        .unwrap();
+        id
+    };
+    let keyword_hit = add("Backup restore stages the database", [0.0, 0.0, 1.0, 0.0]);
+    let meaning_hit = add("Snapshots can be recovered safely", [1.0, 0.0, 0.0, 0.0]);
+    let _unrelated = add("Viewer colours changed", [0.0, 1.0, 0.0, 0.0]);
+    let query = mnem::embed::Query {
+        model: "test-model".into(),
+        vec: vec![0.9, 0.1, 0.0, 0.0],
+    };
+    let prompt = "how does backup restore work for the database snapshots";
+    let ids: Vec<i64> = mnem::recall::rank(
+        &c,
+        "proj",
+        prompt,
+        None,
+        5,
+        Some(&query),
+        mnem::recall::Mode::Fill,
+    )
+    .unwrap()
+    .into_iter()
+    .map(|h| h.0)
+    .collect();
+    assert_eq!(
+        ids.first(),
+        Some(&keyword_hit),
+        "keyword order first: {ids:?}"
+    );
+    assert!(ids.contains(&meaning_hit), "meaning fills the gap: {ids:?}");
+}

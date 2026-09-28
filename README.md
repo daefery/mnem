@@ -22,6 +22,7 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 | `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
 | `mnem watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
 | `mnem distill` / `mnem models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
+| `mnem embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
 | `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `session_start_context` |
 | `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 
@@ -49,6 +50,14 @@ something since, a short "meanwhile" update.
 }
 ```
 
+- `semantic.model` (default `minishlab/potion-base-8M`), `semantic.enabled`: local
+  semantic recall. The watch service keeps the model loaded and embeds new memories;
+  hooks ask it for query vectors over localhost and fall back to keywords if it is down.
+  Prompt recall keeps keyword order and lets meaning-based matches fill empty slots,
+  which scored best on `mnem eval` (a fused ranking puts the right memory first more
+  often but in the top five less often).
+- `distill.exclude_providers` / `distill.exclude_models`: never use these models, e.g.
+  `["antigravity"]` and `["gemini"]`.
 - `harness_prompts`: prompts matching these patterns are labelled as tooling-injected,
   not human asks.
 - `distill`: any OpenAI-compatible endpoint (CLIProxyAPI by default). Models are tried

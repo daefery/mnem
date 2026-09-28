@@ -184,7 +184,15 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
         }
         let t = Instant::now();
         let query = embedder.as_ref().map(|e| e.query(&c.question));
-        let ranked = recall::rank(conn, &c.project, &c.question, None, 10, query.as_ref(), mode)?;
+        let ranked = recall::rank(
+            conn,
+            &c.project,
+            &c.question,
+            None,
+            10,
+            query.as_ref(),
+            mode,
+        )?;
         times.push(t.elapsed().as_secs_f64() * 1000.0);
         match ranked.iter().position(|r| r.0 == c.id) {
             Some(i) => {

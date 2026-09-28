@@ -133,6 +133,28 @@ pub fn run(conn: &Connection) -> Result<bool> {
             println!("backup: NONE, run `mnem backup` (the watch service does this nightly)");
         }
     }
+    let model = crate::embed::model_name();
+    let vectors: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM memory_vectors WHERE model = ?1",
+            [&model],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let memories: i64 = conn.query_row(
+        "SELECT count(*) FROM memories WHERE kind != 'pinned'",
+        [],
+        |r| r.get(0),
+    )?;
+    if crate::config::CONFIG.semantic.enabled == Some(false) {
+        println!("semantic: off (config)");
+    } else if vectors == 0 {
+        println!("semantic: off, run `mnem embed` to download {model} and embed memories");
+    } else {
+        println!(
+            "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
+        );
+    }
     let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
     if !alerts.is_empty() {
         healthy = false;
