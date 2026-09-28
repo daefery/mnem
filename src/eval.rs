@@ -366,12 +366,7 @@ pub fn agreement(a: &str, b: &str) -> (usize, usize, f64) {
 }
 
 /// Cosine of each memory's text, embedded now with `e`, to the query.
-fn candidate_cosines(
-    conn: &Connection,
-    e: &crate::embed::Embedder,
-    q: &crate::embed::Query,
-    ids: &[i64],
-) -> Result<Vec<Option<f32>>> {
+fn candidate_texts(conn: &Connection, ids: &[i64]) -> Result<Vec<String>> {
     let mut texts = Vec::new();
     for id in ids {
         texts.push(conn.query_row(
@@ -387,6 +382,16 @@ fn candidate_cosines(
             },
         )?);
     }
+    Ok(texts)
+}
+
+fn candidate_cosines(
+    conn: &Connection,
+    e: &crate::embed::Embedder,
+    q: &crate::embed::Query,
+    ids: &[i64],
+) -> Result<Vec<Option<f32>>> {
+    let texts = candidate_texts(conn, ids)?;
     let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
     let qn = norm(&q.vec);
     Ok(e.embed(&texts)
@@ -401,19 +406,25 @@ fn candidate_cosines(
 /// One dumped prompt: its candidates' (cosine, judged helpful).
 type Dumped = (String, Vec<(Option<f32>, Option<bool>)>);
 
-fn read_dump(path: &Path) -> Result<Vec<Dumped>> {
+/// `field` is the score to read: "cos" keeps the keyword order (the gate filters it),
+/// any other score (e.g. "rerank") reorders the candidates by that score, as recall
+/// does with a reranker.
+fn read_dump(path: &Path, field: &str) -> Result<Vec<Dumped>> {
     let f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut out = Vec::new();
     for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
         let v: Value = serde_json::from_str(&l)?;
-        let cands = v["cands"]
+        let mut cands: Vec<(Option<f32>, Option<bool>)> = v["cands"]
             .as_array()
             .map(|a| {
                 a.iter()
-                    .map(|c| (c["cos"].as_f64().map(|x| x as f32), c["relevant"].as_bool()))
+                    .map(|c| (c[field].as_f64().map(|x| x as f32), c["relevant"].as_bool()))
                     .collect()
             })
             .unwrap_or_default();
+        if field != "cos" {
+            cands.sort_by(|a, b| b.0.unwrap_or(-1.0).total_cmp(&a.0.unwrap_or(-1.0)));
+        }
         out.push((v["q"].as_str().unwrap_or_default().to_string(), cands));
     }
     Ok(out)
@@ -454,17 +465,21 @@ fn auc<'a>(cases: impl Iterator<Item = &'a Dumped>) -> Option<f64> {
 /// Compare `mnem eval --dump` files from different models: AUC of cosine for the judged
 /// candidates, a prompt-level bootstrap interval for each model's AUC minus the first
 /// one's, and what a relevance threshold would keep of each prompt's top five.
-pub fn analyze(paths: &[std::path::PathBuf]) -> Result<String> {
+pub fn analyze(paths: &[std::path::PathBuf], field: &str) -> Result<String> {
+    // A path may name its score as path:field, to compare a reranker with a gate.
     let dumps: Vec<(String, Vec<Dumped>)> = paths
         .iter()
         .map(|p| {
-            Ok((
-                p.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                read_dump(p)?,
-            ))
+            let s = p.to_string_lossy();
+            let (path, f) = match s.rsplit_once(':') {
+                Some((a, b)) if !b.contains('/') => (std::path::PathBuf::from(a), b.to_string()),
+                _ => (p.clone(), field.to_string()),
+            };
+            let name = format!(
+                "{}[{f}]",
+                path.file_stem().unwrap_or_default().to_string_lossy()
+            );
+            Ok((name, read_dump(&path, &f)?))
         })
         .collect::<Result<_>>()?;
     let mut out = String::new();
@@ -514,7 +529,7 @@ pub fn analyze(paths: &[std::path::PathBuf]) -> Result<String> {
             }
         }
         out.push('\n');
-        for step in 0..=16 {
+        for step in 0..=19 {
             let t = step as f32 * 0.05;
             let (mut right, mut wrong, mut helped) = (0, 0, 0);
             for (_, cands) in cases {
@@ -581,6 +596,8 @@ pub struct Report {
     /// Answerable cases that recalled nothing at all.
     pub silent: usize,
     pub judged: Judged,
+    /// Time to rerank each dumped prompt's candidates, sorted (ms).
+    pub rerank_ms: Vec<f64>,
 }
 
 /// `judge`: None, or the judge to use: "chain" (the configured distillation models) or
@@ -594,7 +611,9 @@ pub fn run(
     mode: recall::Mode,
     judge_with: Option<&str>,
     dump: Option<&Path>,
+    rerank: Option<&crate::rerank::Reranker>,
 ) -> Result<Report> {
+    let mut rerank_ms: Vec<f64> = Vec::new();
     let mut dump = dump.map(std::fs::File::create).transpose()?;
     let llm = match judge_with {
         Some(j) => {
@@ -676,11 +695,20 @@ pub fn run(
                     (Some(e), Some(q)) => candidate_cosines(conn, e, q, &cands)?,
                     _ => vec![None; cands.len()],
                 };
+                let rerank: Vec<Option<f32>> = match rerank {
+                    Some(r) => {
+                        let t = Instant::now();
+                        let s = r.scores(&c.question, &candidate_texts(conn, &cands)?)?;
+                        rerank_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+                        s.into_iter().map(Some).collect()
+                    }
+                    None => vec![None; cands.len()],
+                };
                 let rows: Vec<Value> = cands
                     .iter()
                     .enumerate()
                     .map(|(i, id)| {
-                        json!({ "id": id, "rank": i, "cos": cos[i],
+                        json!({ "id": id, "rank": i, "cos": cos[i], "rerank": rerank[i],
                                 "relevant": marks.as_ref().map(|m| m[i]) })
                     })
                     .collect();
@@ -774,6 +802,10 @@ pub fn run(
         },
         silent,
         judged,
+        rerank_ms: {
+            rerank_ms.sort_by(f64::total_cmp);
+            rerank_ms
+        },
         p50_ms: pct(0.5),
         p95_ms: pct(0.95),
         misses,
@@ -811,6 +843,25 @@ pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
 mod tests {
     use super::{Case, auc, parse_marks, wilson};
     use serde_json::json;
+
+    #[test]
+    fn a_rerank_score_reorders_candidates_a_cosine_does_not() {
+        let f = std::env::temp_dir().join(format!("mnem-dump-{}.jsonl", std::process::id()));
+        std::fs::write(
+            &f,
+            r#"{"q":"a","cands":[{"cos":0.9,"rerank":0.1,"relevant":false},{"cos":0.2,"rerank":0.8,"relevant":true}]}"#,
+        )
+        .unwrap();
+        let by_cos = super::read_dump(&f, "cos").unwrap();
+        assert_eq!(by_cos[0].1[0].1, Some(false), "keyword order kept");
+        let by_rerank = super::read_dump(&f, "rerank").unwrap();
+        assert_eq!(
+            by_rerank[0].1[0],
+            (Some(0.8), Some(true)),
+            "best score first"
+        );
+        let _ = std::fs::remove_file(&f);
+    }
 
     #[test]
     fn judge_answers_are_strict() {

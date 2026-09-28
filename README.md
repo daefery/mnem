@@ -70,6 +70,11 @@ something since, a short "meanwhile" update.
   model (judging costs about one LLM call per prompt the first time; later models reuse
   the cached judgments), then `mnem eval --analyze <files>`. `mnem embed --import <db>` reuses vectors
   computed in another copy of the database when the memory text still matches.
+  Cross-encoder reranking of the top ten was tried the same way and not adopted: none
+  of jina-reranker-v1-turbo-en, bge-reranker-base or jina-reranker-v2-base-multilingual
+  separated helpful from unhelpful candidates clearly better than MiniLM (AUC 0.728,
+  0.702, 0.745 against 0.713, all within noise), and each took 0.9-3.4 s per prompt on
+  this CPU. `mnem eval --rerank <model> --dump <file>` re-runs the comparison.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
   and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge

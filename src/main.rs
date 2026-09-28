@@ -201,6 +201,9 @@ enum Cmd {
         /// Compare --dump files from different models (AUC, bootstrap CI, thresholds)
         #[arg(long, num_args = 1..)]
         analyze: Vec<PathBuf>,
+        /// Also score each dumped candidate with this reranker (fastembed enum name)
+        #[arg(long)]
+        rerank: Option<String>,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -434,9 +437,10 @@ fn main() -> Result<()> {
             judge_model,
             dump,
             analyze,
+            rerank,
         } => {
             if !analyze.is_empty() {
-                print!("{}", mnem::eval::analyze(&analyze)?);
+                print!("{}", mnem::eval::analyze(&analyze, "cos")?);
                 return Ok(());
             }
             if let Some(n) = build_real {
@@ -476,7 +480,26 @@ fn main() -> Result<()> {
                 println!("built {written} questions in {}", path.display());
             }
             let judge_with = judge_model.as_deref().or(judge.then_some("chain"));
-            let r = mnem::eval::run(&conn, &path, mode, judge_with, dump.as_deref())?;
+            let reranker = rerank
+                .as_deref()
+                .map(mnem::rerank::Reranker::load)
+                .transpose()?;
+            let r = mnem::eval::run(
+                &conn,
+                &path,
+                mode,
+                judge_with,
+                dump.as_deref(),
+                reranker.as_ref(),
+            )?;
+            if !r.rerank_ms.is_empty() {
+                let p = |q: f64| r.rerank_ms[((r.rerank_ms.len() - 1) as f64 * q) as usize];
+                println!(
+                    "rerank of each prompt's candidates: p50 {:.0} ms, p95 {:.0} ms",
+                    p(0.5),
+                    p(0.95)
+                );
+            }
             if r.judged.prompts > 0 {
                 let j = &r.judged;
                 println!(
