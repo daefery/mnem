@@ -243,6 +243,34 @@ fn tools() -> Value {
 }
 
 pub fn call(conn: &Connection, name: &str, a: &Value) -> Result<String> {
+    // Uptake: which tool, for which project, and which memories it asked for.
+    let ids: Vec<i64> = match name {
+        "get_observations" => a["ids"]
+            .as_array()
+            .map(|v| {
+                v.iter()
+                    .filter_map(|x| match parse_id(x) {
+                        Some(Id::Memory(n)) => Some(n),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "timeline" => match a.get("anchor").and_then(parse_id) {
+            Some(Id::Memory(n)) => vec![n],
+            _ => vec![],
+        },
+        _ => vec![],
+    };
+    let project = str_arg(a, "project").map(str::to_string).or_else(|| {
+        let cwd = str_arg(a, "cwd").map(str::to_string).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|d| d.to_string_lossy().into_owned())
+        })?;
+        crate::project::Resolver::default().resolve(Some(&cwd), None)
+    });
+    let _ = crate::uptake::mcp_call(conn, name, project.as_deref(), &ids);
     match name {
         "search" => search(conn, a),
         "timeline" => timeline(conn, a),

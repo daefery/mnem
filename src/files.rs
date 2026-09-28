@@ -516,6 +516,8 @@ pub fn on_touch(
             params![session, a.id],
         )?;
     }
+    let ids: Vec<i64> = found.iter().map(|a| a.id).collect();
+    crate::uptake::offered(&tx, session, &ids, "file")?;
     tx.commit()?;
     Ok(text)
 }

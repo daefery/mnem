@@ -461,6 +461,7 @@ pub fn recall(
     for id in &shown {
         mark.execute(params![session, id])?;
     }
+    crate::uptake::offered(conn, session, &shown, "prompt")?;
     Ok((!shown.is_empty()).then_some(w))
 }
 

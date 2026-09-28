@@ -268,6 +268,12 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             let notice = (!alerts.is_empty()).then(|| format!("mnem: {}", alerts.join(" | ")));
             emit_with("SessionStart", &ctx, notice.as_deref());
             if let Some(s) = &session
+                && let Err(e) =
+                    crate::uptake::offered(conn, s, &crate::uptake::ids_in(&ctx), "start")
+            {
+                log(&format!("uptake: {e:#}"));
+            }
+            if let Some(s) = &session
                 && let Err(e) = set_watermark(conn, s)
             {
                 log(&format!("watermark: {e:#}"));

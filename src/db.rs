@@ -209,6 +209,32 @@ CREATE TRIGGER IF NOT EXISTS memories_files_ad AFTER DELETE ON memories BEGIN
   DELETE FROM memory_files WHERE memory_id = old.id;
 END;
 
+-- Uptake: what mnem put in front of agents, what they asked mnem for, and what the
+-- hooks cost (`mnem uptake`). Kept locally like everything else.
+CREATE TABLE IF NOT EXISTS offers(
+  session_id TEXT NOT NULL,
+  memory_id INTEGER NOT NULL,
+  source TEXT NOT NULL,              -- start | prompt | file
+  at INTEGER NOT NULL,
+  PRIMARY KEY(session_id, memory_id, source)
+);
+CREATE INDEX IF NOT EXISTS offers_at ON offers(at);
+CREATE TABLE IF NOT EXISTS mcp_calls(
+  id INTEGER PRIMARY KEY,
+  at INTEGER NOT NULL,
+  tool TEXT NOT NULL,
+  project TEXT,
+  ids TEXT                           -- JSON array of memory ids asked for, if any
+);
+CREATE INDEX IF NOT EXISTS mcp_calls_at ON mcp_calls(at);
+CREATE TABLE IF NOT EXISTS hook_runs(
+  at INTEGER NOT NULL,
+  agent TEXT NOT NULL,
+  event TEXT NOT NULL,
+  ms INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS hook_runs_at ON hook_runs(at);
+
 -- Files a session has already been offered memories about (once per file).
 CREATE TABLE IF NOT EXISTS file_seen(
   session_id TEXT NOT NULL,
@@ -254,7 +280,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 17;
+pub const SCHEMA_VERSION: i64 = 18;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

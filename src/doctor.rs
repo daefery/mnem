@@ -164,6 +164,30 @@ pub fn run(conn: &Connection) -> Result<bool> {
             "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
         );
     }
+    if let Ok(u) = crate::uptake::report(conn, 7)
+        && u.since.is_some()
+    {
+        let parts: Vec<String> = u
+            .sources
+            .iter()
+            .filter(|(_, s)| s.offers > 0)
+            .map(|(src, s)| {
+                format!(
+                    "{src} {} offered, {} fetched, {} cited",
+                    s.offers, s.fetched, s.cited
+                )
+            })
+            .collect();
+        let calls: usize = u.mcp.iter().map(|(_, n)| n).sum();
+        println!(
+            "uptake (7 days): {}; {calls} MCP calls (details: mnem uptake)",
+            if parts.is_empty() {
+                "nothing offered".to_string()
+            } else {
+                parts.join("; ")
+            }
+        );
+    }
     let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
     if !alerts.is_empty() {
         healthy = false;

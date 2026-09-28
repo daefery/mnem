@@ -125,6 +125,17 @@ higher: with the file name hidden, 51% were judged helpful on the tuning half. S
 are about as useful as prompt recall, and they add what prompt recall does not find. The recall gate checks it on every change. Codex edits
 through apply_patch and asks to re-trust changed hooks, so it uses `recall_file`.
 
+## Is it used? `mnem uptake`
+
+Evals say whether recalled memories would help; `mnem uptake` says what agents do with
+them. Every memory mnem injects is recorded with its source (session start, prompt
+recall, file recall), every call to mnem's MCP tools with the memories it asked for,
+and every hook run with its duration. The report shows, per source, how many offered
+memories were fetched in full within a day in the same project or cited by id (`#123`)
+in the agent's replies, MCP calls per tool, and hook p50/p95. `mnem doctor` prints a
+one-line summary. Transcripts keep neither hook context nor MCP arguments, so counting
+starts when this is installed.
+
 ## Changing recall: the release gate
 
 Build the change, then run the new build's gate before installing it:

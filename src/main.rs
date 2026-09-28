@@ -68,6 +68,11 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Whether agents use what mnem offers: fetches, citations, MCP calls, hook cost
+    Uptake {
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+    },
     /// Memories about a file, and whether the file changed since each
     File {
         path: String,
@@ -361,6 +366,7 @@ fn main() -> Result<()> {
             if let Err(e) = hook::run(&mut conn, agent, &event) {
                 hook::log(&format!("{} {event}: {e:#}", agent.as_str()));
             }
+            let _ = mnem::uptake::hook_run(&conn, agent.as_str(), &event, t.elapsed().as_millis());
             hook::log(&format!(
                 "{} {event} took {} ms",
                 agent.as_str(),
@@ -929,6 +935,12 @@ fn main() -> Result<()> {
             })?;
         }
         Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
+        Cmd::Uptake { days } => {
+            print!(
+                "{}",
+                mnem::uptake::render(&mnem::uptake::report(&conn, days)?, days)
+            );
+        }
         Cmd::File { path, limit } => {
             let cwd = std::env::current_dir()?;
             match mnem::files::resolve(&path, &cwd) {

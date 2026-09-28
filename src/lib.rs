@@ -24,3 +24,4 @@ pub mod rerank;
 pub mod search;
 pub mod text;
 pub mod ui;
+pub mod uptake;
