@@ -26,6 +26,8 @@ pub struct Input {
     pub cwd: Option<String>,
     /// The user's prompt (UserPromptSubmit).
     pub prompt: Option<String>,
+    /// The file a tool read or changed (PostToolUse on Read, Edit, Write, ...).
+    pub file: Option<String>,
 }
 
 impl Input {
@@ -39,6 +41,10 @@ impl Input {
             transcript_path: s("transcript_path").map(PathBuf::from),
             cwd: s("cwd"),
             prompt: s("prompt"),
+            file: ["file_path", "notebook_path", "path"]
+                .iter()
+                .find_map(|k| v["tool_input"].get(k).and_then(Value::as_str))
+                .map(str::to_string),
         }
     }
 }
@@ -196,6 +202,17 @@ pub fn project_for(conn: &Connection, session: Option<&str>, cwd: Option<&str>) 
 pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
     let input = Input::from_stdin();
     let session = input.session_id.as_deref().map(|s| session_key(agent, s));
+    // A file touch comes after every read or edit: it stays quick and leaves catching up
+    // with the transcript to the other hooks and the watcher.
+    if event == "file" {
+        if let (Some(session), Some(path), Some(cwd)) = (&session, &input.file, &input.cwd)
+            && let Some(t) = crate::files::resolve(path, std::path::Path::new(cwd))
+            && let Some(text) = crate::files::on_touch(conn, session, &t, crate::eval::FILE_TOP)?
+        {
+            emit("PostToolUse", &text);
+        }
+        return Ok(());
+    }
     if let Some(tp) = &input.transcript_path
         && tp.exists()
         && own_unread(conn, tp) <= HOOK_MAX_UNREAD

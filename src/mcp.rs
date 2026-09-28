@@ -106,6 +106,7 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         return Err("arguments must be an object".into());
     }
     let strings: &[&str] = &[
+        "path",
         "query",
         "project",
         "platformSource",
@@ -133,6 +134,7 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         "timeline" => &["anchor", "query", "depth_before", "depth_after", "project"],
         "get_observations" => &["ids", "limit", "orderBy", "project"],
         "session_start_context" => &["project", "cwd"],
+        "recall_file" => &["path", "cwd", "limit"],
         "remember" => &["fact", "scope", "project"],
         _ => return Err(format!("unknown tool: {name}")),
     };
@@ -158,6 +160,9 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
     }
     if name == "remember" && str_arg(a, "fact").is_none() {
         return Err("fact (string) is required".into());
+    }
+    if name == "recall_file" && str_arg(a, "path").is_none() {
+        return Err("path (string) is required".into());
     }
     if name == "get_observations" && !a.get("ids").is_some_and(Value::is_array) {
         return Err("ids (array) is required".into());
@@ -218,6 +223,15 @@ fn tools() -> Value {
             }}
         },
         {
+            "name": "recall_file",
+            "description": "Memories about one file: past bugs, decisions and changes that read or modified it, those that changed it first, each marked with whether the file changed since (commits, uncommitted edits). Use before editing a file you have not worked on in this session.",
+            "inputSchema": { "type": "object", "required": ["path"], "properties": {
+                "path": { "type": "string", "description": "The file, absolute or relative to cwd" },
+                "cwd": { "type": "string", "description": "Directory relative paths start from (default: this server's working directory)" },
+                "limit": { "type": "number", "description": "Max memories (default 10)" }
+            }}
+        },
+        {
             "name": "session_start_context",
             "description": "The context mnem injects at session start for a project: recent sessions across agents, last summary, observations.",
             "inputSchema": { "type": "object", "properties": {
@@ -233,6 +247,7 @@ pub fn call(conn: &Connection, name: &str, a: &Value) -> Result<String> {
         "search" => search(conn, a),
         "timeline" => timeline(conn, a),
         "get_observations" => get(conn, a),
+        "recall_file" => recall_file(conn, a),
         "remember" => {
             let fact = str_arg(a, "fact").ok_or_else(|| anyhow::anyhow!("fact is required"))?;
             let project = if str_arg(a, "scope") == Some("global") {
@@ -822,6 +837,21 @@ fn get(conn: &Connection, a: &Value) -> Result<String> {
     Ok(out.join("\n\n---\n\n"))
 }
 
+fn recall_file(conn: &Connection, a: &Value) -> Result<String> {
+    let path = str_arg(a, "path").unwrap_or_default();
+    let cwd = str_arg(a, "cwd")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_default();
+    let limit = num_arg(a, "limit", 10).clamp(1, 50) as usize;
+    match crate::files::resolve(path, &cwd) {
+        Some(t) => crate::files::report(conn, &t, limit),
+        None => Ok(format!(
+            "{path} is not inside a git repository here, so its project and history are unknown."
+        )),
+    }
+}
+
 fn memory_detail(conn: &Connection, id: i64) -> Result<String> {
     let row = conn
         .query_row(
@@ -876,6 +906,14 @@ fn memory_detail(conn: &Connection, id: i64) -> Result<String> {
             for i in items {
                 w.push_str(&format!("- {i}\n"));
             }
+        }
+    }
+    // Whether the files it touched changed since (only files found on this machine).
+    let stale = crate::files::staleness_lines(conn, id, 5).unwrap_or_default();
+    if !stale.is_empty() {
+        w.push_str("\nChanged since this memory (check before relying on it):\n");
+        for l in stale {
+            w.push_str(&format!("- {l}\n"));
         }
     }
     w.push_str(&evidence(conn, id)?);

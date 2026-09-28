@@ -99,6 +99,25 @@ something since, a short "meanwhile" update.
   `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
   first. `mnem models` shows the live order and cooldowns.
 
+## Memories about a file
+
+When Claude Code first reads or edits a file in a session, mnem adds up to three past
+memories about that file (those that changed it first; never the session's own), each
+with how the file changed since in git: commits after the memory, uncommitted edits,
+lines added and removed, or that the file is gone. It takes about 40 ms, once per file
+per session. Any agent can ask with the MCP tool `recall_file(path)`, and people with
+`mnem file <path>`; `get_observations` also says when a memory's files changed since.
+
+Paths are matched by suffix within the project (memories record repo-relative,
+absolute and package-relative paths alike); a bare file name must match exactly.
+
+Measured before it was switched on: on 172 real file edits replayed as of the edit
+(split by session), 44% had memories about the file, and of the memories offered
+71% (tuning half) and 79% (held-out half) were judged helpful by gpt-5.6-luna, 58% and
+55% by claude-haiku-4-5, against 66% and 52% for prompt recall; only 4 of 198 repeated
+what prompt recall had shown. The recall gate checks it on every change. Codex edits
+through apply_patch and asks to re-trust changed hooks, so it uses `recall_file`.
+
 ## Changing recall: the release gate
 
 Build the change, then run the new build's gate before installing it:

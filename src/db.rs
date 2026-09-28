@@ -173,6 +173,49 @@ CREATE TRIGGER IF NOT EXISTS memories_vec_au AFTER UPDATE OF title, subtitle, na
   DELETE FROM memory_vectors WHERE memory_id = old.id;
 END;
 
+-- The files each memory read or modified, one row per file, kept in step with the
+-- memory's JSON lists by triggers; `name` (the last path component) is what lookups
+-- start from, the full path decides.
+CREATE TABLE IF NOT EXISTS memory_files(
+  memory_id INTEGER NOT NULL,
+  modified INTEGER NOT NULL,
+  path TEXT NOT NULL,
+  name TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS memory_files_name ON memory_files(name);
+CREATE INDEX IF NOT EXISTS memory_files_memory ON memory_files(memory_id);
+CREATE TRIGGER IF NOT EXISTS memories_files_ai AFTER INSERT ON memories BEGIN
+  INSERT INTO memory_files(memory_id, modified, path, name)
+    SELECT new.id, 1, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+      FROM json_each(CASE WHEN json_valid(new.files_modified) THEN new.files_modified ELSE '[]' END)
+     WHERE json_each.type = 'text' AND value != ''
+    UNION ALL
+    SELECT new.id, 0, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+      FROM json_each(CASE WHEN json_valid(new.files_read) THEN new.files_read ELSE '[]' END)
+     WHERE json_each.type = 'text' AND value != '';
+END;
+CREATE TRIGGER IF NOT EXISTS memories_files_au AFTER UPDATE OF files_read, files_modified ON memories BEGIN
+  DELETE FROM memory_files WHERE memory_id = old.id;
+  INSERT INTO memory_files(memory_id, modified, path, name)
+    SELECT new.id, 1, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+      FROM json_each(CASE WHEN json_valid(new.files_modified) THEN new.files_modified ELSE '[]' END)
+     WHERE json_each.type = 'text' AND value != ''
+    UNION ALL
+    SELECT new.id, 0, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+      FROM json_each(CASE WHEN json_valid(new.files_read) THEN new.files_read ELSE '[]' END)
+     WHERE json_each.type = 'text' AND value != '';
+END;
+CREATE TRIGGER IF NOT EXISTS memories_files_ad AFTER DELETE ON memories BEGIN
+  DELETE FROM memory_files WHERE memory_id = old.id;
+END;
+
+-- Files a session has already been offered memories about (once per file).
+CREATE TABLE IF NOT EXISTS file_seen(
+  session_id TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY(session_id, path)
+);
+
 -- Memories already offered to a session by prompt-time recall (never repeated).
 CREATE TABLE IF NOT EXISTS recall_seen(
   session_id TEXT NOT NULL,
@@ -211,7 +254,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 16;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -332,6 +375,20 @@ fn migrate(conn: &Connection) -> Result<()> {
             "DROP TABLE IF EXISTS memory_vectors;
              CREATE TABLE memory_vectors(memory_id INTEGER NOT NULL, model TEXT NOT NULL, dim INTEGER NOT NULL,
                scale REAL NOT NULL, vec BLOB NOT NULL, text_hash TEXT, PRIMARY KEY(memory_id, model));",
+        )?;
+    }
+    // memory_files arrived after most memories: fill it once from their file lists.
+    let indexed: i64 = conn.query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))?;
+    if indexed == 0 {
+        conn.execute_batch(
+            "INSERT INTO memory_files(memory_id, modified, path, name)
+               SELECT m.id, 1, j.value, replace(j.value, rtrim(j.value, replace(j.value, '/', '')), '')
+                 FROM memories m, json_each(CASE WHEN json_valid(m.files_modified) THEN m.files_modified ELSE '[]' END) j
+                WHERE j.type = 'text' AND j.value != ''
+               UNION ALL
+               SELECT m.id, 0, j.value, replace(j.value, rtrim(j.value, replace(j.value, '/', '')), '')
+                 FROM memories m, json_each(CASE WHEN json_valid(m.files_read) THEN m.files_read ELSE '[]' END) j
+                WHERE j.type = 'text' AND j.value != '';",
         )?;
     }
     Ok(())

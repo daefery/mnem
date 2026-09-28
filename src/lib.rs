@@ -7,6 +7,7 @@ pub mod distill;
 pub mod doctor;
 pub mod embed;
 pub mod eval;
+pub mod files;
 pub mod forget;
 pub mod gate;
 pub mod gitstate;

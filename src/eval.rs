@@ -92,6 +92,10 @@ struct Case {
     /// The session the prompt was typed in: its own memories are left out on replay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     session: Option<String>,
+    /// The file the agent edited after this prompt (repo-relative): the case then judges
+    /// the memories about that file, as file-aware recall would offer them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    file: Option<String>,
     /// A real prompt whose right answer is unknown: recall is judged (`--judge`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     open: bool,
@@ -147,6 +151,7 @@ pub fn build(conn: &Connection, n: usize, path: &Path) -> Result<usize> {
                             question: q.to_string(),
                             before: None,
                             session: None,
+                            file: None,
                             open: false,
                         })?
                     )?;
@@ -191,6 +196,7 @@ pub fn build_real(conn: &Connection, n: usize) -> Result<(usize, usize)> {
             question: question.trim().to_string(),
             before: Some(ts),
             session: Some(session),
+            file: None,
             open: true,
         })?;
         if dev_half {
@@ -199,6 +205,80 @@ pub fn build_real(conn: &Connection, n: usize) -> Result<(usize, usize)> {
         } else {
             writeln!(test, "{case}")?;
             b += 1;
+        }
+    }
+    Ok((a, b))
+}
+
+/// Memories about a file offered with each edit (at most).
+pub const FILE_TOP: usize = 3;
+
+/// Sample `n` real file edits (the prompt of that turn and the file, repo-relative)
+/// into `files-dev` and `files-test`, split by session. Each is replayed as of the edit
+/// and judged against the memories about that file (`--judge`).
+pub fn build_files(conn: &Connection, n: usize) -> Result<(usize, usize)> {
+    let mut st = conn.prepare(
+        "SELECT e.path, coalesce(s.cwd, ''), s.project, s.id, e.ts,
+                (SELECT p.text FROM events p WHERE p.session_id = e.session_id AND p.kind = 'prompt'
+                   AND p.label IS NULL AND p.thread IS NULL AND p.id < e.id ORDER BY p.id DESC LIMIT 1)
+           FROM events e JOIN sessions s ON s.id = e.session_id
+          WHERE e.kind = 'file_edit' AND e.path IS NOT NULL AND e.ts IS NOT NULL AND s.project NOT LIKE '/%'
+            AND s.project IN (SELECT project FROM memories GROUP BY project HAVING count(*) >= 200)
+          ORDER BY abs(random()) LIMIT ?1",
+    )?;
+    let rows: Vec<(String, String, String, String, i64, Option<String>)> = st
+        .query_map([(n * 4) as i64], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut dev = std::fs::File::create(set_path("files-dev"))?;
+    let mut test = std::fs::File::create(set_path("files-test"))?;
+    let mut seen = std::collections::HashSet::new();
+    let (mut a, mut b) = (0, 0);
+    for (path, cwd, project, session, ts, prompt) in rows {
+        let Some(prompt) = prompt.filter(|p| p.trim().len() >= 20) else {
+            continue;
+        };
+        // Repo-relative as far as the session's directory tells: files outside it
+        // belong to another project.
+        let rel = if Path::new(&path).is_absolute() {
+            match Path::new(&path).strip_prefix(&cwd) {
+                Ok(r) if !cwd.is_empty() => r.to_string_lossy().into_owned(),
+                _ => continue,
+            }
+        } else {
+            path.trim_start_matches("./").to_string()
+        };
+        if rel.is_empty() || !seen.insert((session.clone(), rel.clone())) {
+            continue;
+        }
+        let dev_half = question_key(&session).ends_with(['0', '2', '4', '6', '8', 'a', 'c', 'e']);
+        let case = serde_json::to_string(&Case {
+            id: None,
+            ids: vec![],
+            project,
+            question: crate::text::head(prompt.trim(), 1500).to_string(),
+            before: Some(ts),
+            session: Some(session),
+            file: Some(rel),
+            open: true,
+        })?;
+        if dev_half {
+            writeln!(dev, "{case}")?;
+            a += 1;
+        } else {
+            writeln!(test, "{case}")?;
+            b += 1;
+        }
+        if a + b >= n {
+            break;
         }
     }
     Ok((a, b))
@@ -576,6 +656,8 @@ pub struct Judged {
     pub helped: usize,
     /// Prompts whose judgment failed: counted neither way.
     pub unjudged: usize,
+    /// File cases: memories offered that prompt recall had already offered.
+    pub overlap: usize,
 }
 
 pub struct Report {
@@ -729,7 +811,32 @@ pub fn run(
                     json!({ "q": question_key(&c.question), "project": c.project, "cands": rows })
                 )?;
             }
-            let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
+            // A file case judges the memories about the file, with the prompt and the
+            // file as context; a prompt case judges what prompt recall showed.
+            let (top, question): (Vec<i64>, String) = match &c.file {
+                Some(f) => {
+                    let ids: Vec<i64> =
+                        crate::files::about_in(conn, &c.project, f, &scope, FILE_TOP)?
+                            .iter()
+                            .map(|a| a.id)
+                            .collect();
+                    judged.overlap += ids
+                        .iter()
+                        .filter(|id| ranked.iter().take(5).any(|r| r.0 == **id))
+                        .count();
+                    (
+                        ids,
+                        format!(
+                            "{}\n\n(The agent is now working on the file {f}.)",
+                            c.question
+                        ),
+                    )
+                }
+                None => (
+                    ranked.iter().take(5).map(|r| r.0).collect(),
+                    c.question.clone(),
+                ),
+            };
             judged.prompts += 1;
             judged.shown += top.len();
             if let Some(llm) = &llm
@@ -741,7 +848,7 @@ pub fn run(
                     &llm.identity(),
                     &mut cache,
                     &c.project,
-                    &c.question,
+                    &question,
                     &top,
                 )? {
                     Some(marks) => {

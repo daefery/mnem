@@ -42,6 +42,19 @@ pub struct Metrics {
     /// own background service.
     #[serde(default)]
     pub hook: Option<Hook>,
+    /// File-aware recall on real edits (tuning half), judged.
+    #[serde(default)]
+    pub files: Option<Files>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Files {
+    pub edits: usize,
+    /// Edits for which there was any memory about the file.
+    pub with_any: usize,
+    pub shown: usize,
+    pub helpful: usize,
+    pub unjudged: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +111,7 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         ("recall", "mnem eval --build 40"),
         ("vague", "write it by hand (see README)"),
         ("real-dev", "mnem eval --build-real 160"),
+        ("files-dev", "mnem eval --build-files 300"),
     ] {
         if !set_path(set).exists() {
             bail!("the gate needs the {set} test set: {how}");
@@ -136,6 +150,18 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
             unjudged: j.unjudged,
             unhelpful_only: Some(j.judged_prompts - j.helped),
             total: Some(j.prompts),
+        })
+    } else {
+        None
+    };
+    let files = if judge {
+        let f = run("files-dev", Some("chain"))?.judged;
+        Some(Files {
+            edits: f.prompts,
+            with_any: f.judged_prompts + f.unjudged,
+            shown: f.judged_shown,
+            helpful: f.right,
+            unjudged: f.unjudged,
         })
     } else {
         None
@@ -262,6 +288,7 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
             sensitive_leaks: leaks,
         }),
         hook: Some(hook),
+        files,
     })
 }
 
@@ -415,6 +442,45 @@ pub fn compare(b: &Metrics, c: &Metrics) -> Vec<Check> {
         }
         _ => add(
             "real prompts (judged)",
+            "-".into(),
+            "-".into(),
+            "judged".into(),
+            false,
+        ),
+    }
+    match (&b.files, &c.files) {
+        (Some(bf), Some(cf)) => {
+            let p = |f: &Files| f.helpful as f64 / f.shown.max(1) as f64;
+            let share = |f: &Files| {
+                let (lo, hi) = crate::eval::wilson(f.helpful, f.shown);
+                format!("{:.0}% [{:.0}-{:.0}]", 100.0 * p(f), 100.0 * lo, 100.0 * hi)
+            };
+            add(
+                "file recall: edits offered memories",
+                format!("{}/{}", bf.with_any, bf.edits),
+                format!("{}/{}", cf.with_any, cf.edits),
+                format!("≥ {}", at_least(bf.with_any, 2)),
+                cf.with_any >= at_least(bf.with_any, 2),
+            );
+            add(
+                "file recall: memories judged helpful",
+                share(bf),
+                share(cf),
+                format!("≥ {:.0}%", 100.0 * (p(bf) - 0.03)),
+                p(cf) >= p(bf) - 0.03,
+            );
+            add(
+                "file recall: edits the judge could not judge",
+                bf.unjudged.to_string(),
+                cf.unjudged.to_string(),
+                "0".into(),
+                cf.unjudged == 0,
+            );
+        }
+        // An older baseline did not measure it: nothing to compare.
+        (None, Some(_)) => {}
+        (_, None) => add(
+            "file recall (judged)",
             "-".into(),
             "-".into(),
             "judged".into(),
@@ -596,6 +662,13 @@ mod tests {
                 p95_ms: 60.0,
                 fallbacks: 0,
             }),
+            files: Some(Files {
+                edits: 80,
+                with_any: 35,
+                shown: 91,
+                helpful: 65,
+                unjudged: 0,
+            }),
         }
     }
 
@@ -644,6 +717,13 @@ mod tests {
             p95_ms: 320.0,
             fallbacks: 3,
         });
+        c.files = Some(Files {
+            edits: 80,
+            with_any: 30,
+            shown: 91,
+            helpful: 50,
+            unjudged: 1,
+        });
         let f = failed(&c);
         for name in [
             "known questions found in top 5",
@@ -660,6 +740,9 @@ mod tests {
             "MCP search: personal details listed unasked",
             "hook recall, slowest 5% (start-up + service)",
             "hook recall fell back to keywords",
+            "file recall: edits offered memories",
+            "file recall: memories judged helpful",
+            "file recall: edits the judge could not judge",
         ] {
             assert!(f.contains(&name), "{name} should fail: {f:?}");
         }
@@ -706,8 +789,14 @@ mod tests {
         c.real = None;
         c.search = None;
         c.hook = None;
+        c.files = None;
         let f = failed(&c);
-        for name in ["real prompts (judged)", "MCP search", "hook recall"] {
+        for name in [
+            "real prompts (judged)",
+            "MCP search",
+            "hook recall",
+            "file recall (judged)",
+        ] {
             assert!(f.contains(&name), "{name}: {f:?}");
         }
     }

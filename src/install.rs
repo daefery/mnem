@@ -57,6 +57,19 @@ fn hook_entries(bin: &str, agent: &str) -> Vec<HookEntry> {
         ),
         ("Stop", None, format!("{bin} hook {agent} stop"), 10),
     ]
+    .into_iter()
+    // Memories about a file when Claude Code first reads or changes it in a session.
+    // (Codex edits through apply_patch and asks again to trust changed hooks; it uses
+    // the recall_file MCP tool instead.)
+    .chain((agent == "claude").then(|| {
+        (
+            "PostToolUse",
+            Some("Read|Edit|Write|MultiEdit|NotebookEdit"),
+            format!("{bin} hook {agent} file"),
+            10,
+        )
+    }))
+    .collect()
 }
 
 fn is_ours(h: &Value) -> bool {

@@ -68,6 +68,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Memories about a file, and whether the file changed since each
+    File {
+        path: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Prompt recall exactly as the prompt hook runs it, for timing (used by the gate)
     #[command(hide = true)]
     RecallProbe {
@@ -199,6 +205,9 @@ enum Cmd {
         /// Sample N real prompts from transcripts into real-dev and real-test
         #[arg(long)]
         build_real: Option<usize>,
+        /// Sample N real file edits into files-dev and files-test (file-aware recall)
+        #[arg(long)]
+        build_files: Option<usize>,
         /// Have the distillation models judge what recall shows for real prompts
         #[arg(long)]
         judge: bool,
@@ -475,6 +484,7 @@ fn main() -> Result<()> {
             cosines,
             set,
             build_real,
+            build_files,
             judge,
             judge_model,
             dump,
@@ -494,6 +504,11 @@ fn main() -> Result<()> {
             let _ = (gate, baseline, candidate_config);
             if !analyze.is_empty() {
                 print!("{}", mnem::eval::analyze(&analyze, "cos")?);
+                return Ok(());
+            }
+            if let Some(n) = build_files {
+                let (dev, test) = mnem::eval::build_files(&conn, n)?;
+                println!("sampled {dev} edits into files-dev and {test} into files-test");
                 return Ok(());
             }
             if let Some(n) = build_real {
@@ -585,6 +600,15 @@ fn main() -> Result<()> {
                             String::new()
                         }
                     );
+                    if set.starts_with("files") {
+                        println!(
+                            "edits with any memory about the file: {} of {} · of the {} memories offered, {} were already offered by prompt recall",
+                            j.judged_prompts + j.unjudged,
+                            j.prompts,
+                            j.shown,
+                            j.overlap
+                        );
+                    }
                     if name != "chain" {
                         let (n, agreed, kappa) = mnem::eval::agreement(
                             &mnem::eval::judge_identity("chain")?,
@@ -905,6 +929,13 @@ fn main() -> Result<()> {
             })?;
         }
         Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
+        Cmd::File { path, limit } => {
+            let cwd = std::env::current_dir()?;
+            match mnem::files::resolve(&path, &cwd) {
+                Some(t) => println!("{}", mnem::files::report(&conn, &t, limit)?),
+                None => anyhow::bail!("{path} is not inside a git repository"),
+            }
+        }
         Cmd::RecallProbe {
             session,
             project,
