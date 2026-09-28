@@ -99,41 +99,26 @@ pub fn rank(
     if label.is_some() || clean.split_whitespace().count() < 4 {
         return Ok(vec![]);
     }
-    let pool = limit * 6;
-    let mut info = conn.prepare_cached(
-        "SELECT coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0) FROM memories m
-         WHERE m.id = ?1 AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
-           AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?2 AND r.memory_id = m.id)",
-    )?;
-    let mut vector: Vec<Hit> = Vec::new();
-    for (id, cos) in crate::embed::search(conn, q, project, pool * 2)? {
-        if cos < MIN_COSINE {
-            break;
-        }
-        if let Ok(h) = info.query_row(params![id, exclude_session.unwrap_or("")], |r| {
-            Ok((id, r.get(0)?, r.get(1)?, r.get(2)?))
-        }) {
-            vector.push(h);
-            if vector.len() == pool {
-                break;
-            }
-        }
-    }
-    if mode == Mode::Vector {
-        vector.truncate(limit);
-        return Ok(vector);
-    }
     if mode == Mode::Fill {
         let mut out = keyword_rank(conn, project, prompt, exclude_session, limit)?;
-        for h in vector {
-            if out.len() >= limit {
-                break;
-            }
-            if !out.iter().any(|x| x.0 == h.0) {
-                out.push(h);
-            }
-        }
+        fill_with_vectors(conn, q, project, exclude_session, &mut out, limit)?;
         return Ok(out);
+    }
+    let pool = limit * 6;
+    let vector = vector_hits(
+        conn,
+        q,
+        project,
+        exclude_session,
+        pool,
+        if mode == Mode::Vector {
+            0.0
+        } else {
+            MIN_COSINE
+        },
+    )?;
+    if mode == Mode::Vector {
+        return Ok(vector.into_iter().take(limit).collect());
     }
     let keyword = keyword_rank(conn, project, prompt, exclude_session, pool)?;
     let mut fused: Vec<(f64, Hit)> = Vec::new();
@@ -150,12 +135,61 @@ pub fn rank(
     Ok(fused.into_iter().take(limit).map(|(_, h)| h).collect())
 }
 
+/// Vector hits above `min_cos`, with the fields recall shows.
+fn vector_hits(
+    conn: &Connection,
+    q: &crate::embed::Query,
+    project: &str,
+    exclude_session: Option<&str>,
+    limit: usize,
+    min_cos: f32,
+) -> Result<Vec<Hit>> {
+    let mut info = conn.prepare_cached(
+        "SELECT coalesce(type, kind), coalesce(title, ''), coalesce(created_at, 0) FROM memories WHERE id = ?1",
+    )?;
+    let mut out = Vec::new();
+    for (id, cos) in crate::embed::search(conn, q, project, exclude_session, limit)? {
+        if cos < min_cos {
+            break;
+        }
+        out.push(info.query_row([id], |r| Ok((id, r.get(0)?, r.get(1)?, r.get(2)?)))?);
+    }
+    Ok(out)
+}
+
+/// Fill empty slots in `out` with meaning-based hits that clear MIN_COSINE. An empty
+/// slot is better than an unrelated memory.
+pub fn fill_with_vectors(
+    conn: &Connection,
+    q: &crate::embed::Query,
+    project: &str,
+    exclude_session: Option<&str>,
+    out: &mut Vec<Hit>,
+    limit: usize,
+) -> Result<()> {
+    if out.len() >= limit {
+        return Ok(());
+    }
+    for h in vector_hits(conn, q, project, exclude_session, limit * 2, MIN_COSINE)? {
+        if out.len() >= limit {
+            break;
+        }
+        if !out.iter().any(|x| x.0 == h.0) {
+            out.push(h);
+        }
+    }
+    Ok(())
+}
+
 /// Reciprocal-rank-fusion constant (the usual 60).
 const RRF_K: f64 = 60.0;
 /// Weight of the vector list relative to keywords in hybrid fusion (best in `mnem eval`).
 const VECTOR_WEIGHT: f64 = 0.5;
-/// Vector hits below this cosine similarity are not considered related.
-const MIN_COSINE: f32 = 0.0;
+/// Vector hits below this cosine similarity are not offered. With potion-base-8M, true
+/// targets and the best wrong candidate have nearly the same cosine distribution
+/// (median 0.63 each, `mnem eval --cosines`), so vectors only fill slots; 0.55 (about
+/// the 10th percentile of true targets) trims the weakest filler.
+const MIN_COSINE: f32 = 0.55;
 
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
 /// Keyword ranking: memory ids in `project` for `prompt`, best first; `exclude_session`
@@ -251,21 +285,17 @@ pub fn recall(
     project: &str,
     prompt: &str,
 ) -> Result<Option<String>> {
-    // Hooks are short-lived: ask the watch service, which keeps the model loaded.
-    let query = semantic_enabled()
-        .then(|| crate::embed::query_from_service(prompt))
-        .flatten();
-    // Fill: keyword order is kept (it scores best at top 5 in `mnem eval`); meaning-based
-    // hits only fill slots keywords leave empty, e.g. for vague prompts.
-    let rows = rank(
-        conn,
-        project,
-        prompt,
-        Some(session),
-        TOP,
-        query.as_ref(),
-        Mode::Fill,
-    )?;
+    // Keywords first (they score best at top five in `mnem eval`). Only when they leave
+    // slots empty is the watch service asked for a query vector.
+    let mut rows = keyword_rank(conn, project, prompt, Some(session), TOP)?;
+    if rows.len() < TOP
+        && semantic_enabled()
+        && classify_prompt(prompt)
+            .is_some_and(|(c, l)| l.is_none() && c.split_whitespace().count() >= 4)
+        && let Some(q) = crate::embed::query_from_service(prompt)
+    {
+        fill_with_vectors(conn, &q, project, Some(session), &mut rows, TOP)?;
+    }
     if rows.is_empty() {
         return Ok(None);
     }
@@ -274,7 +304,14 @@ pub fn recall(
         "mnem recall: past memories matching this prompt (full text: get_observations([ids]))\n",
     );
     let mut shown = Vec::new();
+    let mut openings: Vec<String> = Vec::new();
     for (id, kind, title, at) in rows {
+        // Imported history holds near-identical summaries; one of them is enough.
+        let opening: String = title.to_lowercase().chars().take(48).collect();
+        if openings.contains(&opening) {
+            continue;
+        }
+        openings.push(opening);
         let line = format!(
             "#{id} {kind} · {} ago · {}\n",
             ago(now - at),

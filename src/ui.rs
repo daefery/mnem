@@ -17,6 +17,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const INDEX: &str = include_str!("../ui/index.html");
+/// Largest request head (request line + headers) the server reads.
+const MAX_HEAD: usize = 16 * 1024;
+/// Most connections handled at once.
+const MAX_CONNECTIONS: usize = 32;
+/// Longest text /api/embed embeds (longer queries are cut, not rejected).
+const MAX_EMBED_CHARS: usize = 2000;
 const APP: &str = include_str!("../ui/app.js");
 const STYLE: &str = include_str!("../ui/style.css");
 const LOGO: &str = include_str!("../ui/logo.svg");
@@ -43,13 +49,21 @@ const ICONS: &[(&str, &str)] = &[
 pub fn serve(db_path: PathBuf, port: u16) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     println!("mnem ui: http://127.0.0.1:{port}/  (Ctrl-C to stop)");
+    static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     for stream in listener.incoming() {
-        let Ok(stream) = stream else { continue };
+        let Ok(mut stream) = stream else { continue };
+        // A bounded number of handlers: a local flood cannot exhaust the watch process.
+        if ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CONNECTIONS {
+            ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = stream.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            continue;
+        }
         let db_path = db_path.clone();
         std::thread::spawn(move || {
             if let Err(e) = handle(stream, &db_path, port) {
                 eprintln!("mnem ui: {e:#}");
             }
+            ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
     Ok(())
@@ -82,9 +96,21 @@ impl Response {
 
 fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    let mut reader = BufReader::new(stream.try_clone()?);
+    // The whole request head is capped; nothing larger is ever buffered.
+    let mut reader = BufReader::new(std::io::Read::take(stream.try_clone()?, MAX_HEAD as u64));
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+    if !request_line.ends_with('\n') {
+        let resp = Response::text("414 URI Too Long", "text/plain", "request too large\n");
+        let head = format!(
+            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            resp.status,
+            resp.body.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(&resp.body)?;
+        return Ok(());
+    }
     let mut host = String::new();
     let mut header_bytes = 0;
     loop {
@@ -166,10 +192,13 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
         "/api/projects" => Response::json(&projects(&open(db_path)?)?),
         "/api/stats" => Response::json(&stats(&open(db_path)?)?),
         "/api/embed" => {
-            let text = q.get("q").map(String::as_str).unwrap_or_default();
+            let text = crate::text::head(
+                q.get("q").map(String::as_str).unwrap_or_default(),
+                MAX_EMBED_CHARS,
+            );
             match crate::embed::shared() {
                 Some(e) => {
-                    let query = e.query(text);
+                    let query = e.query(&text);
                     Response::json(&json!({ "model": query.model, "vector": query.vec }))
                 }
                 None => Response::text(

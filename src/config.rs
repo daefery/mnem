@@ -25,6 +25,8 @@ pub struct Config {
     pub exclude_projects: Vec<String>,
     #[serde(default)]
     pub semantic: SemanticConfig,
+    /// Port of the viewer and embedding service run by `mnem watch` (default 37777).
+    pub ui_port: Option<u16>,
 }
 
 /// Local semantic recall.

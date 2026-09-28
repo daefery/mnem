@@ -162,6 +162,15 @@ CREATE TABLE IF NOT EXISTS memory_vectors(
   PRIMARY KEY(memory_id, model)
 );
 
+-- A vector describes the text it was made from: drop it when the memory goes away or
+-- its text changes (the watcher re-embeds). Memory ids can be reused after a delete.
+CREATE TRIGGER IF NOT EXISTS memories_vec_ad AFTER DELETE ON memories BEGIN
+  DELETE FROM memory_vectors WHERE memory_id = old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS memories_vec_au AFTER UPDATE OF title, subtitle, narrative, facts ON memories BEGIN
+  DELETE FROM memory_vectors WHERE memory_id = old.id;
+END;
+
 -- Memories already offered to a session by prompt-time recall (never repeated).
 CREATE TABLE IF NOT EXISTS recall_seen(
   session_id TEXT NOT NULL,
@@ -200,7 +209,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 12;
+const SCHEMA_VERSION: i64 = 13;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

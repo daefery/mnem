@@ -228,3 +228,29 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
         misses,
     })
 }
+
+/// Cosine of each question's true target, and of the best wrong candidate, under the
+/// current embedding model. Used to pick recall's similarity floor from data.
+pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
+    let e = recall::semantic_embedder().context("no embedding model (run `mnem embed`)")?;
+    let f = std::fs::File::open(path)?;
+    let cases: Vec<Case> = std::io::BufReader::new(f)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect();
+    let (mut target, mut wrong) = (Vec::new(), Vec::new());
+    for c in &cases {
+        let q = e.query(&c.question);
+        let hits = crate::embed::search(conn, &q, &c.project, None, 500)?;
+        if let Some((_, cos)) = hits.iter().find(|h| h.0 == c.id) {
+            target.push(*cos);
+        }
+        if let Some((_, cos)) = hits.iter().find(|h| h.0 != c.id) {
+            wrong.push(*cos);
+        }
+    }
+    target.sort_by(f32::total_cmp);
+    wrong.sort_by(f32::total_cmp);
+    Ok((target, wrong))
+}

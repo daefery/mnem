@@ -33,7 +33,9 @@ pub fn fetch(name: &str) -> Result<PathBuf> {
         return Ok(db::data_dir().join("models").join("fastembed"));
     }
     let dir = model_dir(name);
-    if FILES.iter().all(|f| dir.join(f).exists()) {
+    if FILES.iter().all(|f| dir.join(f).exists())
+        && StaticModel::from_pretrained(&dir, None, Some(true), None).is_ok()
+    {
         return Ok(dir);
     }
     std::fs::create_dir_all(&dir)?;
@@ -51,6 +53,13 @@ pub fn fetch(name: &str) -> Result<PathBuf> {
         let tmp = dir.join(format!("{f}.partial"));
         std::fs::write(&tmp, &bytes)?;
         std::fs::rename(&tmp, dir.join(f))?;
+    }
+    // Existence is not integrity: a truncated file would otherwise count as done forever.
+    if let Err(e) = StaticModel::from_pretrained(&dir, None, Some(true), None) {
+        for f in FILES {
+            let _ = std::fs::remove_file(dir.join(f));
+        }
+        bail!("downloaded model {name} does not load ({e:#}); removed it, run `mnem embed` again");
     }
     Ok(dir)
 }
@@ -207,11 +216,23 @@ impl Embedder {
     }
 }
 
-/// The embedding model, loaded once per process on first use (the watch service shares
-/// it between its HTTP endpoint and background embedding).
-pub fn shared() -> Option<&'static Embedder> {
-    static E: std::sync::OnceLock<Option<Embedder>> = std::sync::OnceLock::new();
-    E.get_or_init(crate::recall::semantic_embedder).as_ref()
+/// The embedding model, loaded once per process and shared (the watch service uses it
+/// for its HTTP endpoint and background embedding). A failed load is retried at most
+/// once a minute, so downloading the model later needs no restart.
+pub fn shared() -> Option<std::sync::Arc<Embedder>> {
+    use std::sync::{Arc, Mutex};
+    static STATE: Mutex<(Option<Arc<Embedder>>, Option<std::time::Instant>)> =
+        Mutex::new((None, None));
+    let mut st = STATE.lock().ok()?;
+    if let Some(e) = &st.0 {
+        return Some(e.clone());
+    }
+    if st.1.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+        return None;
+    }
+    st.1 = Some(std::time::Instant::now());
+    st.0 = crate::recall::semantic_embedder().map(Arc::new);
+    st.0.clone()
 }
 
 /// Port of the local viewer/embedding service run by `mnem watch`.
@@ -219,6 +240,7 @@ pub fn service_port() -> u16 {
     std::env::var("MNEM_UI_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
+        .or(crate::config::CONFIG.ui_port)
         .unwrap_or(37777)
 }
 
@@ -242,32 +264,43 @@ pub fn query_from_service(text: &str) -> Option<Query> {
     })
 }
 
-/// Memory ids in `project` by cosine similarity to the query, best first.
+/// Memory ids in `project` by cosine similarity to the query, best first. Pinned and
+/// sensitive memories, and ones already offered to `exclude_session`, are filtered in
+/// SQL so they can never crowd eligible memories out of the top `limit`.
 pub fn search(
     conn: &Connection,
     q: &Query,
     project: &str,
+    exclude_session: Option<&str>,
     limit: usize,
 ) -> Result<Vec<(i64, f32)>> {
     let mut st = conn.prepare_cached(
         "SELECT v.memory_id, v.scale, v.vec FROM memory_vectors v JOIN memories m ON m.id = v.memory_id
-         WHERE v.model = ?1 AND m.project = ?2",
+         WHERE v.model = ?1 AND m.project = ?2 AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
+           AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)",
     )?;
     let mut scored: Vec<(i64, f32)> = st
-        .query_map(params![q.model, project], |r| {
-            let (id, scale, v): (i64, f32, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
-            Ok((
-                id,
-                if v.len() == q.vec.len() {
-                    dot_q(&q.vec, scale, &v)
-                } else {
-                    -1.0
-                },
-            ))
-        })?
+        .query_map(
+            params![q.model, project, exclude_session.unwrap_or("")],
+            |r| {
+                let (id, scale, v): (i64, f32, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
+                Ok((
+                    id,
+                    if v.len() == q.vec.len() {
+                        dot_q(&q.vec, scale, &v)
+                    } else {
+                        -1.0
+                    },
+                ))
+            },
+        )?
         .collect::<rusqlite::Result<_>>()?;
+    // Partial selection: only the top `limit` need ordering.
+    if scored.len() > limit {
+        scored.select_nth_unstable_by(limit, |a, b| b.1.total_cmp(&a.1));
+        scored.truncate(limit);
+    }
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
-    scored.truncate(limit);
     Ok(scored)
 }
 

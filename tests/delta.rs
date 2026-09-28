@@ -295,3 +295,101 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
     );
     assert!(ids.contains(&meaning_hit), "meaning fills the gap: {ids:?}");
 }
+
+fn add_vector_memory(c: &Connection, title: &str, ty: &str, v: [f32; 4]) -> i64 {
+    c.execute(
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', ?2, ?1, 'proj', 'mnem', ?1, ?3)",
+        params![title, ty, mnem::db::now_ms()],
+    )
+    .unwrap();
+    let id = c.last_insert_rowid();
+    let (scale, q) = mnem::embed::quantize(&v);
+    c.execute(
+        "INSERT INTO memory_vectors(memory_id, model, dim, scale, vec) VALUES (?1, 'test-model', 4, ?2, ?3)",
+        params![id, scale, q],
+    )
+    .unwrap();
+    id
+}
+
+#[test]
+fn vectors_follow_their_memory() {
+    let mut c = db("vector-life");
+    let a = add_vector_memory(&c, "first", "feature", [1.0, 0.0, 0.0, 0.0]);
+    // Editing the text drops the vector (the watcher re-embeds it).
+    c.execute(
+        "UPDATE memories SET title = 'first, edited' WHERE id = ?1",
+        [a],
+    )
+    .unwrap();
+    let n: i64 = c
+        .query_row(
+            "SELECT count(*) FROM memory_vectors WHERE memory_id = ?1",
+            [a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0, "edited memory kept a stale vector");
+    // Forgetting drops it too, so a reused id cannot inherit it.
+    let b = add_vector_memory(&c, "second", "feature", [0.0, 1.0, 0.0, 0.0]);
+    mnem::forget::forget(&mut c, &[b.to_string()], None, None).unwrap();
+    let n: i64 = c
+        .query_row("SELECT count(*) FROM memory_vectors", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0, "forgotten memory left its vector");
+}
+
+#[test]
+fn ineligible_memories_cannot_crowd_out_vector_hits() {
+    let c = db("vector-crowd");
+    // 60 memories already offered to this session and 10 sensitive ones, all closest.
+    for i in 0..60 {
+        let id = add_vector_memory(&c, &format!("seen {i}"), "feature", [1.0, 0.0, 0.0, 0.0]);
+        c.execute(
+            "INSERT INTO recall_seen(session_id, memory_id) VALUES ('claude:me', ?1)",
+            [id],
+        )
+        .unwrap();
+    }
+    for i in 0..10 {
+        add_vector_memory(
+            &c,
+            &format!("private {i}"),
+            "sensitive",
+            [1.0, 0.0, 0.0, 0.0],
+        );
+    }
+    let eligible = add_vector_memory(&c, "eligible", "feature", [0.9, 0.3, 0.0, 0.0]);
+    let q = mnem::embed::Query {
+        model: "test-model".into(),
+        vec: vec![1.0, 0.0, 0.0, 0.0],
+    };
+    let hits = mnem::embed::search(&c, &q, "proj", Some("claude:me"), 5).unwrap();
+    assert_eq!(hits.first().map(|h| h.0), Some(eligible), "{hits:?}");
+}
+
+#[test]
+fn viewer_rejects_oversized_requests() {
+    let dir = std::env::temp_dir().join(format!("mnem-ui-limit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("m.db");
+    drop(mnem::db::open(&path).unwrap());
+    let port = 38000 + (std::process::id() % 1000) as u16;
+    std::thread::spawn(move || mnem::ui::serve(path, port));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let big = "a".repeat(64 * 1024);
+    let _ = write!(
+        s,
+        "GET /api/embed?q={big} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    );
+    let mut out = String::new();
+    let _ = s.read_to_string(&mut out);
+    assert!(
+        out.starts_with("HTTP/1.1 414"),
+        "{}",
+        &out[..out.len().min(80)]
+    );
+}

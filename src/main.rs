@@ -110,9 +110,10 @@ enum Cmd {
         /// Seconds between distillation passes over idle sessions (0 = never)
         #[arg(long, default_value_t = 300)]
         distill_every: u64,
-        /// Also serve the web viewer on this port (0 = off)
-        #[arg(long, default_value_t = 37777)]
-        ui_port: u16,
+        /// Also serve the web viewer and embedding service on this port (0 = off;
+        /// default: config ui_port, else 37777)
+        #[arg(long)]
+        ui_port: Option<u16>,
     },
     /// Web viewer for memory (local only): http://127.0.0.1:37777
     Ui {
@@ -171,9 +172,12 @@ enum Cmd {
         /// Build a new test set of N questions with the distillation models first
         #[arg(long)]
         build: Option<usize>,
-        /// keyword, vector or hybrid (default)
+        /// keyword, vector, fill or hybrid (default)
         #[arg(long, default_value = "hybrid")]
         mode: String,
+        /// Print the cosine distribution of true targets vs best wrong candidates
+        #[arg(long)]
+        cosines: bool,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -365,7 +369,31 @@ fn main() -> Result<()> {
             };
             eprintln!("export: {n} records");
         }
-        Cmd::Eval { build, mode } => {
+        Cmd::Eval {
+            build,
+            mode,
+            cosines,
+        } => {
+            if cosines {
+                let (t, w) = mnem::eval::cosines(&conn, &mnem::eval::eval_path())?;
+                let pct = |v: &[f32], p: f64| {
+                    v.get(((v.len() as f64 - 1.0) * p).round() as usize)
+                        .copied()
+                        .unwrap_or(0.0)
+                };
+                for (name, v) in [("true target", &t), ("best wrong", &w)] {
+                    println!(
+                        "{name:>11}: n={} p10 {:.2} p25 {:.2} p50 {:.2} p75 {:.2} p90 {:.2}",
+                        v.len(),
+                        pct(v, 0.1),
+                        pct(v, 0.25),
+                        pct(v, 0.5),
+                        pct(v, 0.75),
+                        pct(v, 0.9)
+                    );
+                }
+                return Ok(());
+            }
             let mode = match mode.as_str() {
                 "keyword" => mnem::recall::Mode::Keyword,
                 "vector" => mnem::recall::Mode::Vector,
@@ -495,6 +523,7 @@ fn main() -> Result<()> {
             distill_every,
             ui_port,
         } => {
+            let ui_port = ui_port.unwrap_or_else(mnem::embed::service_port);
             if ui_port != 0 {
                 let ui_path = path.clone();
                 std::thread::spawn(move || {
@@ -523,7 +552,7 @@ fn main() -> Result<()> {
                 }
                 // New memories (distilled, imported, pinned) get vectors on the next pass.
                 if let Some(e) = mnem::embed::shared() {
-                    match mnem::embed::backfill(&mut conn, e, Some(500)) {
+                    match mnem::embed::backfill(&mut conn, &e, Some(500)) {
                         Ok(n) if n > 0 => hook::log(&format!("watch embed: {n} memories")),
                         Ok(_) => {}
                         Err(e) => hook::log(&format!("watch embed: {e:#}")),
