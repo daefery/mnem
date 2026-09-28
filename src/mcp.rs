@@ -142,7 +142,7 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         "timeline" => &["anchor", "query", "depth_before", "depth_after", "project"],
         "get_observations" => &["ids", "limit", "orderBy", "project"],
         "session_start_context" => &["project", "cwd"],
-        "recall_file" => &["path", "cwd", "limit"],
+        "recall_file" => &["path", "cwd", "limit", "session"],
         "remember" => &["fact", "scope", "project"],
         _ => return Err(format!("unknown tool: {name}")),
     };
@@ -236,7 +236,8 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["path"], "properties": {
                 "path": { "type": "string", "description": "The file, absolute or relative to cwd" },
                 "cwd": { "type": "string", "description": "Directory relative paths start from (default: this server's working directory)" },
-                "limit": { "type": "number", "description": "Max memories (default 5)" }
+                "limit": { "type": "number", "description": "Max memories (default 5)" },
+                "session": { "type": "string", "description": "Caller's mnem session id, if known: the file then counts as seen, so its memories are not shown again when it is opened" }
             }}
         },
         {
@@ -881,7 +882,12 @@ fn recall_file(conn: &Connection, a: &Value) -> Result<String> {
         .unwrap_or_default();
     let limit = num_arg(a, "limit", 5).clamp(1, 50) as usize;
     match crate::files::resolve(path, &cwd) {
-        Some(t) => crate::files::report(conn, &t, limit),
+        Some(t) => {
+            if let Some(s) = str_arg(a, "session") {
+                crate::files::claim(conn, s, &t)?;
+            }
+            crate::files::report(conn, &t, limit)
+        }
         None => Ok(format!(
             "{path} is not inside a git repository here, so its project and history are unknown."
         )),

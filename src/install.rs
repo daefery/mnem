@@ -301,11 +301,15 @@ const PI_EXTENSION: &str = r#"/**
  */
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { homedir } from "node:os";
+import { resolve } from "node:path";
 
 const MNEM = process.env.MNEM_BIN ?? __MNEM_BIN__;
 
 export default function (pi: ExtensionAPI) {
 	let session = "";
+	// Files already looked up in this session: no process for a second read of one.
+	let touched = new Set<string>();
 	let startContext = "";
 	let delivered = false;
 
@@ -328,6 +332,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		session = `pi:${ctx.sessionManager.getSessionId()}`;
+		touched.clear();
 		const file = ctx.sessionManager.getSessionFile();
 		if (file) await run(["ingest", file]);
 		startContext = await run(["context", "--cwd", ctx.cwd, "--session", session]);
@@ -356,6 +361,31 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// First read or change of a file in this session: past memories about it ride along
+	// with the tool's result, as Claude Code's file hook does.
+	pi.on("tool_result", async (event, ctx) => {
+		if (!session || event.isError) return;
+		if (event.toolName !== "read" && event.toolName !== "edit" && event.toolName !== "write") return;
+		let path = (event.input as any)?.path;
+		if (typeof path !== "string" || !path) return;
+		if (path === "~" || path.startsWith("~/")) path = homedir() + path.slice(1);
+		const abs = resolve(ctx.cwd, path);
+		if (touched.has(abs)) return;
+		touched.add(abs);
+		let text = "";
+		try {
+			const r = await pi.exec(MNEM, ["file", abs, "--touch", "--session", session, "--cwd", ctx.cwd], {
+				cwd: ctx.cwd,
+				timeout: 2500,
+				signal: ctx.signal,
+			});
+			text = r.code === 0 && !r.killed ? r.stdout.trim() : "";
+		} catch {
+			return;
+		}
+		if (text) return { content: [...event.content, { type: "text", text: `\n\n${text}` }] };
+	});
+
 	// End of a turn: record the git working tree so the next session knows what is in progress.
 	pi.on("agent_end", async (_event, ctx) => {
 		// Not awaited: git on a big repo must never delay the next turn.
@@ -371,7 +401,10 @@ export default function (pi: ExtensionAPI) {
 			parameters,
 			async execute(_id, params, signal, _onUpdate, ctx) {
 				const args: any = { ...(params ?? {}) };
-				if (name === "recall_file" && !args.cwd) args.cwd = ctx.cwd;
+				if (name === "recall_file") {
+					if (!args.cwd) args.cwd = ctx.cwd;
+					if (session) args.session = session;
+				}
 				const text = await call(["tool", name, JSON.stringify(args)], signal, ctx.cwd);
 				return { content: [{ type: "text", text: text || "No results." }], details: {} };
 			},

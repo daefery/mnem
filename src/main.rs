@@ -78,6 +78,16 @@ enum Cmd {
         path: String,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Directory a relative path starts from (default: the current one)
+        #[arg(long)]
+        cwd: Option<String>,
+        /// As an agent's file hook: the memories only on this session's first touch of
+        /// the file, compact, and nothing when there are none (pi uses this)
+        #[arg(long, requires = "session")]
+        touch: bool,
+        /// The session touching the file (e.g. pi:<id>)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Prompt recall exactly as the prompt hook runs it, for timing (used by the gate)
     #[command(hide = true)]
@@ -305,6 +315,7 @@ fn main() -> Result<()> {
             | Cmd::Context { .. }
             | Cmd::Snapshot { .. }
             | Cmd::RecallProbe { .. }
+            | Cmd::File { touch: true, .. }
     );
     let busy = std::time::Duration::from_millis(if in_turn { 500 } else { 5000 });
     let mut conn = match db::open_with(&path, busy) {
@@ -941,9 +952,33 @@ fn main() -> Result<()> {
                 mnem::uptake::render(&mnem::uptake::report(&conn, days)?, days)
             );
         }
-        Cmd::File { path, limit } => {
-            let cwd = std::env::current_dir()?;
-            match mnem::files::resolve(&path, &cwd) {
+        Cmd::File {
+            path,
+            limit,
+            cwd,
+            touch,
+            session,
+        } => {
+            let cwd = match cwd {
+                Some(c) => std::path::PathBuf::from(c),
+                None => std::env::current_dir()?,
+            };
+            let target = mnem::files::resolve(&path, &cwd);
+            if let (true, Some(session)) = (touch, session) {
+                // Same as Claude Code's file hook: quiet unless there is something to show.
+                let t0 = Instant::now();
+                if let Some(t) = &target {
+                    match mnem::files::on_touch(&conn, &session, t, mnem::eval::FILE_TOP) {
+                        Ok(Some(text)) => println!("{text}"),
+                        Ok(None) => {}
+                        Err(e) => hook::log(&format!("file touch {path}: {e:#}")),
+                    }
+                }
+                let agent = session.split(':').next().unwrap_or("other");
+                let _ = mnem::uptake::hook_run(&conn, agent, "file", t0.elapsed().as_millis());
+                return Ok(());
+            }
+            match target {
                 Some(t) => println!("{}", mnem::files::report(&conn, &t, limit)?),
                 None => anyhow::bail!("{path} is not inside a git repository"),
             }

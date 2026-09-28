@@ -487,15 +487,9 @@ pub fn on_touch(
     t: &Target,
     limit: usize,
 ) -> Result<Option<String>> {
-    let key = format!("{}:{}", t.project, t.rel);
-    let seen = conn
-        .query_row(
-            "SELECT 1 FROM file_seen WHERE session_id = ?1 AND path = ?2",
-            params![session, key],
-            |_| Ok(()),
-        )
-        .is_ok();
-    if seen {
+    // Claim the file first: a parallel touch of it, or a retry after a run that timed
+    // out, then shows nothing instead of the same memories again.
+    if !claim(conn, session, t)? {
         return Ok(None);
     }
     let found = about_in(
@@ -504,22 +498,31 @@ pub fn on_touch(
         &crate::recall::Scope::session(session),
         limit,
     )?;
-    let text = (!found.is_empty()).then(|| touch_text(t, &found));
+    // Only memories this session has not been shown yet (by prompt recall or another
+    // file), claimed one by one so parallel touches never show one twice.
     let tx = conn.unchecked_transaction()?;
-    tx.execute(
-        "INSERT OR IGNORE INTO file_seen(session_id, path) VALUES (?1, ?2)",
-        params![session, key],
-    )?;
-    for a in &found {
-        tx.execute(
+    let mut fresh = Vec::new();
+    for a in found {
+        if tx.execute(
             "INSERT OR IGNORE INTO recall_seen(session_id, memory_id) VALUES (?1, ?2)",
             params![session, a.id],
-        )?;
+        )? == 1
+        {
+            fresh.push(a);
+        }
     }
-    let ids: Vec<i64> = found.iter().map(|a| a.id).collect();
+    let ids: Vec<i64> = fresh.iter().map(|a| a.id).collect();
     crate::uptake::offered(&tx, session, &ids, "file")?;
     tx.commit()?;
-    Ok(text)
+    Ok((!fresh.is_empty()).then(|| touch_text(t, &fresh)))
+}
+
+/// Mark `t` as touched by `session`; false when it already was.
+pub fn claim(conn: &Connection, session: &str, t: &Target) -> Result<bool> {
+    Ok(conn.execute(
+        "INSERT OR IGNORE INTO file_seen(session_id, path) VALUES (?1, ?2)",
+        params![session, format!("{}:{}", t.project, t.rel)],
+    )? == 1)
 }
 
 /// Compact: one line per memory with the size of the change since it, and one line
@@ -535,7 +538,11 @@ fn touch_text(t: &Target, found: &[About]) -> String {
     for a in found {
         let note = if changed(&h, a.as_of) {
             stale += 1;
-            match (h.exists, lines_since(&t.root, &t.rel, a.as_of)) {
+            // Counting lines is one more git call: only when git answered and the file is there.
+            let lines = (h.exists && h.known)
+                .then(|| lines_since(&t.root, &t.rel, a.as_of))
+                .flatten();
+            match (h.exists, lines) {
                 (false, _) => " (file gone since)".to_string(),
                 _ if !h.known => " (file history unknown)".to_string(),
                 (true, Some(Lines::Counted(0, 0))) => " (no net change since)".to_string(),

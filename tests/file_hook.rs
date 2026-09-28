@@ -112,5 +112,73 @@ fn first_touch_of_a_file_brings_its_memories_once() {
         "tool_input": { "file_path": "/etc/hostname" }
     });
     assert_eq!(hook(&home, &db, &loose).trim(), "");
+
+    // pi's extension asks through `mnem file --touch`: same memories, plain text, once.
+    let touch_as = |session: &str, file: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_mnem"))
+            .env("MNEM_HOME", &home)
+            .env("MNEM_UI_PORT", "0")
+            .arg("--db")
+            .arg(&db)
+            .args(["file", file, "--touch", "--session", session, "--cwd"])
+            .arg(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let touch_pi = |file: &str| touch_as("pi:p1", file);
+    let first = touch_pi("src/a.rs");
+    assert!(first.contains("#1 ") && first.contains("#2 "), "{first}");
+    assert!(
+        !first.trim_start().starts_with('{'),
+        "plain text for pi: {first}"
+    );
+    assert_eq!(touch_pi("src/a.rs").trim(), "");
+    assert_eq!(touch_pi("src/quiet.rs").trim(), "");
+    let c = mnem::db::open(&db).unwrap();
+    let (offers, runs): (i64, i64) = c
+        .query_row(
+            "SELECT (SELECT count(*) FROM offers WHERE session_id = 'pi:p1' AND source = 'file'),
+                    (SELECT count(*) FROM hook_runs WHERE agent = 'pi' AND event = 'file')",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((offers, runs), (2, 3));
+
+    // Asked for explicitly with the session first: opening the file adds nothing more.
+    let asked = Command::new(env!("CARGO_BIN_EXE_mnem"))
+        .env("MNEM_HOME", &home)
+        .arg("--db")
+        .arg(&db)
+        .args(["tool", "recall_file"])
+        .arg(
+            serde_json::json!({ "path": "src/a.rs", "cwd": repo.to_string_lossy(), "session": "pi:p2" })
+                .to_string(),
+        )
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&asked.stdout).contains("#1 "));
+    assert_eq!(touch_as("pi:p2", "src/a.rs").trim(), "");
+    // A memory this session was already shown (by prompt recall) is not shown again.
+    c.execute(
+        "INSERT INTO recall_seen(session_id, memory_id) VALUES ('pi:p3', 1)",
+        [],
+    )
+    .unwrap();
+    let third = touch_as("pi:p3", "src/a.rs");
+    assert!(third.contains("#2 ") && !third.contains("#1 "), "{third}");
+    // Parallel touches of one file (pi runs tool calls concurrently): shown once.
+    let shown = std::thread::scope(|sc| {
+        let runs: Vec<_> = (0..6)
+            .map(|_| sc.spawn(|| touch_as("pi:p4", "src/a.rs")))
+            .collect();
+        runs.into_iter()
+            .map(|r| r.join().unwrap())
+            .filter(|out| !out.trim().is_empty())
+            .count()
+    });
+    assert_eq!(shown, 1);
     let _ = std::fs::remove_dir_all(&base);
 }
