@@ -1,8 +1,11 @@
 //! `mnem ui`: a local web viewer for the memory database.
 //!
-//! A deliberately small HTTP/1.1 server (GET only, one thread per connection, no
-//! framework). It binds to 127.0.0.1 and rejects requests whose Host header is not
-//! local, so other sites in the browser cannot read memory via DNS rebinding.
+//! A deliberately small HTTP/1.1 server (one thread per connection, no framework). It
+//! binds to 127.0.0.1 and rejects requests whose Host header is not local, so other
+//! sites in the browser cannot read memory via DNS rebinding. The few actions that
+//! change anything (take a backup, import one) are POSTs that must carry an `X-Mnem`
+//! header and come from the viewer's own origin: a page on another site cannot send
+//! that header without a CORS preflight, which this server never grants.
 
 use crate::context;
 use crate::db;
@@ -71,11 +74,16 @@ pub fn serve(db_path: PathBuf, port: u16, bound: impl FnOnce()) -> Result<()> {
     Ok(())
 }
 
+/// Largest backup the viewer accepts for import.
+const MAX_UPLOAD: u64 = 32 << 30;
+
 struct Response {
     status: &'static str,
     content_type: &'static str,
     body: Vec<u8>,
     cache: bool,
+    /// Stream this file as the body (a download) instead of `body`.
+    file: Option<PathBuf>,
 }
 
 impl Response {
@@ -89,7 +97,15 @@ impl Response {
             content_type,
             body: body.into(),
             cache: false,
+            file: None,
         }
+    }
+    fn error(status: &'static str, message: impl std::fmt::Display) -> Response {
+        Response::text(
+            status,
+            "application/json; charset=utf-8",
+            json!({ "error": message.to_string() }).to_string(),
+        )
     }
     fn json(v: &Value) -> Response {
         Response::text("200 OK", "application/json; charset=utf-8", v.to_string())
@@ -103,17 +119,12 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
     if !request_line.ends_with('\n') {
-        let resp = Response::text("414 URI Too Long", "text/plain", "request too large\n");
-        let head = format!(
-            "HTTP/1.1 {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            resp.status,
-            resp.body.len()
+        return send(
+            &mut stream,
+            Response::text("414 URI Too Long", "text/plain", "request too large\n"),
         );
-        stream.write_all(head.as_bytes())?;
-        stream.write_all(&resp.body)?;
-        return Ok(());
     }
-    let mut host = String::new();
+    let mut headers: HashMap<String, String> = HashMap::new();
     let mut header_bytes = 0;
     loop {
         let mut line = String::new();
@@ -122,14 +133,14 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
         if n == 0 || line == "\r\n" || line == "\n" || header_bytes > 16 * 1024 {
             break;
         }
-        if let Some((k, v)) = line.split_once(':')
-            && k.eq_ignore_ascii_case("host")
-        {
-            host = v.trim().to_string();
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
         }
     }
+    let host = headers.get("host").cloned().unwrap_or_default();
     let mut parts = request_line.split_whitespace();
     let (method, target) = (parts.next().unwrap_or(""), parts.next().unwrap_or("/"));
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let local = [
         format!("127.0.0.1:{port}"),
         format!("localhost:{port}"),
@@ -141,10 +152,7 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
             "text/plain",
             "mnem ui only answers local requests\n",
         )
-    } else if method != "GET" {
-        Response::text("405 Method Not Allowed", "text/plain", "GET only\n")
-    } else {
-        let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    } else if method == "GET" {
         route(path, &parse_query(query), db_path).unwrap_or_else(|e| {
             Response::text(
                 "500 Internal Server Error",
@@ -152,12 +160,44 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
                 format!("{e:#}\n"),
             )
         })
+    } else if method == "POST" {
+        if let Err(why) = same_origin(&headers, &host) {
+            Response::error("403 Forbidden", why)
+        } else {
+            // Body bytes already read past the head, then the rest from the socket.
+            let early = reader.buffer().to_vec();
+            drop(reader);
+            let body = Body {
+                early,
+                stream: &mut stream,
+                length: headers.get("content-length").and_then(|v| v.parse().ok()),
+            };
+            post(path, &parse_query(query), body, db_path)
+                .unwrap_or_else(|e| Response::error("500 Internal Server Error", format!("{e:#}")))
+        }
+    } else {
+        Response::text("405 Method Not Allowed", "text/plain", "GET or POST only\n")
+    };
+    send(&mut stream, resp)
+}
+
+/// Write a response; a file body is streamed, never loaded whole.
+fn send(stream: &mut TcpStream, resp: Response) -> Result<()> {
+    let (length, disposition) = match &resp.file {
+        Some(f) => (
+            f.metadata()?.len(),
+            format!(
+                "Content-Disposition: attachment; filename=\"{}\"\r\n",
+                f.file_name().unwrap_or_default().to_string_lossy()
+            ),
+        ),
+        None => (resp.body.len() as u64, String::new()),
     };
     let head = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{disposition}Cache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         resp.status,
         resp.content_type,
-        resp.body.len(),
+        length,
         if resp.cache {
             "max-age=86400"
         } else {
@@ -165,8 +205,64 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
         }
     );
     stream.write_all(head.as_bytes())?;
-    stream.write_all(&resp.body)?;
+    match &resp.file {
+        Some(f) => {
+            std::io::copy(&mut std::fs::File::open(f)?, stream)?;
+        }
+        None => stream.write_all(&resp.body)?,
+    }
     Ok(())
+}
+
+/// Actions that change something must come from the viewer itself: a custom header
+/// (another site's page cannot add one without a preflight this server never answers)
+/// and, when the browser says where the request comes from, this very origin.
+fn same_origin(
+    headers: &HashMap<String, String>,
+    host: &str,
+) -> std::result::Result<(), &'static str> {
+    if headers.get("x-mnem").map(String::as_str) != Some("1") {
+        return Err("missing X-Mnem header");
+    }
+    if let Some(origin) = headers.get("origin")
+        && origin != &format!("http://{host}")
+    {
+        return Err("request from another origin");
+    }
+    if let Some(site) = headers.get("sec-fetch-site")
+        && site != "same-origin"
+        && site != "none"
+    {
+        return Err("request from another site");
+    }
+    Ok(())
+}
+
+/// A request body: bytes that arrived with the head, then the rest of the socket.
+struct Body<'a> {
+    early: Vec<u8>,
+    stream: &'a mut TcpStream,
+    length: Option<u64>,
+}
+
+impl Body<'_> {
+    /// Write exactly Content-Length bytes to `out`.
+    fn save(self, out: &mut impl Write, limit: u64) -> Result<u64> {
+        let length = self
+            .length
+            .ok_or_else(|| anyhow::anyhow!("Content-Length required"))?;
+        anyhow::ensure!(length <= limit, "upload larger than {limit} bytes");
+        let first = self.early.len().min(length as usize);
+        out.write_all(&self.early[..first])?;
+        let rest = length - first as u64;
+        let copied = std::io::copy(&mut std::io::Read::take(self.stream, rest), out)?;
+        anyhow::ensure!(
+            copied == rest,
+            "upload ended early ({} of {length} bytes)",
+            first as u64 + copied
+        );
+        Ok(length)
+    }
 }
 
 fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Response> {
@@ -180,6 +276,7 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
             content_type: "font/woff2",
             body: FONT.to_vec(),
             cache: true,
+            file: None,
         },
         p if p.starts_with("/icons/") => match ICONS.iter().find(|(n, _)| p.ends_with(n)) {
             Some((_, svg)) => Response {
@@ -187,9 +284,12 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
                 content_type: "image/svg+xml",
                 body: svg.as_bytes().to_vec(),
                 cache: true,
+                file: None,
             },
             None => not_found(),
         },
+        "/api/backups" => Response::json(&backups(&open(db_path)?, db_path)?),
+        p if p.starts_with("/api/backups/") => download(p),
         "/api/feed" => Response::json(&feed(&open(db_path)?, q)?),
         "/api/projects" => Response::json(&projects(&open(db_path)?)?),
         "/api/stats" => Response::json(&stats(&open(db_path)?)?),
@@ -235,6 +335,166 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
         }
         _ => not_found(),
     })
+}
+
+/// Uploaded backups wait here (outside the rotated snapshots) until applied or discarded.
+fn incoming() -> PathBuf {
+    crate::backup::dir().join("incoming")
+}
+
+/// A file name the viewer may serve or act on: produced by mnem, no path parts.
+fn safe_name<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    (name.starts_with(prefix)
+        && name.ends_with(".db")
+        && name.len() < 80
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && !name.contains(".."))
+    .then_some(name)
+}
+
+fn counts(conn: &Connection, db_path: &Path) -> Result<Value> {
+    let (sessions, events, memories): (i64, i64, i64) = conn.query_row(
+        "SELECT (SELECT count(*) FROM sessions), (SELECT count(*) FROM events), (SELECT count(*) FROM memories)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )?;
+    Ok(json!({
+        "sessions": sessions, "events": events, "memories": memories,
+        "bytes": db_path.metadata().map(|m| m.len()).unwrap_or(0),
+        "host": crate::backup::hostname(),
+    }))
+}
+
+/// This machine's memory and its snapshots, newest first.
+fn backups(conn: &Connection, db_path: &Path) -> Result<Value> {
+    let list: Vec<Value> = crate::backup::list(&crate::backup::dir())?
+        .into_iter()
+        .filter_map(|(path, m)| {
+            let m = m?;
+            let origin = crate::backup::origin(&path).unwrap_or_default();
+            Some(json!({
+                "file": m.file, "created_at": m.created_at, "bytes": m.bytes,
+                "sessions": m.sessions, "events": m.events, "memories": m.memories,
+                "host": origin.host, "has_settings": origin.config.is_some(),
+            }))
+        })
+        .collect();
+    Ok(json!({ "current": counts(conn, db_path)?, "backups": list }))
+}
+
+/// Stream a verified snapshot as a download.
+fn download(path: &str) -> Response {
+    let name = path.trim_start_matches("/api/backups/");
+    match safe_name(name, "mnem-") {
+        Some(n) if crate::backup::dir().join(n).is_file() => Response {
+            status: "200 OK",
+            content_type: "application/vnd.sqlite3",
+            body: vec![],
+            cache: false,
+            file: Some(crate::backup::dir().join(n)),
+        },
+        _ => not_found(),
+    }
+}
+
+/// The viewer's actions: take a backup, upload one, restore it, or restart mnem.
+fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> Result<Response> {
+    Ok(match path {
+        "/api/backups" => {
+            let m =
+                crate::backup::create(&open(db_path)?, &crate::backup::dir(), crate::backup::KEEP)?;
+            Response::json(&json!({ "backup": m }))
+        }
+        "/api/import" => {
+            let dir = incoming();
+            std::fs::create_dir_all(&dir)?;
+            // One pending import at a time: older uploads are dropped.
+            for e in std::fs::read_dir(&dir)?.flatten() {
+                let _ = std::fs::remove_file(e.path());
+            }
+            let name = format!("upload-{}.db", db::now_ms());
+            let partial = dir.join(format!("{name}.partial"));
+            let saved = (|| -> Result<()> {
+                let mut f = std::io::BufWriter::new(std::fs::File::create(&partial)?);
+                body.save(&mut f, MAX_UPLOAD)?;
+                f.flush()?;
+                std::fs::rename(&partial, dir.join(&name))?;
+                Ok(())
+            })();
+            if let Err(e) = saved {
+                let _ = std::fs::remove_file(&partial);
+                return Ok(Response::error("400 Bad Request", format!("{e:#}")));
+            }
+            match crate::backup::check_import(&dir.join(&name)) {
+                Ok((m, origin)) => Response::json(&json!({
+                    "file": name,
+                    "backup": { "sessions": m.sessions, "events": m.events, "memories": m.memories,
+                                "bytes": m.bytes, "schema": m.schema_version },
+                    "origin": { "host": origin.host, "taken_at": origin.taken_at,
+                                "version": origin.version, "has_settings": origin.config.is_some() },
+                    "current": counts(&open(db_path)?, db_path)?,
+                })),
+                Err(e) => {
+                    let _ = std::fs::remove_file(dir.join(&name));
+                    Response::error("422 Unprocessable Content", format!("{e:#}"))
+                }
+            }
+        }
+        "/api/import/apply" => {
+            let Some(name) = q.get("file").and_then(|f| safe_name(f, "upload-")) else {
+                return Ok(Response::error("400 Bad Request", "no such upload"));
+            };
+            let file = incoming().join(name);
+            if !file.is_file() {
+                return Ok(Response::error(
+                    "404 Not Found",
+                    "the upload is gone; upload it again",
+                ));
+            }
+            let mut conn = db::open(db_path)?;
+            let m = crate::backup::restore(&file, &mut conn, &crate::backup::dir())?;
+            let settings = if q.get("settings").map(String::as_str) == Some("1") {
+                crate::backup::apply_settings(&file)?
+            } else {
+                false
+            };
+            let _ = std::fs::remove_file(&file);
+            Response::json(&json!({
+                "restored": { "sessions": m.sessions, "events": m.events, "memories": m.memories },
+                "settings_applied": settings,
+                "can_restart": under_service(),
+                "current": counts(&conn, db_path)?,
+            }))
+        }
+        "/api/import/discard" => {
+            if let Some(name) = q.get("file").and_then(|f| safe_name(f, "upload-")) {
+                let _ = std::fs::remove_file(incoming().join(name));
+            }
+            Response::json(&json!({ "discarded": true }))
+        }
+        "/api/restart" => {
+            if !under_service() {
+                return Ok(Response::error(
+                    "409 Conflict",
+                    "not running under systemd: restart mnem yourself",
+                ));
+            }
+            // systemd (Restart=always) starts mnem again; answer first, then exit.
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                std::process::exit(0);
+            });
+            Response::json(&json!({ "restarting": true }))
+        }
+        _ => not_found(),
+    })
+}
+
+/// True when systemd supervises this process (it sets INVOCATION_ID).
+fn under_service() -> bool {
+    std::env::var_os("INVOCATION_ID").is_some()
 }
 
 fn not_found() -> Response {

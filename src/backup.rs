@@ -4,6 +4,10 @@
 //! watcher write), then reopened and checked: `integrity_check`, schema version, row
 //! counts and a SHA-256, recorded in a `.json` manifest beside it. A backup that was
 //! never verified is not counted as a backup.
+//!
+//! A snapshot also records where it came from and the settings in use (config.json,
+//! which names key files but never holds keys), so one file moves mnem to a new
+//! machine: copy it over, import it in the viewer or with `mnem restore --apply`.
 
 use crate::db;
 use anyhow::{Context, Result, bail, ensure};
@@ -91,6 +95,10 @@ pub fn create(conn: &Connection, dir: &Path, keep: usize) -> Result<Manifest> {
     let tmp = dir.join(format!(".mnem-{stamp}-{}.db.partial", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     conn.execute("VACUUM INTO ?1", params![tmp.to_string_lossy()])?;
+    if let Err(e) = stamp_origin(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.context("could not record the snapshot's origin"));
+    }
     // Only a verified snapshot gets its final name.
     let m = match inspect(&tmp) {
         Ok(m) => m,
@@ -107,6 +115,103 @@ pub fn create(conn: &Connection, dir: &Path, keep: usize) -> Result<Manifest> {
     std::fs::write(manifest_path(&path), serde_json::to_string_pretty(&m)?)?;
     rotate(dir, keep)?;
     Ok(m)
+}
+
+/// Record in a fresh snapshot where and when it was taken and the settings in use.
+fn stamp_origin(snapshot: &Path) -> Result<()> {
+    let c = Connection::open(snapshot)?;
+    let config = std::fs::read_to_string(db::data_dir().join("config.json")).ok();
+    let mut put = c.prepare(
+        "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+    )?;
+    put.execute(params!["export.host", hostname()])?;
+    put.execute(params!["export.at", db::now_ms().to_string()])?;
+    put.execute(params!["export.version", env!("CARGO_PKG_VERSION")])?;
+    match config {
+        Some(cfg) => put.execute(params!["export.config", cfg])?,
+        None => c.execute("DELETE FROM meta WHERE k = 'export.config'", [])?,
+    };
+    Ok(())
+}
+
+/// This machine's name, for telling backups from different machines apart.
+pub fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .or_else(|| std::env::var("COMPUTERNAME").ok())
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// Where a snapshot came from, as recorded when it was taken (older snapshots have none).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Origin {
+    pub host: Option<String>,
+    pub taken_at: Option<i64>,
+    pub version: Option<String>,
+    /// The settings file in use on that machine, if any.
+    pub config: Option<String>,
+}
+
+pub fn origin(snapshot: &Path) -> Result<Origin> {
+    let c = Connection::open_with_flags(snapshot, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let get = |k: &str| -> Option<String> {
+        c.query_row("SELECT v FROM meta WHERE k = ?1", [k], |r| r.get(0))
+            .ok()
+    };
+    Ok(Origin {
+        host: get("export.host"),
+        taken_at: get("export.at").and_then(|v| v.parse().ok()),
+        version: get("export.version"),
+        config: get("export.config"),
+    })
+}
+
+/// Check a database file from elsewhere before it can be restored: it must be a sound
+/// mnem database this build can read. Returns its manifest and origin.
+pub fn check_import(path: &Path) -> Result<(Manifest, Origin)> {
+    let mut head = [0u8; 16];
+    std::io::Read::read_exact(&mut std::fs::File::open(path)?, &mut head)
+        .context("file is too short to be a database")?;
+    ensure!(&head == b"SQLite format 3\0", "not a SQLite database");
+    let schema: i64 = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?
+        .query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    ensure!(
+        schema <= db::SCHEMA_VERSION,
+        "this backup comes from a newer mnem (schema {schema}, this build reads up to {}); update mnem first",
+        db::SCHEMA_VERSION
+    );
+    let m = verify(path)?;
+    ensure!(
+        m.sessions + m.events + m.memories > 0,
+        "the backup holds no sessions, events or memories"
+    );
+    Ok((m, origin(path)?))
+}
+
+/// Replace config.json with the settings a snapshot carried, keeping the current file
+/// as config.json.bak-<time>. Returns false when the snapshot carried none. The
+/// settings must parse as a mnem config; they take effect when mnem restarts.
+pub fn apply_settings(snapshot: &Path) -> Result<bool> {
+    let Some(cfg) = origin(snapshot)?.config else {
+        return Ok(false);
+    };
+    serde_json::from_str::<crate::config::Config>(&cfg)
+        .context("the backup's settings are not a valid mnem config")?;
+    let path = db::data_dir().join("config.json");
+    if path.exists() {
+        std::fs::copy(
+            &path,
+            db::data_dir().join(format!("config.json.bak-{}", chrono_stamp(db::now_ms()))),
+        )?;
+    }
+    let tmp = db::data_dir().join("config.json.partial");
+    std::fs::write(&tmp, cfg)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(true)
 }
 
 /// Snapshots in `dir`, newest first, with their manifests when present.

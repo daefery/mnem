@@ -91,6 +91,27 @@ something since, a short "meanwhile" update.
   `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
   first. `mnem models` shows the live order and cooldowns.
 
+## Moving to another machine
+
+In the viewer (http://127.0.0.1:37777), open **Backup & move**:
+
+1. On the old machine, **Create backup now**, then **Download**. The file holds every
+   session, event and memory plus your settings (config.json names key files; it never
+   holds keys). It holds your full history, so keep it private.
+2. On the new machine, install mnem (`mnem install`), open the viewer, **Choose backup
+   file**. It is uploaded and checked on a scratch copy (integrity, schema, search);
+   you see it next to what this machine holds. Nothing changes until you confirm.
+3. **Replace** restores it through SQLite's online-backup API after saving the current
+   memory as a backup. Tick the settings box to take the old machine's settings too,
+   then **Restart mnem** (systemd brings it back in about 10 s). Transcripts on the new
+   machine are read again afterwards, so its own sessions return.
+
+From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
+`mnem restore <file> --apply [--settings]`. Nightly backups carry settings too.
+
+The viewer's changing actions are POSTs that need an `X-Mnem` header from the viewer's
+own origin, so another website open in the browser cannot trigger them.
+
 ## Guarantees and limits
 
 - Capture is at-least-once with idempotent writes; replays never duplicate.

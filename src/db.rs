@@ -211,7 +211,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 14;
+pub const SCHEMA_VERSION: i64 = 14;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

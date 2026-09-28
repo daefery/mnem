@@ -134,6 +134,10 @@ enum Cmd {
         snapshot: PathBuf,
         #[arg(long)]
         apply: bool,
+        /// Also use the settings (config.json) the backup carries; the current file is
+        /// kept as config.json.bak-<time>
+        #[arg(long)]
+        settings: bool,
     },
     /// Record the git working tree for a session (the pi extension calls this per turn)
     Snapshot {
@@ -621,13 +625,25 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Cmd::Restore { snapshot, apply } => {
+        Cmd::Restore {
+            snapshot,
+            apply,
+            settings,
+        } => {
             if apply {
+                backup::check_import(&snapshot)?;
                 let m = backup::restore(&snapshot, &mut conn, &backup::dir())?;
                 println!(
                     "restored {} ({} memories, {} events)",
                     m.file, m.memories, m.events
                 );
+                if settings {
+                    if backup::apply_settings(&snapshot)? {
+                        println!("settings restored; restart mnem-watch to use them");
+                    } else {
+                        println!("the backup carries no settings; kept the current ones");
+                    }
+                }
             } else {
                 let m = backup::verify(&snapshot)?;
                 println!(

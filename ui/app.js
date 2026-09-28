@@ -352,6 +352,178 @@
 
   // ---------- wiring ----------
 
+  // ---------- backup & move ----------
+
+  const fmtBytes = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`);
+  const fmtNum = (n) => Number(n).toLocaleString();
+  const countsText = (c) => `${fmtNum(c.sessions)} sessions · ${fmtNum(c.events)} events · ${fmtNum(c.memories)} memories`;
+
+  // Actions that change something carry this header; the server refuses them without it.
+  async function postJSON(url) {
+    const r = await fetch(url, { method: "POST", headers: { "X-Mnem": "1" } });
+    const data = await r.json().catch(() => ({ error: `${r.status}` }));
+    if (!r.ok) throw new Error(data.error || `${r.status}`);
+    return data;
+  }
+
+  function setStatus(id, text, error = false) {
+    const s = $(id);
+    s.textContent = text;
+    s.classList.toggle("error", error);
+  }
+
+  async function showMove() {
+    $("move-modal").style.display = "flex";
+    try {
+      const data = await getJSON("/api/backups");
+      const c = data.current;
+      $("move-current").replaceChildren(
+        el("b", {}, c.host), ` holds ${countsText(c)} (${fmtBytes(c.bytes)}).`);
+      $("move-list").replaceChildren(
+        ...data.backups.map((b) =>
+          el("div", { class: "move-row" },
+            el("div", { class: "move-meta" },
+              el("b", {}, fmtDate(b.created_at)), ` · ${fmtBytes(b.bytes)} · ${countsText(b)}`,
+              b.host ? ` · from ${b.host}` : "",
+              b.has_settings ? " · with settings" : ""),
+            el("a", { class: "move-btn", href: `/api/backups/${encodeURIComponent(b.file)}`, download: b.file }, "Download"))),
+      );
+      if (!data.backups.length) $("move-list").replaceChildren(el("p", { class: "move-help" }, "No backups yet."));
+    } catch (e) {
+      $("move-current").textContent = `Could not read backups: ${e.message}`;
+    }
+  }
+
+  async function createBackup() {
+    const b = $("move-create");
+    b.disabled = true;
+    setStatus("move-create-status", "Taking and checking a snapshot…");
+    try {
+      const { backup } = await postJSON("/api/backups");
+      setStatus("move-create-status", `Done: ${fmtBytes(backup.bytes)}, integrity and checksum verified. Download it below.`);
+      await showMove();
+    } catch (e) {
+      setStatus("move-create-status", `Backup failed: ${e.message}`, true);
+    } finally {
+      b.disabled = false;
+    }
+  }
+
+  // Upload with progress (fetch cannot report upload progress).
+  function upload(file) {
+    return new Promise((resolve, reject) => {
+      const x = new XMLHttpRequest();
+      x.open("POST", "/api/import");
+      x.setRequestHeader("X-Mnem", "1");
+      x.setRequestHeader("Content-Type", "application/octet-stream");
+      x.upload.onprogress = (e) => {
+        if (e.lengthComputable) $("move-progress-bar").style.width = `${(100 * e.loaded) / e.total}%`;
+        if (e.loaded === e.total) setStatus("move-upload-status", "Checking the backup (integrity, schema, search)…");
+      };
+      x.onload = () => {
+        let data = {};
+        try { data = JSON.parse(x.responseText); } catch { /* keep empty */ }
+        x.status < 300 ? resolve(data) : reject(new Error(data.error || `${x.status}`));
+      };
+      x.onerror = () => reject(new Error("upload failed"));
+      x.send(file);
+    });
+  }
+
+  async function chooseFile(file) {
+    if (!file) return;
+    const preview = $("move-preview");
+    preview.hidden = true;
+    $("move-progress").hidden = false;
+    $("move-progress-bar").style.width = "0";
+    setStatus("move-upload-status", `Uploading ${file.name} (${fmtBytes(file.size)})…`);
+    try {
+      const p = await upload(file);
+      setStatus("move-upload-status", "Backup checked: it is sound and this mnem can read it.");
+      renderPreview(p);
+    } catch (e) {
+      setStatus("move-upload-status", `Not imported: ${e.message}`, true);
+    } finally {
+      $("move-progress").hidden = true;
+      $("move-file").value = "";
+    }
+  }
+
+  function renderPreview(p) {
+    const preview = $("move-preview");
+    const o = p.origin;
+    const settings = el("input", { type: "checkbox", id: "move-settings", checked: o.has_settings ? "" : null });
+    const apply = el("button", { class: "move-btn danger" }, "Replace this machine’s memory with the backup");
+    const cancel = el("button", { class: "move-btn quiet" }, "Cancel");
+    const result = el("p", { class: "move-help", role: "status" });
+    preview.replaceChildren(
+      el("div", { class: "move-compare" },
+        el("div", {}, el("b", {}, `Backup${o.host ? ` from ${o.host}` : ""}`),
+          o.taken_at ? `${fmtDate(o.taken_at)} · ` : "", countsText(p.backup)),
+        el("div", {}, el("b", {}, `This machine now (${p.current.host})`), countsText(p.current))),
+      el("p", { class: "move-warn" },
+        "Importing replaces this machine’s memory with the backup. The current memory is saved as a backup first, and transcripts still on this machine are read again afterwards, so their sessions come back."),
+      o.has_settings
+        ? el("label", {}, settings, el("span", {}, "Also use the backup’s settings (models, exclusions, embedding model). This machine’s settings are kept as config.json.bak."))
+        : el("p", { class: "move-help" }, "This backup carries no settings; this machine keeps its own."),
+      el("div", { class: "move-actions" }, apply, cancel),
+      result,
+    );
+    preview.hidden = false;
+    cancel.addEventListener("click", async () => {
+      await postJSON(`/api/import/discard?file=${encodeURIComponent(p.file)}`).catch(() => {});
+      preview.hidden = true;
+      setStatus("move-upload-status", "Import cancelled; nothing changed.");
+    });
+    apply.addEventListener("click", async () => {
+      apply.disabled = cancel.disabled = true;
+      result.classList.remove("error");
+      result.textContent = "Saving the current memory, then restoring the backup…";
+      try {
+        const useSettings = o.has_settings && settings.checked ? "1" : "0";
+        const r = await postJSON(`/api/import/apply?file=${encodeURIComponent(p.file)}&settings=${useSettings}`);
+        result.replaceChildren(`Imported: this machine now holds ${countsText(r.current)}.`);
+        if (r.settings_applied) {
+          if (r.can_restart) {
+            const restart = el("button", { class: "move-btn primary" }, "Restart mnem to use the settings");
+            restart.addEventListener("click", () => restartMnem(restart, result));
+            result.append(" ", restart);
+          } else {
+            result.append(" Restart mnem to use the restored settings.");
+          }
+        }
+        reset();
+        loadHealth();
+      } catch (e) {
+        result.classList.add("error");
+        result.textContent = `Import failed, nothing changed: ${e.message}`;
+        apply.disabled = cancel.disabled = false;
+      }
+    });
+  }
+
+  async function restartMnem(button, result) {
+    button.disabled = true;
+    try {
+      await postJSON("/api/restart");
+    } catch (e) {
+      result.append(` ${e.message}`);
+      return;
+    }
+    result.textContent = "Restarting mnem (about 10 s)…";
+    await new Promise((r) => setTimeout(r, 3000));
+    for (let i = 0; i < 40; i++) {
+      try {
+        await getJSON("/api/stats");
+        location.reload();
+        return;
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+    result.textContent = "mnem has not come back yet; check `systemctl --user status mnem-watch`.";
+  }
+
   function init() {
     const url = new URL(location.href);
     state.project = url.searchParams.get("project") || "";
@@ -393,8 +565,18 @@
       if (e.target.id === "context-modal") e.target.style.display = "none";
     });
     $("context-project").addEventListener("change", (e) => showContext(e.target.value));
+    $("move-btn").addEventListener("click", showMove);
+    $("move-close").addEventListener("click", () => ($("move-modal").style.display = "none"));
+    $("move-modal").addEventListener("click", (e) => {
+      if (e.target.id === "move-modal") e.target.style.display = "none";
+    });
+    $("move-create").addEventListener("click", createBackup);
+    $("move-file").addEventListener("change", (e) => chooseFile(e.target.files[0]));
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") $("context-modal").style.display = "none";
+      if (e.key === "Escape") {
+        $("context-modal").style.display = "none";
+        $("move-modal").style.display = "none";
+      }
       if (e.key === "/" && document.activeElement !== $("search")) {
         e.preventDefault();
         $("search").focus();

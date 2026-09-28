@@ -24,6 +24,14 @@
         <option value="">All Projects</option>
       </select>
       <button class="theme-toggle-btn" id="theme" title="Theme"></button>
+      <button class="settings-btn" id="move-btn" title="Backup &amp; move to another machine">
+        <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+          <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path>
+          <path d="M4 11v6c0 1.66 3.58 3 8 3"></path>
+          <polyline points="16 17 19 20 22 17"></polyline><line x1="19" y1="13" x2="19" y2="20"></line>
+        </svg>
+      </button>
       <button class="settings-btn" id="context-btn" title="Session-start context preview">
         <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
@@ -63,6 +71,47 @@
         <div class="preview-column">
           <div class="preview-content"><pre id="context-text">Loading…</pre></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="move-modal" style="display:none">
+    <div class="context-settings-modal move-modal" role="dialog" aria-labelledby="move-title">
+      <div class="modal-header">
+        <h2 id="move-title">Backup &amp; move</h2>
+        <div class="header-controls">
+          <button class="modal-close-btn" id="move-close" title="Close">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="modal-body move-body">
+        <section class="move-section">
+          <h3>This machine</h3>
+          <p class="move-current" id="move-current">Loading…</p>
+        </section>
+        <section class="move-section">
+          <h3>1 · Back up</h3>
+          <p class="move-help">A backup is one file with every session, memory and your settings (never API keys). It holds your full history, prompts and code included, so keep it private. mnem also takes one every night and keeps seven.</p>
+          <div class="move-actions">
+            <button class="move-btn primary" id="move-create">Create backup now</button>
+            <span class="move-status" id="move-create-status" role="status"></span>
+          </div>
+          <div class="move-list" id="move-list"></div>
+        </section>
+        <section class="move-section">
+          <h3>2 · Import on the new machine</h3>
+          <p class="move-help">Install mnem there, open this viewer, and choose the backup file. It is checked first; nothing changes until you confirm.</p>
+          <div class="move-actions">
+            <label class="move-btn" for="move-file">Choose backup file…</label>
+            <input type="file" id="move-file" accept=".db,application/vnd.sqlite3" hidden>
+            <span class="move-status" id="move-upload-status" role="status"></span>
+          </div>
+          <div class="move-progress" id="move-progress" hidden><div id="move-progress-bar"></div></div>
+          <div class="move-preview" id="move-preview" hidden></div>
+        </section>
       </div>
     </div>
   </div>
