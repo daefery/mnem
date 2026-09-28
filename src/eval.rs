@@ -322,7 +322,14 @@ fn load_judgments() -> Judgments {
     m
 }
 
-/// How often two judges agree on the memories both judged: (shared, agreed, Cohen's kappa).
+/// The identity judgments are cached under for `--judge` ("chain") or one model.
+pub fn judge_identity(name: &str) -> Result<String> {
+    let l = Llm::from_config()?;
+    Ok(if name == "chain" { l } else { l.only(name) }.identity())
+}
+
+/// How often two judges (by identity) agree on the memories both judged:
+/// (shared, agreed, Cohen's kappa).
 pub fn agreement(a: &str, b: &str) -> (usize, usize, f64) {
     let all = load_judgments();
     let (pa, pb) = (
@@ -478,10 +485,18 @@ pub fn run(
             let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
             judged.prompts += 1;
             judged.shown += top.len();
-            if let (Some(llm), Some(name)) = (&llm, judge_with)
+            if let Some(llm) = &llm
                 && !top.is_empty()
             {
-                match judge(conn, llm, name, &mut cache, &c.project, &c.question, &top)? {
+                match judge(
+                    conn,
+                    llm,
+                    &llm.identity(),
+                    &mut cache,
+                    &c.project,
+                    &c.question,
+                    &top,
+                )? {
                     Some(marks) => {
                         let right = marks.iter().filter(|m| **m).count();
                         judged.judged_prompts += 1;

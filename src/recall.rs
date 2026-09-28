@@ -268,8 +268,10 @@ pub const MIN_COSINE: f32 = 0.55;
 
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
 /// Keyword ranking: memory ids in `project` for `prompt`, best first, within `scope`.
-/// Empty when the prompt carries no query. (Term rarity is measured over all memories,
-/// also when `scope.before` replays an old prompt.)
+/// Empty when the prompt carries no query. With `scope.before`, term rarity counts only
+/// memories that existed then; BM25's own term statistics still cover the whole index
+/// (FTS5 cannot restrict them), so replayed order is close to, not exactly, what recall
+/// ranked at the time.
 pub fn keyword_rank(
     conn: &Connection,
     project: &str,
@@ -293,18 +295,30 @@ pub fn keyword_rank(
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" OR ");
-    // One shared common word is not relevance: need at least two prompt terms in the
-    // memory, and at least one of the prompt's rarer terms in its title or subtitle.
+    // One shared common word is not relevance: a memory needs at least two prompt
+    // terms, and the prompt at least one rarer term. (Also requiring a rare term in the
+    // title was tried: flat judged precision on real-dev, fewer hits on the other sets.)
     let need = terms.len().min(2);
+    // Rarity over the memories that exist in scope: a replayed prompt must not see
+    // how common a word became later.
+    let before = scope.before.unwrap_or(i64::MAX);
     let total: f64 = conn
-        .query_row("SELECT count(*) FROM memories", [], |r| r.get::<_, i64>(0))?
+        .query_row(
+            "SELECT count(*) FROM memories WHERE coalesce(created_at, 0) < ?1",
+            [before],
+            |r| r.get::<_, i64>(0),
+        )?
         .max(1) as f64;
-    let mut df =
-        conn.prepare_cached("SELECT count(*) FROM memories_fts WHERE memories_fts MATCH ?1")?;
+    let mut df = conn.prepare_cached(if scope.before.is_some() {
+        "SELECT count(*) FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+         WHERE memories_fts MATCH ?1 AND coalesce(m.created_at, 0) < ?2"
+    } else {
+        "SELECT count(*) FROM memories_fts WHERE memories_fts MATCH ?1 AND ?2 = ?2"
+    })?;
     let rare: Vec<&String> = terms
         .iter()
         .filter(|t| {
-            df.query_row([format!("\"{t}\"")], |r| r.get::<_, i64>(0))
+            df.query_row(params![format!("\"{t}\""), before], |r| r.get::<_, i64>(0))
                 .map(|n| (n as f64) / total < RARE)
                 .unwrap_or(false)
         })
@@ -315,8 +329,7 @@ pub fn keyword_rank(
     let mut st = conn.prepare_cached(
         "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0),
                 lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, '') || ' ' ||
-                      coalesce(m.narrative, '') || ' ' || coalesce(m.facts, '')),
-                lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, ''))
+                      coalesce(m.narrative, '') || ' ' || coalesce(m.facts, ''))
          FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
          WHERE memories_fts MATCH ?1 AND m.project = ?2 AND m.kind != 'pinned'
            -- Personal details stay out of automatic injection; explicit search still finds them.

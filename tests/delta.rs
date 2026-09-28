@@ -420,3 +420,46 @@ fn viewer_rejects_oversized_requests() {
         &out[..out.len().min(80)]
     );
 }
+
+#[test]
+fn replay_measures_rarity_as_of_then() {
+    let c = db("replay-rarity");
+    let add = |title: &str, at: i64, key: String| {
+        c.execute(
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'bugfix', ?1, 'proj', 'mnem', ?2, ?3)",
+            params![title, key, at],
+        )
+        .unwrap();
+        c.last_insert_rowid()
+    };
+    // Back then, "zeppelin" was rare and the other words common.
+    let old = add(
+        "Zeppelin widget crash sometimes on resize",
+        10,
+        "old".into(),
+    );
+    for i in 0..3 {
+        add("Widget crash sometimes on startup", 10, format!("f{i}"));
+    }
+    for i in 0..12 {
+        add("Unrelated deploy note", 10, format!("u{i}"));
+    }
+    // Later it became common, which must not change what a replay at time 50 finds.
+    for i in 0..15 {
+        add("Zeppelin sync note", 100, format!("z{i}"));
+    }
+    let prompt = "why does the zeppelin widget crash sometimes";
+    let scope = mnem::recall::Scope {
+        before: Some(50),
+        ..Default::default()
+    };
+    let ids: Vec<i64> = mnem::recall::keyword_rank(&c, "proj", prompt, &scope, 5)
+        .unwrap()
+        .into_iter()
+        .map(|h| h.0)
+        .collect();
+    assert!(ids.contains(&old), "{ids:?}");
+    // Measured over today's index, no prompt word is rare any more: nothing qualifies.
+    let now = mnem::recall::keyword_rank(&c, "proj", prompt, &Default::default(), 5).unwrap();
+    assert!(now.is_empty(), "{now:?}");
+}

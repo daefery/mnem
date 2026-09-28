@@ -232,6 +232,15 @@ impl Llm {
         out
     }
 
+    /// Which models this client asks, in order: identifies a judge in cached results.
+    pub fn identity(&self) -> String {
+        format!(
+            "{}{}",
+            self.chain.join(","),
+            if self.auto_fallback { ",+auto" } else { "" }
+        )
+    }
+
     /// This one model only, no fallback (exclusions still apply).
     pub fn only(mut self, model: &str) -> Llm {
         self.chain = vec![model.to_string()];

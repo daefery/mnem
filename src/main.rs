@@ -466,7 +466,10 @@ fn main() -> Result<()> {
                         }
                     );
                     if name != "chain" {
-                        let (n, agreed, kappa) = mnem::eval::agreement("chain", name);
+                        let (n, agreed, kappa) = mnem::eval::agreement(
+                            &mnem::eval::judge_identity("chain")?,
+                            &mnem::eval::judge_identity(name)?,
+                        );
                         println!(
                             "agreement with the default judge: {agreed} of {n} shared memories, kappa {kappa:.2}"
                         );
