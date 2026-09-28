@@ -171,9 +171,20 @@ enum Cmd {
         /// Build a new test set of N questions with the distillation models first
         #[arg(long)]
         build: Option<usize>,
+        /// keyword, vector or hybrid (default)
+        #[arg(long, default_value = "hybrid")]
+        mode: String,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
+    /// Download the embedding model (once) and embed memories that have no vector yet
+    Embed {
+        /// Also time a query embedding for this text
+        #[arg(long)]
+        probe: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
     /// Catch up a single transcript file
@@ -297,6 +308,26 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Embed { probe, limit } => {
+            let name = mnem::embed::model_name();
+            let t = Instant::now();
+            mnem::embed::fetch(&name)?;
+            let t_load = Instant::now();
+            let e = mnem::embed::Embedder::load()?;
+            println!(
+                "model {name}: ready in {:.1}s, loads in {} ms",
+                t.elapsed().as_secs_f64(),
+                t_load.elapsed().as_millis()
+            );
+            if let Some(p) = probe {
+                let t = Instant::now();
+                let v = e.embed(&[p]);
+                println!("query embedding: {} dims in {} µs", v[0].len(), t.elapsed().as_micros());
+            }
+            let t = Instant::now();
+            let n = mnem::embed::backfill(&mut conn, &e, limit)?;
+            println!("embedded {n} memories in {:.1}s", t.elapsed().as_secs_f64());
+        }
         Cmd::Pins => {
             let mut st = conn.prepare(
                 "SELECT id, project, coalesce(narrative, title) FROM memories WHERE kind = 'pinned' ORDER BY project, created_at",
@@ -330,13 +361,18 @@ fn main() -> Result<()> {
             };
             eprintln!("export: {n} records");
         }
-        Cmd::Eval { build } => {
+        Cmd::Eval { build, mode } => {
+            let mode = match mode.as_str() {
+                "keyword" => mnem::recall::Mode::Keyword,
+                "vector" => mnem::recall::Mode::Vector,
+                _ => mnem::recall::Mode::Hybrid,
+            };
             let path = mnem::eval::eval_path();
             if let Some(n) = build {
                 let written = mnem::eval::build(&conn, n, &path)?;
                 println!("built {written} questions in {}", path.display());
             }
-            let r = mnem::eval::run(&conn, &path)?;
+            let r = mnem::eval::run(&conn, &path, mode)?;
             println!(
                 "recall eval: {} cases ({} sensitive skipped) · hit@1 {:.0}% · hit@5 {:.0}% · MRR {:.2} · p50 {:.1} ms · p95 {:.1} ms",
                 r.cases,
@@ -479,6 +515,14 @@ fn main() -> Result<()> {
                         let _ = ingest::mark_missing(&conn, &sources);
                     }
                     Err(e) => hook::log(&format!("watch sweep: {e:#}")),
+                }
+                // New memories (distilled, imported, pinned) get vectors on the next pass.
+                if let Some(e) = mnem::embed::shared() {
+                    match mnem::embed::backfill(&mut conn, e, Some(500)) {
+                        Ok(n) if n > 0 => hook::log(&format!("watch embed: {n} memories")),
+                        Ok(_) => {}
+                        Err(e) => hook::log(&format!("watch embed: {e:#}")),
+                    }
                 }
                 // Costly health checks happen here, not in hooks.
                 if let Err(e) =

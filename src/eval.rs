@@ -152,7 +152,8 @@ pub struct Report {
     pub misses: Vec<(i64, String)>,
 }
 
-pub fn run(conn: &Connection, path: &Path) -> Result<Report> {
+pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report> {
+    let embedder = recall::semantic_embedder();
     let f = std::fs::File::open(path).with_context(|| {
         format!(
             "no test set at {}; run `mnem eval --build 40`",
@@ -182,7 +183,8 @@ pub fn run(conn: &Connection, path: &Path) -> Result<Report> {
             continue;
         }
         let t = Instant::now();
-        let ranked = recall::rank(conn, &c.project, &c.question, None, 10)?;
+        let query = embedder.as_ref().map(|e| e.query(&c.question));
+        let ranked = recall::rank(conn, &c.project, &c.question, None, 10, query.as_ref(), mode)?;
         times.push(t.elapsed().as_secs_f64() * 1000.0);
         match ranked.iter().position(|r| r.0 == c.id) {
             Some(i) => {

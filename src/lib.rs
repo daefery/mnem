@@ -5,6 +5,7 @@ pub mod context;
 pub mod db;
 pub mod distill;
 pub mod doctor;
+pub mod embed;
 pub mod eval;
 pub mod forget;
 pub mod gitstate;

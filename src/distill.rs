@@ -53,11 +53,9 @@ Use 0-5 observations; return an empty list when nothing durable happened. summar
 /// exhausted account does not stop distillation.
 pub const DEFAULT_CHAIN: &[&str] = &[
     "gpt-5.6-luna",
-    "gemini-3.5-flash-lite",
     "developer/claude-haiku-4-5-20251001",
     "product/claude-haiku-4-5-20251001",
     "gpt-5.6-terra",
-    "gemini-3-flash",
 ];
 /// Never used for distillation, even as an automatic fallback.
 const NOT_TEXT: &[&str] = &[
@@ -197,10 +195,16 @@ impl Llm {
             .call()
             .ok()?;
         let v: Value = r.body_mut().read_json().ok()?;
+        let c = &CONFIG.distill;
         Some(
             v["data"]
                 .as_array()?
                 .iter()
+                // Blocked providers (CLIProxyAPI's owned_by, e.g. "antigravity") never serve.
+                .filter(|m| {
+                    let owner = m["owned_by"].as_str().unwrap_or_default();
+                    !c.exclude_providers.iter().any(|p| p.eq_ignore_ascii_case(owner))
+                })
                 .filter_map(|m| m["id"].as_str().map(str::to_string))
                 .collect(),
         )
@@ -227,13 +231,16 @@ impl Llm {
     }
 
     pub fn candidates(&self) -> Vec<String> {
-        order_candidates(
-            &self.chain,
-            self.available(),
-            self.auto_fallback,
-            &self.cooldowns.borrow(),
-            db::now_ms(),
-        )
+        let blocked = |m: &String| {
+            let l = m.to_lowercase();
+            CONFIG.distill.exclude_models.iter().any(|x| !x.is_empty() && l.contains(&x.to_lowercase()))
+        };
+        let chain: Vec<String> = self.chain.iter().filter(|m| !blocked(m)).cloned().collect();
+        let available = self.available().map(|a| a.into_iter().filter(|m| !blocked(m)).collect());
+        // Without the endpoint's model list, provider blocks cannot be checked: in that
+        // case only the explicit chain is tried, never an automatic fallback.
+        let auto = self.auto_fallback && (available.is_some() || CONFIG.distill.exclude_providers.is_empty());
+        order_candidates(&chain, available, auto, &self.cooldowns.borrow(), db::now_ms())
     }
 
     /// Run the prompt on the first model that answers with valid JSON.

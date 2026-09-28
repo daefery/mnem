@@ -55,10 +55,92 @@ pub fn terms(prompt: &str) -> Vec<String> {
     out
 }
 
-/// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
-/// Memory ids in `project` ranked for `prompt`, best first; `exclude_session` hides
-/// memories already offered to that session. Empty when the prompt carries no query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Keyword,
+    Vector,
+    Hybrid,
+}
+
+fn semantic_enabled() -> bool {
+    crate::config::CONFIG.semantic.enabled != Some(false)
+}
+
+/// The semantic model loaded in this process (for eval and CLI use).
+pub fn semantic_embedder() -> Option<crate::embed::Embedder> {
+    semantic_enabled().then(|| crate::embed::Embedder::load().ok()).flatten()
+}
+
+type Hit = (i64, String, String, i64);
+
+/// Rank memories for a prompt by keywords, by meaning, or both fused (reciprocal rank
+/// fusion). Without an embedder every mode is keyword ranking.
 pub fn rank(
+    conn: &Connection,
+    project: &str,
+    prompt: &str,
+    exclude_session: Option<&str>,
+    limit: usize,
+    query: Option<&crate::embed::Query>,
+    mode: Mode,
+) -> Result<Vec<Hit>> {
+    let Some(q) = query.filter(|_| mode != Mode::Keyword) else {
+        return keyword_rank(conn, project, prompt, exclude_session, limit);
+    };
+    // Same gate as keywords: harness text and very short prompts carry no query.
+    let Some((clean, label)) = classify_prompt(prompt) else { return Ok(vec![]) };
+    if label.is_some() || clean.split_whitespace().count() < 4 {
+        return Ok(vec![]);
+    }
+    let pool = limit * 6;
+    let mut info = conn.prepare_cached(
+        "SELECT coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0) FROM memories m
+         WHERE m.id = ?1 AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
+           AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?2 AND r.memory_id = m.id)",
+    )?;
+    let mut vector: Vec<Hit> = Vec::new();
+    for (id, cos) in crate::embed::search(conn, q, project, pool * 2)? {
+        if cos < std::env::var("MNEM_MIN_COS").ok().and_then(|v| v.parse().ok()).unwrap_or(MIN_COSINE) {
+            break;
+        }
+        if let Ok(h) = info.query_row(params![id, exclude_session.unwrap_or("")], |r| Ok((id, r.get(0)?, r.get(1)?, r.get(2)?))) {
+            vector.push(h);
+            if vector.len() == pool {
+                break;
+            }
+        }
+    }
+    if mode == Mode::Vector {
+        vector.truncate(limit);
+        return Ok(vector);
+    }
+    let keyword = keyword_rank(conn, project, prompt, exclude_session, pool)?;
+    let mut fused: Vec<(f64, Hit)> = Vec::new();
+    let vec_weight: f64 = std::env::var("MNEM_VEC_WEIGHT").ok().and_then(|v| v.parse().ok()).unwrap_or(VECTOR_WEIGHT);
+    for (list, weight) in [(&keyword, 1.0), (&vector, vec_weight)] {
+        for (r, h) in list.iter().enumerate() {
+            let score = weight / (RRF_K + r as f64 + 1.0);
+            match fused.iter_mut().find(|(_, x)| x.0 == h.0) {
+                Some((s, _)) => *s += score,
+                None => fused.push((score, h.clone())),
+            }
+        }
+    }
+    fused.sort_by(|a, b| b.0.total_cmp(&a.0));
+    Ok(fused.into_iter().take(limit).map(|(_, h)| h).collect())
+}
+
+/// Reciprocal-rank-fusion constant (the usual 60).
+const RRF_K: f64 = 60.0;
+/// Weight of the vector list relative to keywords in the fusion.
+const VECTOR_WEIGHT: f64 = 1.0;
+/// Vector hits below this cosine similarity are not considered related.
+const MIN_COSINE: f32 = 0.0;
+
+/// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
+/// Keyword ranking: memory ids in `project` for `prompt`, best first; `exclude_session`
+/// hides memories already offered to that session. Empty when the prompt carries no query.
+pub fn keyword_rank(
     conn: &Connection,
     project: &str,
     prompt: &str,
@@ -149,7 +231,9 @@ pub fn recall(
     project: &str,
     prompt: &str,
 ) -> Result<Option<String>> {
-    let rows = rank(conn, project, prompt, Some(session), TOP)?;
+    // Hooks are short-lived: ask the watch service, which keeps the model loaded.
+    let query = semantic_enabled().then(|| crate::embed::query_from_service(prompt)).flatten();
+    let rows = rank(conn, project, prompt, Some(session), TOP, query.as_ref(), Mode::Hybrid)?;
     if rows.is_empty() {
         return Ok(None);
     }

@@ -165,6 +165,16 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
         "/api/feed" => Response::json(&feed(&open(db_path)?, q)?),
         "/api/projects" => Response::json(&projects(&open(db_path)?)?),
         "/api/stats" => Response::json(&stats(&open(db_path)?)?),
+        "/api/embed" => {
+            let text = q.get("q").map(String::as_str).unwrap_or_default();
+            match crate::embed::shared() {
+                Some(e) => {
+                    let query = e.query(text);
+                    Response::json(&json!({ "model": query.model, "vector": query.vec }))
+                }
+                None => Response::text("503 Service Unavailable", "text/plain", "no embedding model loaded\n"),
+            }
+        }
         "/api/context" => {
             let conn = open(db_path)?;
             let project = match q.get("project").filter(|p| !p.is_empty()) {

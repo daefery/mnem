@@ -152,6 +152,15 @@ CREATE TABLE IF NOT EXISTS forgotten(
   PRIMARY KEY(kind, key)
 );
 
+-- Semantic vectors for memories, int8 with a per-vector scale, per embedding model.
+CREATE TABLE IF NOT EXISTS memory_vectors(
+  memory_id INTEGER PRIMARY KEY,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  scale REAL NOT NULL,
+  vec BLOB NOT NULL
+);
+
 -- Memories already offered to a session by prompt-time recall (never repeated).
 CREATE TABLE IF NOT EXISTS recall_seen(
   session_id TEXT NOT NULL,
@@ -190,7 +199,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

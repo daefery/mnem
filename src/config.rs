@@ -23,6 +23,17 @@ pub struct Config {
     /// Projects never captured (substring of the project id, e.g. "github.com/me/secret").
     #[serde(default)]
     pub exclude_projects: Vec<String>,
+    #[serde(default)]
+    pub semantic: SemanticConfig,
+}
+
+/// Local semantic recall.
+#[derive(Debug, Default, Deserialize)]
+pub struct SemanticConfig {
+    /// Model2Vec model on Hugging Face (default minishlab/potion-base-8M).
+    pub model: Option<String>,
+    /// Set false to use keyword recall only.
+    pub enabled: Option<bool>,
 }
 
 /// Background distillation through any OpenAI-compatible endpoint.
@@ -45,6 +56,12 @@ pub struct DistillConfig {
     pub api_key_field: Option<String>,
     /// Distil automatically after each agent turn (Stop hook). Default true.
     pub on_stop: Option<bool>,
+    /// Never use models from these providers (the endpoint's `owned_by`, e.g. "antigravity").
+    #[serde(default)]
+    pub exclude_providers: Vec<String>,
+    /// Never use models whose id contains any of these (case-insensitive), e.g. "gemini".
+    #[serde(default)]
+    pub exclude_models: Vec<String>,
 }
 
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
