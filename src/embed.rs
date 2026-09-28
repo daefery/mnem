@@ -390,6 +390,27 @@ pub fn search(
     )
 }
 
+/// Cosine similarity of the query to each of `ids` that has a vector for its model.
+pub fn cosines(
+    conn: &Connection,
+    q: &Query,
+    ids: &[i64],
+) -> Result<std::collections::HashMap<i64, f32>> {
+    let mut st = conn.prepare_cached(
+        "SELECT scale, vec FROM memory_vectors WHERE memory_id = ?1 AND model = ?2",
+    )?;
+    let mut out = std::collections::HashMap::new();
+    for id in ids {
+        let row: Option<(f32, Vec<u8>)> = st
+            .query_row(params![id, q.model], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        if let Some((scale, v)) = row.filter(|(_, v)| v.len() == q.vec.len()) {
+            out.insert(*id, dot_q(&q.vec, scale, &v));
+        }
+    }
+    Ok(out)
+}
+
 /// Memory ids by cosine similarity to the query, best first, among memories `m`
 /// matching the SQL condition `filter` (with `?` placeholders bound to `args`).
 pub fn search_where(

@@ -78,13 +78,17 @@ pub fn export(conn: &Connection, out: &mut dyn Write, project: Option<&str>) -> 
 
 #[derive(Serialize, Deserialize)]
 struct Case {
-    id: i64,
+    /// The memory that answers the question; None for a prompt no memory answers,
+    /// where the right outcome is to recall nothing.
+    id: Option<i64>,
     project: String,
     question: String,
 }
 
-pub fn eval_path() -> PathBuf {
-    db::data_dir().join("eval").join("recall.jsonl")
+/// A named test set in ~/.mnem/eval: `recall` (model-written) or `vague` (hand-written
+/// vague questions plus prompts that should recall nothing).
+pub fn set_path(name: &str) -> PathBuf {
+    db::data_dir().join("eval").join(format!("{name}.jsonl"))
 }
 
 const ASK: &str = r#"You write evaluation questions for a memory search system used by software developers.
@@ -125,7 +129,7 @@ pub fn build(conn: &Connection, n: usize, path: &Path) -> Result<usize> {
                         out,
                         "{}",
                         serde_json::to_string(&Case {
-                            id,
+                            id: Some(id),
                             project,
                             question: q.to_string()
                         })?
@@ -150,6 +154,9 @@ pub struct Report {
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub misses: Vec<(i64, String)>,
+    /// Prompts no memory answers, and how many of them still recalled something.
+    pub negatives: usize,
+    pub false_alarms: Vec<String>,
 }
 
 pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report> {
@@ -169,15 +176,17 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
     let mut times = Vec::new();
     let mut misses = Vec::new();
     let mut skipped = 0;
+    let (mut negatives, mut false_alarms) = (0, Vec::new());
     for c in &cases {
         // Sensitive memories are kept out of automatic recall on purpose; not a miss.
-        let sensitive: bool = conn
-            .query_row(
+        let sensitive: bool = c.id.is_some_and(|id| {
+            conn.query_row(
                 "SELECT coalesce(type, '') = 'sensitive' FROM memories WHERE id = ?1",
-                [c.id],
+                [id],
                 |r| r.get(0),
             )
-            .unwrap_or(false);
+            .unwrap_or(false)
+        });
         if sensitive {
             skipped += 1;
             continue;
@@ -194,16 +203,23 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
             mode,
         )?;
         times.push(t.elapsed().as_secs_f64() * 1000.0);
-        match ranked.iter().position(|r| r.0 == c.id) {
+        let Some(target) = c.id else {
+            negatives += 1;
+            if !ranked.is_empty() {
+                false_alarms.push(c.question.clone());
+            }
+            continue;
+        };
+        match ranked.iter().position(|r| r.0 == target) {
             Some(i) => {
                 hit1 += (i == 0) as usize;
                 hit5 += (i < 5) as usize;
                 mrr += 1.0 / (i as f64 + 1.0);
                 if i >= 5 {
-                    misses.push((c.id, c.question.clone()));
+                    misses.push((target, c.question.clone()));
                 }
             }
-            None => misses.push((c.id, c.question.clone())),
+            None => misses.push((target, c.question.clone())),
         }
     }
     times.sort_by(f64::total_cmp);
@@ -213,16 +229,19 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
             .copied()
             .unwrap_or(0.0)
     };
+    let positives = cases.len() - skipped - negatives;
     Ok(Report {
-        cases: cases.len() - skipped,
+        cases: positives,
         skipped,
         hit1,
         hit5,
-        mrr: if cases.len() == skipped {
+        mrr: if positives == 0 {
             0.0
         } else {
-            mrr / (cases.len() - skipped) as f64
+            mrr / positives as f64
         },
+        negatives,
+        false_alarms,
         p50_ms: pct(0.5),
         p95_ms: pct(0.95),
         misses,
@@ -241,12 +260,13 @@ pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
         .collect();
     let (mut target, mut wrong) = (Vec::new(), Vec::new());
     for c in &cases {
+        let Some(id) = c.id else { continue };
         let q = e.query(&c.question);
         let hits = crate::embed::search(conn, &q, &c.project, None, 500)?;
-        if let Some((_, cos)) = hits.iter().find(|h| h.0 == c.id) {
+        if let Some((_, cos)) = hits.iter().find(|h| h.0 == id) {
             target.push(*cos);
         }
-        if let Some((_, cos)) = hits.iter().find(|h| h.0 != c.id) {
+        if let Some((_, cos)) = hits.iter().find(|h| h.0 != id) {
             wrong.push(*cos);
         }
     }

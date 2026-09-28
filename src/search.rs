@@ -13,6 +13,13 @@ pub fn fts_query(q: &str) -> String {
 /// computed the same way for every page, so pages never overlap or shift.
 pub const POOL: usize = 1000;
 
+/// Any-word matches below this cosine to the query are dropped from search. Lower than
+/// prompt recall's gate because a missed memory costs more in a search the user asked
+/// for: through MCP search on both eval sets, 0.35 lost no target and moved one into
+/// the top 20, and halved the rows returned for prompts no memory answers (0.40 and up
+/// began losing targets).
+pub const SOME_WORDS_COSINE: f32 = 0.35;
+
 /// A memory in a relevance ranking and what matched it.
 pub struct Ranked {
     pub id: i64,
@@ -66,14 +73,17 @@ pub fn rank_memories(
     if words.len() < POOL
         && let Some(any) = crate::recall::any_terms_query(raw)
     {
-        for id in matching(&any)? {
-            if words.len() >= POOL {
-                break;
-            }
-            if !words.contains(&id) {
-                words.push(id);
-            }
+        let mut some: Vec<i64> = matching(&any)?
+            .into_iter()
+            .filter(|id| !words.contains(id))
+            .collect();
+        // Sharing a few words is weak evidence; with a query vector, keep only the ones
+        // that are also close in meaning (every-word matches are kept as they are).
+        if let Some(q) = vq {
+            let cos = crate::embed::cosines(conn, q, &some)?;
+            some.retain(|id| cos.get(id).is_none_or(|c| *c >= SOME_WORDS_COSINE));
         }
+        words.extend(some.into_iter().take(POOL - words.len()));
     }
     let meaning: Vec<i64> = match vq {
         Some(q) => crate::embed::search_where(conn, q, filter, args(), POOL)?

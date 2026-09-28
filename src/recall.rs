@@ -113,7 +113,9 @@ pub fn rank(
         return Ok(vec![]);
     }
     if mode == Mode::Fill {
-        let mut out = keyword_rank(conn, project, prompt, exclude_session, limit)?;
+        let mut out = keyword_rank(conn, project, prompt, exclude_session, limit * 2)?;
+        gate(conn, q, &mut out)?;
+        out.truncate(limit);
         fill_with_vectors(conn, q, project, exclude_session, &mut out, limit)?;
         return Ok(out);
     }
@@ -210,6 +212,22 @@ pub fn fill_with_vectors(
     }
     Ok(())
 }
+
+/// Drop keyword hits whose meaning is far from the query: sharing words is not enough.
+/// Memories without a vector yet (just distilled) are kept.
+pub fn gate(conn: &Connection, q: &crate::embed::Query, rows: &mut Vec<Hit>) -> Result<()> {
+    let ids: Vec<i64> = rows.iter().map(|h| h.0).collect();
+    let cos = crate::embed::cosines(conn, q, &ids)?;
+    rows.retain(|h| cos.get(&h.0).is_none_or(|c| *c >= RELEVANCE_COSINE));
+    Ok(())
+}
+
+/// Keyword hits below this cosine to the query are dropped. On the model-written and
+/// the hand-written vague eval sets together (`mnem eval --set vague`), prompts no
+/// memory answers reached at most 0.37 (p90) while true targets rarely fell below 0.47
+/// (p10): 0.45 cut prompts that recalled something anyway from 9 of 9 to 1, and kept 40
+/// of the 43 targets keywords had found.
+pub const RELEVANCE_COSINE: f32 = 0.45;
 
 /// Reciprocal-rank-fusion constant (the usual 60).
 const RRF_K: f64 = 60.0;
@@ -319,17 +337,20 @@ pub fn recall(
     project: &str,
     prompt: &str,
 ) -> Result<Option<String>> {
-    // Keywords first (they score best at top five in `mnem eval`). Only when they leave
-    // slots empty is the watch service asked for a query vector.
-    let mut rows = keyword_rank(conn, project, prompt, Some(session), TOP)?;
-    if rows.len() < TOP
-        && semantic_enabled()
+    // Keywords rank (they score best at top five in `mnem eval`); the query vector from
+    // the watch service drops keyword hits that share words but not meaning, then fills
+    // empty slots. Without the service, keywords alone.
+    let mut rows = keyword_rank(conn, project, prompt, Some(session), TOP * 2)?;
+    if semantic_enabled()
         && classify_prompt(prompt)
             .is_some_and(|(c, l)| l.is_none() && c.split_whitespace().count() >= 4)
         && let Some(q) = crate::embed::query_from_service(conn, prompt)
     {
+        gate(conn, &q, &mut rows)?;
+        rows.truncate(TOP);
         fill_with_vectors(conn, &q, project, Some(session), &mut rows, TOP)?;
     }
+    rows.truncate(TOP);
     if rows.is_empty() {
         return Ok(None);
     }

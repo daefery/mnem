@@ -178,6 +178,9 @@ enum Cmd {
         /// Print the cosine distribution of true targets vs best wrong candidates
         #[arg(long)]
         cosines: bool,
+        /// Test set in ~/.mnem/eval: recall (model-written) or vague (hand-written)
+        #[arg(long, default_value = "recall")]
+        set: String,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -377,9 +380,11 @@ fn main() -> Result<()> {
             build,
             mode,
             cosines,
+            set,
         } => {
+            let path = mnem::eval::set_path(&set);
             if cosines {
-                let (t, w) = mnem::eval::cosines(&conn, &mnem::eval::eval_path())?;
+                let (t, w) = mnem::eval::cosines(&conn, &path)?;
                 let pct = |v: &[f32], p: f64| {
                     v.get(((v.len() as f64 - 1.0) * p).round() as usize)
                         .copied()
@@ -404,7 +409,6 @@ fn main() -> Result<()> {
                 "fill" => mnem::recall::Mode::Fill,
                 _ => mnem::recall::Mode::Hybrid,
             };
-            let path = mnem::eval::eval_path();
             if let Some(n) = build {
                 let written = mnem::eval::build(&conn, n, &path)?;
                 println!("built {written} questions in {}", path.display());
@@ -420,8 +424,18 @@ fn main() -> Result<()> {
                 r.p50_ms,
                 r.p95_ms
             );
+            if r.negatives > 0 {
+                println!(
+                    "no-answer prompts: {} · recalled something for {}",
+                    r.negatives,
+                    r.false_alarms.len()
+                );
+            }
             for (id, q) in r.misses.iter().take(8) {
                 println!("  miss #{id}: {q}");
+            }
+            for q in r.false_alarms.iter().take(8) {
+                println!("  false alarm: {q}");
             }
         }
         Cmd::Forget {
