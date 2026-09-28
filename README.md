@@ -125,9 +125,10 @@ recall got worse:
   fewer, and every prompt judged; the judge is always the live settings' models;
 - MCP search on the known questions: top 5 and top 20 at most one lower, and no
   personal-detail memory listed unasked;
-- speed: the slowest 5% of rankings, and of prompt recall as the hook runs it (process
-  start plus a round trip to the build's own service on a copy of the data), stay
-  under 300 ms, with at most one fallback to keywords.
+- speed: the slowest 5% of rankings, and of prompt recall as the hook runs it (a fresh
+  process per real prompt: start-up, settings, database open and a round trip to the
+  build's own service on a copy of the data), stay under 300 ms, with at most one
+  fallback to keywords.
 
 Both builds run on their own copy of one snapshot, taken read-only before anything
 opens the live database. Test sets that are missing or too small make it fail.

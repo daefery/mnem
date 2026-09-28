@@ -68,6 +68,16 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Prompt recall exactly as the prompt hook runs it, for timing (used by the gate)
+    #[command(hide = true)]
+    RecallProbe {
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        prompt: String,
+    },
     /// Cross-agent update for a session since it last looked (used by the pi extension)
     Delta {
         #[arg(long)]
@@ -276,7 +286,11 @@ fn main() -> Result<()> {
     // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
     let in_turn = matches!(
         cli.cmd,
-        Cmd::Hook { .. } | Cmd::Delta { .. } | Cmd::Context { .. } | Cmd::Snapshot { .. }
+        Cmd::Hook { .. }
+            | Cmd::Delta { .. }
+            | Cmd::Context { .. }
+            | Cmd::Snapshot { .. }
+            | Cmd::RecallProbe { .. }
     );
     let busy = std::time::Duration::from_millis(if in_turn { 500 } else { 5000 });
     let mut conn = match db::open_with(&path, busy) {
@@ -891,6 +905,15 @@ fn main() -> Result<()> {
             })?;
         }
         Cmd::Uninstall { dry_run } => install::uninstall(dry_run)?,
+        Cmd::RecallProbe {
+            session,
+            project,
+            prompt,
+        } => {
+            if let Some(r) = mnem::recall::recall(&conn, &session, &project, &prompt)? {
+                println!("{r}");
+            }
+        }
         Cmd::Delta {
             session,
             cwd,

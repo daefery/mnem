@@ -195,25 +195,36 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         }
     }
 
-    // Prompt recall the way the hook runs it, on the real prompts (each a fresh session,
-    // so nothing is held back as already offered), plus this binary's start-up time.
-    let mut spawn = Vec::new();
-    for _ in 0..5 {
-        let t = std::time::Instant::now();
-        std::process::Command::new(std::env::current_exe()?)
-            .arg("--version")
-            .output()?;
-        spawn.push(t.elapsed().as_secs_f64() * 1000.0);
-    }
-    spawn.sort_by(f64::total_cmp);
+    // Prompt recall the way the hook runs it: a fresh process of this build per real
+    // prompt (start-up, settings, database open, recall through this build's service),
+    // each a fresh session so nothing is held back as already offered.
+    let exe = std::env::current_exe()?;
     let (mut times, mut fallbacks) = (Vec::new(), 0);
     for (i, c) in cases("real-dev")?.iter().enumerate() {
         let (Some(q), Some(project)) = (c["question"].as_str(), c["project"].as_str()) else {
             continue;
         };
         let t = std::time::Instant::now();
-        crate::recall::recall(conn, &format!("gate:{i}"), project, q)?;
-        times.push(t.elapsed().as_secs_f64() * 1000.0 + spawn[2]);
+        let out = std::process::Command::new(&exe)
+            .arg("--db")
+            .arg(db)
+            .args([
+                "recall-probe",
+                "--session",
+                &format!("gate:{i}"),
+                "--project",
+                project,
+                "--prompt",
+                q,
+            ])
+            .output()?;
+        times.push(t.elapsed().as_secs_f64() * 1000.0);
+        if !out.status.success() {
+            bail!(
+                "recall failed for a real prompt: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
         if model_loaded
             && q.split_whitespace().count() >= 4
             && crate::embed::query_from_service(conn, q).is_none()
