@@ -67,7 +67,8 @@ something since, a short "meanwhile" update.
   unhelpful ones. The trade: on the model-written set hit@1 fell 61% to 55% (two cases)
   and on the hand-written set prompts with no answer that still recalled something rose
   from 1 to 3 of 10. Reproduce with `mnem eval --set real-dev --judge --dump <file>` per
-  model, then `mnem eval --analyze <files>`. `mnem embed --import <db>` reuses vectors
+  model (judging costs about one LLM call per prompt the first time; later models reuse
+  the cached judgments), then `mnem eval --analyze <files>`. `mnem embed --import <db>` reuses vectors
   computed in another copy of the database when the memory text still matches.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)

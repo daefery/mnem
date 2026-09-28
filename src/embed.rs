@@ -109,32 +109,36 @@ impl Embedder {
         #[cfg(feature = "fastembed")]
         if let Some(m) = name.strip_prefix("fastembed:") {
             let info = fastembed_info(m).with_context(|| format!("unknown fastembed model {m}"))?;
-            let cache = db::data_dir().join("models").join("fastembed");
             let opts = fastembed::TextInitOptions::new(info.model.clone())
-                .with_cache_dir(cache.clone())
+                .with_cache_dir(db::data_dir().join("models").join("fastembed"))
                 .with_max_length(MAX_TOKENS)
                 .with_show_download_progress(false);
-            let te = fastembed::TextEmbedding::try_new(opts)?;
-            // Key vectors by what produced them: the model files as downloaded, the input
-            // length and the prefixes; any change keeps old vectors from being compared.
+            let mut te = fastembed::TextEmbedding::try_new(opts)?;
+            // Key vectors by what the loaded model does, wherever its files live: embed
+            // fixed probes (one longer than the input limit) as documents and hash the
+            // rounded output together with the prefixes. New weights, tokenizer, input
+            // length or prefixes give a new key, so old vectors are never compared.
             let prefixes = prefixes(m);
-            let mut h = Sha256::new();
-            let snapshots = cache
-                .join(format!("models--{}", info.model_code.replace('/', "--")))
-                .join("snapshots");
-            let mut files = Vec::new();
-            collect_files(&snapshots, &mut files);
-            files.sort();
-            for f in &files {
-                h.update(
-                    f.strip_prefix(&snapshots)
-                        .unwrap_or(f)
-                        .to_string_lossy()
-                        .as_bytes(),
-                );
-                h.update(std::fs::read(f)?);
+            let long = "memory fingerprint probe sentence ".repeat(80);
+            let probes: Vec<String> = [
+                "mnem fingerprint",
+                "why does the backup restore hang",
+                &long,
+            ]
+            .iter()
+            .map(|p| format!("{}{p}", prefixes.1))
+            .collect();
+            let out = te.embed(&probes, None)?;
+            if out.iter().any(|v| v.is_empty()) {
+                bail!("fastembed model {m} returned empty embeddings");
             }
-            h.update(format!("{MAX_TOKENS}|{}|{}", prefixes.0, prefixes.1).as_bytes());
+            let mut h = Sha256::new();
+            h.update(format!("{}|{}|", prefixes.0, prefixes.1).as_bytes());
+            for v in &out {
+                for x in v {
+                    h.update(((x * 100.0).round() as i32).to_le_bytes());
+                }
+            }
             return Ok(Embedder {
                 backend: Backend::Onnx(Box::new(std::sync::Mutex::new(te))),
                 key: format!("{name}@{}", hex(&h.finalize()[..8])),
@@ -186,18 +190,6 @@ impl Embedder {
 /// Input length for ONNX models, in tokens (memories are embedded from their head).
 #[cfg(feature = "fastembed")]
 const MAX_TOKENS: usize = 256;
-
-#[cfg(feature = "fastembed")]
-fn collect_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let p = e.path();
-        if p.is_dir() {
-            collect_files(&p, out);
-        } else if p.is_file() {
-            out.push(p);
-        }
-    }
-}
 
 /// Query and document prefixes the model was trained with.
 #[cfg(feature = "fastembed")]
