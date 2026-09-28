@@ -152,7 +152,7 @@ pub fn rank(
         if mode == Mode::Vector {
             0.0
         } else {
-            MIN_COSINE
+            fill_cosine()
         },
     )?;
     if mode == Mode::Vector {
@@ -225,7 +225,7 @@ pub fn fill_with_vectors(
     if out.len() >= limit {
         return Ok(());
     }
-    for h in vector_hits(conn, q, project, scope, limit * 2, MIN_COSINE)? {
+    for h in vector_hits(conn, q, project, scope, limit * 2, fill_cosine())? {
         if out.len() >= limit {
             break;
         }
@@ -241,7 +241,8 @@ pub fn fill_with_vectors(
 pub fn gate(conn: &Connection, q: &crate::embed::Query, rows: &mut Vec<Hit>) -> Result<()> {
     let ids: Vec<i64> = rows.iter().map(|h| h.0).collect();
     let cos = crate::embed::cosines(conn, q, &ids)?;
-    rows.retain(|h| cos.get(&h.0).is_none_or(|c| *c >= RELEVANCE_COSINE));
+    let min = relevance_cosine();
+    rows.retain(|h| cos.get(&h.0).is_none_or(|c| *c >= min));
     Ok(())
 }
 
@@ -251,6 +252,41 @@ pub fn gate(conn: &Connection, q: &crate::embed::Query, rows: &mut Vec<Hit>) -> 
 /// (p10): 0.45 cut prompts that recalled something anyway from 9 of 9 to 1, and kept 40
 /// of the 43 targets keywords had found.
 pub const RELEVANCE_COSINE: f32 = 0.45;
+
+/// Thresholds (relevance, fill, search) for models tuned with `mnem eval --dump` on
+/// judged real prompts; cosine scales differ between models. Others use potion-8M's.
+fn model_thresholds() -> (f32, f32, f32) {
+    match crate::embed::model_name().as_str() {
+        // real-dev: gate 0.30 beat potion-8M at 0.45 on both helpful and unhelpful
+        // memories; fill hardly matters; search peaked at 0.35 on the MCP eval.
+        "fastembed:AllMiniLML6V2" => (0.30, 0.50, 0.35),
+        _ => (
+            RELEVANCE_COSINE,
+            MIN_COSINE,
+            crate::search::SOME_WORDS_COSINE,
+        ),
+    }
+}
+
+/// The thresholds in use: config overrides, else the model's defaults.
+pub fn relevance_cosine() -> f32 {
+    crate::config::CONFIG
+        .semantic
+        .relevance_cosine
+        .unwrap_or(model_thresholds().0)
+}
+pub fn fill_cosine() -> f32 {
+    crate::config::CONFIG
+        .semantic
+        .fill_cosine
+        .unwrap_or(model_thresholds().1)
+}
+pub fn search_cosine() -> f32 {
+    crate::config::CONFIG
+        .semantic
+        .search_cosine
+        .unwrap_or(model_thresholds().2)
+}
 
 /// Reciprocal-rank-fusion constant (the usual 60).
 const RRF_K: f64 = 60.0;

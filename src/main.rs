@@ -191,6 +191,9 @@ enum Cmd {
         /// Judge with this one model instead (and report agreement with the default judge)
         #[arg(long)]
         judge_model: Option<String>,
+        /// Write each real prompt's top ten candidates with cosine and judgment (JSONL)
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -201,6 +204,13 @@ enum Cmd {
         probe: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
+        /// Keep vectors of other models (to compare models with `mnem eval`)
+        #[arg(long)]
+        keep: bool,
+        /// First copy this model's vectors from another mnem database where the memory
+        /// text still matches (the rest are embedded as usual)
+        #[arg(long)]
+        import: Option<PathBuf>,
     },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp,
@@ -325,7 +335,12 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp => mcp::serve(&conn)?,
-        Cmd::Embed { probe, limit } => {
+        Cmd::Embed {
+            probe,
+            limit,
+            keep,
+            import,
+        } => {
             let name = mnem::embed::model_name();
             let t = Instant::now();
             mnem::embed::fetch(&name)?;
@@ -345,10 +360,20 @@ fn main() -> Result<()> {
                     t.elapsed().as_micros()
                 );
             }
+            if let Some(from) = import {
+                let (copied, skipped) = mnem::embed::import(&mut conn, &e.key, &from)?;
+                println!(
+                    "imported {copied} vectors ({skipped} skipped: text changed or memory gone)"
+                );
+            }
             let t = Instant::now();
             let n = mnem::embed::backfill(&mut conn, &e, limit)?;
             println!("embedded {n} memories in {:.1}s", t.elapsed().as_secs_f64());
-            let pruned = mnem::embed::prune(&conn, &e)?;
+            let pruned = if keep {
+                0
+            } else {
+                mnem::embed::prune(&conn, &e)?
+            };
             if pruned > 0 {
                 println!("removed {pruned} vectors of other models or revisions");
             }
@@ -394,6 +419,7 @@ fn main() -> Result<()> {
             build_real,
             judge,
             judge_model,
+            dump,
         } => {
             if let Some(n) = build_real {
                 let (dev, test) = mnem::eval::build_real(&conn, n)?;
@@ -432,7 +458,7 @@ fn main() -> Result<()> {
                 println!("built {written} questions in {}", path.display());
             }
             let judge_with = judge_model.as_deref().or(judge.then_some("chain"));
-            let r = mnem::eval::run(&conn, &path, mode, judge_with)?;
+            let r = mnem::eval::run(&conn, &path, mode, judge_with, dump.as_deref())?;
             if r.judged.prompts > 0 {
                 let j = &r.judged;
                 println!(

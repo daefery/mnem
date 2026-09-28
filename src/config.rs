@@ -36,6 +36,13 @@ pub struct SemanticConfig {
     pub model: Option<String>,
     /// Set false to use keyword recall only.
     pub enabled: Option<bool>,
+    /// Similarity thresholds depend on the model; defaults suit potion-base-8M.
+    /// Prompt recall drops keyword hits below this cosine (default 0.45).
+    pub relevance_cosine: Option<f32>,
+    /// Meaning-only matches must reach this to fill a slot (default 0.55).
+    pub fill_cosine: Option<f32>,
+    /// Search drops any-word matches below this (default 0.35).
+    pub search_cosine: Option<f32>,
 }
 
 /// Background distillation through any OpenAI-compatible endpoint.

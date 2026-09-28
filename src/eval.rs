@@ -365,6 +365,39 @@ pub fn agreement(a: &str, b: &str) -> (usize, usize, f64) {
     )
 }
 
+/// Cosine of each memory's text, embedded now with `e`, to the query.
+fn candidate_cosines(
+    conn: &Connection,
+    e: &crate::embed::Embedder,
+    q: &crate::embed::Query,
+    ids: &[i64],
+) -> Result<Vec<Option<f32>>> {
+    let mut texts = Vec::new();
+    for id in ids {
+        texts.push(conn.query_row(
+            "SELECT coalesce(title, ''), coalesce(subtitle, ''), coalesce(narrative, ''), coalesce(facts, '[]') FROM memories WHERE id = ?1",
+            [id],
+            |r| {
+                Ok(crate::embed::memory_text(
+                    &r.get::<_, String>(0)?,
+                    &r.get::<_, String>(1)?,
+                    &r.get::<_, String>(2)?,
+                    &r.get::<_, String>(3)?,
+                ))
+            },
+        )?);
+    }
+    let norm = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+    let qn = norm(&q.vec);
+    Ok(e.embed(&texts)
+        .iter()
+        .map(|v| {
+            (v.len() == q.vec.len())
+                .then(|| v.iter().zip(&q.vec).map(|(a, b)| a * b).sum::<f32>() / (norm(v) * qn))
+        })
+        .collect())
+}
+
 /// 95% Wilson interval for k successes out of n.
 pub fn wilson(k: usize, n: usize) -> (f64, f64) {
     if n == 0 {
@@ -414,12 +447,17 @@ pub struct Report {
 
 /// `judge`: None, or the judge to use: "chain" (the configured distillation models) or
 /// one model name.
+/// `dump`: also write, per real prompt, its top ten candidates with their cosine to
+/// the prompt under the configured model (embedded now, not read from the index) and
+/// their judgment, so thresholds and models can be compared offline.
 pub fn run(
     conn: &Connection,
     path: &Path,
     mode: recall::Mode,
     judge_with: Option<&str>,
+    dump: Option<&Path>,
 ) -> Result<Report> {
+    let mut dump = dump.map(std::fs::File::create).transpose()?;
     let llm = match judge_with {
         Some(j) => {
             let l = Llm::from_config()?;
@@ -482,6 +520,38 @@ pub fn run(
         times.push(t.elapsed().as_secs_f64() * 1000.0);
         let targets: Vec<i64> = c.id.into_iter().chain(c.ids.iter().copied()).collect();
         if c.open {
+            if let Some(out) = dump.as_mut() {
+                let cands: Vec<i64> = ranked.iter().take(10).map(|r| r.0).collect();
+                let marks = match &llm {
+                    Some(llm) if !cands.is_empty() => judge(
+                        conn,
+                        llm,
+                        &llm.identity(),
+                        &mut cache,
+                        &c.project,
+                        &c.question,
+                        &cands,
+                    )?,
+                    _ => None,
+                };
+                let cos = match (&embedder, &query) {
+                    (Some(e), Some(q)) => candidate_cosines(conn, e, q, &cands)?,
+                    _ => vec![None; cands.len()],
+                };
+                let rows: Vec<Value> = cands
+                    .iter()
+                    .enumerate()
+                    .map(|(i, id)| {
+                        json!({ "id": id, "rank": i, "cos": cos[i],
+                                "relevant": marks.as_ref().map(|m| m[i]) })
+                    })
+                    .collect();
+                writeln!(
+                    out,
+                    "{}",
+                    json!({ "q": question_key(&c.question), "project": c.project, "cands": rows })
+                )?;
+            }
             let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
             judged.prompts += 1;
             judged.shown += top.len();

@@ -81,14 +81,15 @@ pub fn rank_memories(
         // that are also close in meaning (every-word matches are kept as they are).
         if let Some(q) = vq {
             let cos = crate::embed::cosines(conn, q, &some)?;
-            some.retain(|id| cos.get(id).is_none_or(|c| *c >= SOME_WORDS_COSINE));
+            let min = crate::recall::search_cosine();
+            some.retain(|id| cos.get(id).is_none_or(|c| *c >= min));
         }
         words.extend(some.into_iter().take(POOL - words.len()));
     }
     let meaning: Vec<i64> = match vq {
         Some(q) => crate::embed::search_where(conn, q, filter, args(), POOL)?
             .into_iter()
-            .take_while(|(_, cos)| *cos >= crate::recall::MIN_COSINE)
+            .take_while(|(_, cos)| *cos >= crate::recall::fill_cosine())
             .map(|(id, _)| id)
             .collect(),
         None => vec![],

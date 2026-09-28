@@ -74,6 +74,8 @@ enum Backend {
 
 pub struct Embedder {
     backend: Backend,
+    /// Text some models expect before a query and before a document.
+    prefixes: (&'static str, &'static str),
     pub name: String,
     /// What vectors and queries are keyed by: the model name plus a fingerprint of its
     /// files, so vectors from another download of the same name are never compared.
@@ -87,19 +89,23 @@ impl Embedder {
         let name = model_name();
         #[cfg(feature = "fastembed")]
         if let Some(m) = name.strip_prefix("fastembed:") {
-            let model = match m {
-                "bge-small-en-v1.5" => fastembed::EmbeddingModel::BGESmallENV15,
-                "bge-small-en-v1.5-q" => fastembed::EmbeddingModel::BGESmallENV15Q,
-                "all-MiniLM-L6-v2" => fastembed::EmbeddingModel::AllMiniLML6V2,
-                other => bail!("unknown fastembed model {other}"),
-            };
-            let opts = fastembed::TextInitOptions::new(model)
+            // Any model fastembed lists, by its Hugging Face code or enum name.
+            let info = fastembed::TextEmbedding::list_supported_models()
+                .into_iter()
+                .find(|i| {
+                    i.model_code.eq_ignore_ascii_case(m)
+                        || format!("{:?}", i.model).eq_ignore_ascii_case(m)
+                })
+                .with_context(|| format!("unknown fastembed model {m}"))?;
+            let opts = fastembed::TextInitOptions::new(info.model.clone())
                 .with_cache_dir(db::data_dir().join("models").join("fastembed"))
+                .with_max_length(256)
                 .with_show_download_progress(false);
             let te = fastembed::TextEmbedding::try_new(opts)?;
             return Ok(Embedder {
                 backend: Backend::Onnx(std::sync::Mutex::new(te)),
                 key: format!("{name}@fastembed-{}", env!("CARGO_PKG_VERSION")),
+                prefixes: prefixes(m),
                 name,
             });
         }
@@ -114,12 +120,25 @@ impl Embedder {
         }
         Ok(Embedder {
             backend: Backend::Static(model),
+            prefixes: ("", ""),
             key: format!("{name}@{}", hex(&h.finalize()[..8])),
             name,
         })
     }
 
+    /// Embed documents (memories).
     pub fn embed(&self, texts: &[String]) -> Vec<Vec<f32>> {
+        if self.prefixes.1.is_empty() {
+            return self.embed_raw(texts);
+        }
+        let texts: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{}{t}", self.prefixes.1))
+            .collect();
+        self.embed_raw(&texts)
+    }
+
+    fn embed_raw(&self, texts: &[String]) -> Vec<Vec<f32>> {
         match &self.backend {
             Backend::Static(m) => m.encode_with_args(texts, Some(256), 512),
             #[cfg(feature = "fastembed")]
@@ -128,6 +147,24 @@ impl Embedder {
                 .map(|mut m| m.embed(texts, Some(64)).unwrap_or_default())
                 .unwrap_or_default(),
         }
+    }
+}
+
+/// Query and document prefixes the model was trained with.
+#[cfg(feature = "fastembed")]
+fn prefixes(model: &str) -> (&'static str, &'static str) {
+    let m = model.to_lowercase();
+    if m.contains("e5") {
+        ("query: ", "passage: ")
+    } else if m.contains("nomic") {
+        ("search_query: ", "search_document: ")
+    } else if m.contains("arctic") || m.contains("bge") && m.contains("en") {
+        (
+            "Represent this sentence for searching relevant passages: ",
+            "",
+        )
+    } else {
+        ("", "")
     }
 }
 
@@ -214,6 +251,43 @@ pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Re
     Ok(done)
 }
 
+/// Copy this model's vectors from another mnem database (for example one where a model
+/// was tried out), keeping only those whose memory text here still hashes the same.
+/// Returns (copied, skipped).
+pub fn import(conn: &mut Connection, key: &str, from: &std::path::Path) -> Result<(usize, usize)> {
+    let src = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut st = src.prepare(
+        "SELECT memory_id, dim, scale, vec, text_hash FROM memory_vectors WHERE model = ?1 AND text_hash IS NOT NULL",
+    )?;
+    let rows: Vec<(i64, i64, f32, Vec<u8>, String)> = st
+        .query_map([key], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let (mut copied, mut skipped) = (0, 0);
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    {
+        let mut cur = tx.prepare_cached(&format!(
+            "SELECT {MEMORY_TEXT_COLS} FROM memories m WHERE m.id = ?1 AND m.kind != 'pinned'"
+        ))?;
+        let mut ins = tx.prepare_cached(
+            "INSERT OR REPLACE INTO memory_vectors(memory_id, model, dim, scale, vec, text_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for (id, dim, scale, vec, hash) in rows {
+            let now: Option<String> = cur.query_row([id], |r| text_from_row(r, 0)).optional()?;
+            if now.as_deref().map(text_hash).as_deref() == Some(hash.as_str()) {
+                ins.execute(params![id, key, dim, scale, vec, hash])?;
+                copied += 1;
+            } else {
+                skipped += 1;
+            }
+        }
+    }
+    tx.commit()?;
+    Ok((copied, skipped))
+}
+
 /// Delete vectors of every other model or model revision. Only `mnem embed` calls this:
 /// the long-running service never deletes, so a process still holding an older model
 /// cannot remove vectors a newer one wrote.
@@ -265,7 +339,10 @@ impl Embedder {
     pub fn query(&self, text: &str) -> Query {
         Query {
             model: self.key.clone(),
-            vec: self.embed(&[text.to_string()]).pop().unwrap_or_default(),
+            vec: self
+                .embed_raw(&[format!("{}{text}", self.prefixes.0)])
+                .pop()
+                .unwrap_or_default(),
         }
     }
 }
@@ -521,5 +598,52 @@ mod tests {
             .unwrap();
             assert_eq!(service_port(&conn), None, "stale record from a dead watch");
         }
+    }
+
+    #[test]
+    fn import_skips_vectors_of_changed_text() {
+        let dir = std::env::temp_dir().join(format!("mnem-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let open = |name: &str| {
+            let p = dir.join(name);
+            let _ = std::fs::remove_file(&p);
+            (db::open_with(&p, Duration::from_secs(1)).unwrap(), p)
+        };
+        let seed = |c: &Connection| {
+            for id in [1, 2, 3] {
+                c.execute(
+                    "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'mnem', ?1, 0)",
+                    params![id, format!("title {id}")],
+                )
+                .unwrap();
+            }
+        };
+        let (mut src, src_path) = open("src.db");
+        seed(&src);
+        let read: Vec<(i64, String)> = [1, 2, 3]
+            .iter()
+            .map(|id| (*id, memory_text(&format!("title {id}"), "", "n", "[]")))
+            .collect();
+        assert_eq!(
+            store(&mut src, "m", &read, vec![vec![0.5; 4]; 3]).unwrap(),
+            3
+        );
+        drop(src);
+        let (mut dst, _) = open("dst.db");
+        seed(&dst);
+        dst.execute("UPDATE memories SET title = 'edited' WHERE id = 2", [])
+            .unwrap();
+        dst.execute("DELETE FROM memories WHERE id = 3", [])
+            .unwrap();
+        assert_eq!(import(&mut dst, "m", &src_path).unwrap(), (1, 2));
+        let n: i64 = dst
+            .query_row(
+                "SELECT count(*) FROM memory_vectors WHERE memory_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

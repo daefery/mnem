@@ -55,11 +55,18 @@ something since, a short "meanwhile" update.
   hooks ask it for query vectors over localhost and fall back to keywords if it is down.
   Prompt recall leaves out memories from the asking session (the agent has that
   conversation already), keeps keyword order, drops keyword hits that are far from the
-  prompt in meaning (cosine below 0.45), and lets meaning-based matches fill empty
-  slots. On 90 held-out real prompts, judged by two models from different families,
-  that showed 50-58% fewer unhelpful memories than keywords alone for 22-26% fewer
-  helpful ones (61% of memories shown helped instead of 45% by one judge, 41% instead
-  of 33% by the stricter one).
+  prompt in meaning, and lets meaning-based matches fill empty slots.
+  Better: `fastembed:AllMiniLML6V2` (build with `--features fastembed`; ONNX, 46 MB
+  binary, ~30 memories/s to embed, 14 ms per query in the service). Screened against
+  six other models on judged real prompts, it separated helpful from unhelpful
+  memories best (AUC 0.73 against 0.66 for potion-8M), and on 90 held-out real prompts
+  it showed more helpful memories (179 vs 149 by gpt-5.6-luna, 141 vs 100 by
+  claude-haiku-4-5) without more unhelpful ones. `mnem embed --import <db>` reuses
+  vectors computed in another copy of the database when the memory text still matches.
+- `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
+  They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
+  and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge
+  --dump <file>`, which writes each candidate's cosine and judgment.
 - `mnem eval`: measures recall on test sets in `~/.mnem/eval/` (private; they hold
   your prompts). `--set recall` (model-written questions, `--build N`), `--set vague`
   (hand-written, `"id": null` for prompts nothing should answer), `--set real-dev` /
