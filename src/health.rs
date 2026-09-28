@@ -93,6 +93,23 @@ fn cheap(conn: &Connection) -> Vec<String> {
         _ => {}
     }
 
+    // Distillation: sessions about to leave the backfill window undistilled are lost to
+    // recall (their transcript stays, but no memory is ever made from it).
+    if let Ok(b) = distill::backlog(conn) {
+        if b.falling_behind() {
+            out.push(format!(
+                "{} session(s) will leave the distillation window undistilled within a day (backfill is not keeping up; see mnem doctor): run `mnem distill --oldest-first --since-days {} --limit 1000` or raise distill.daily_calls",
+                b.at_risk, b.days
+            ));
+        }
+        if b.expired > 0 {
+            out.push(format!(
+                "{} session(s) aged out of distillation undistilled: no memories were made from them (run `mnem distill --aged-out --limit {}`)",
+                b.expired, b.expired
+            ));
+        }
+    }
+
     // Distillation: every configured model cooling down means summaries have stopped.
     let cooling: HashMap<String, i64> = conn
         .query_row(

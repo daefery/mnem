@@ -131,7 +131,10 @@ CREATE TABLE IF NOT EXISTS distill_state(
   session_id TEXT PRIMARY KEY,
   through INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER,
-  error TEXT
+  error TEXT,
+  -- A too-small final chunk left alone after a day idle: not pending any more, but
+  -- still read (from `through`) if the session resumes.
+  settled INTEGER NOT NULL DEFAULT 0
 );
 
 -- What each session has already been shown of each other session (cross-agent delta).
@@ -235,6 +238,16 @@ CREATE TABLE IF NOT EXISTS hook_runs(
 );
 CREATE INDEX IF NOT EXISTS hook_runs_at ON hook_runs(at);
 
+-- Every digest sent to the model chain, for the watcher's daily budget and doctor.
+CREATE TABLE IF NOT EXISTS distill_calls(
+  at INTEGER NOT NULL,
+  source TEXT NOT NULL,              -- session (Stop hook), watch, backfill, manual
+  model TEXT,
+  ok INTEGER NOT NULL,
+  requests INTEGER NOT NULL DEFAULT 1 -- HTTP requests it took, fallbacks included
+);
+CREATE INDEX IF NOT EXISTS distill_calls_at ON distill_calls(at);
+
 -- Files a session has already been offered memories about (once per file).
 CREATE TABLE IF NOT EXISTS file_seen(
   session_id TEXT NOT NULL,
@@ -280,7 +293,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 18;
+pub const SCHEMA_VERSION: i64 = 20;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -376,6 +389,8 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("events", "label", "TEXT"),
         ("events", "tool_raw", "TEXT"),
         ("memory_vectors", "text_hash", "TEXT"),
+        ("distill_state", "settled", "INTEGER NOT NULL DEFAULT 0"),
+        ("distill_calls", "requests", "INTEGER NOT NULL DEFAULT 1"),
     ] {
         let has: bool = conn.query_row(
             &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name = ?1"),

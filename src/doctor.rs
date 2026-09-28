@@ -164,6 +164,26 @@ pub fn run(conn: &Connection) -> Result<bool> {
             "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
         );
     }
+    if let Ok(b) = crate::distill::backlog(conn) {
+        let backfill = match b.since {
+            _ if b.budget == 0 => "backfill off (distill.daily_calls = 0)".to_string(),
+            Some(_) => format!("backfill covers the last {} days", b.days),
+            None => "backfill starts when mnem-watch runs".to_string(),
+        };
+        println!(
+            "distill: {} pending · {} of {} requests used in 24 h · {backfill}",
+            b.pending, b.requests_day, b.budget
+        );
+        if b.before_backfill > 0 {
+            println!(
+                "  {} session(s) of the last 30 days were never distilled (from before backfill)",
+                b.before_backfill
+            );
+            println!(
+                "  catch up, newest first: mnem distill --since-days 30 --limit 1000 --max-calls 200 (repeat until done; add --dry-run to see the cost)"
+            );
+        }
+    }
     if let Ok(u) = crate::uptake::report(conn, 7)
         && u.since.is_some()
     {

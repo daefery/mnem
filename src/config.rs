@@ -65,6 +65,11 @@ pub struct DistillConfig {
     pub api_key_field: Option<String>,
     /// Distil automatically after each agent turn (Stop hook). Default true.
     pub on_stop: Option<bool>,
+    /// The watcher also distils sessions it missed, oldest first, up to this many days
+    /// back. Default 7.
+    pub backfill_days: Option<i64>,
+    /// At most this many backfill calls per 24 hours. Default 300; 0 turns backfill off.
+    pub daily_calls: Option<usize>,
     /// Never use models from these providers (the endpoint's `owned_by`, e.g. "antigravity").
     #[serde(default)]
     pub exclude_providers: Vec<String>,

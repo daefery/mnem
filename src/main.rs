@@ -130,6 +130,19 @@ enum Cmd {
         /// Include sessions active in the last two minutes
         #[arg(long)]
         active: bool,
+        /// Oldest sessions first (catching up a backlog)
+        #[arg(long)]
+        oldest_first: bool,
+        /// The sessions that aged out of backfill undistilled: oldest first from where
+        /// backfill started (overrides --since-days and --oldest-first)
+        #[arg(long)]
+        aged_out: bool,
+        /// Stop after this many digests are sent (a bounded catch-up batch)
+        #[arg(long)]
+        max_calls: Option<usize>,
+        /// With --dry-run, print each digest that would be sent
+        #[arg(long)]
+        verbose: bool,
         #[arg(long)]
         quiet: bool,
     },
@@ -826,7 +839,30 @@ fn main() -> Result<()> {
                     }
                 });
             }
-            let mut last_distill = Instant::now();
+            // Distillation waits on model calls (minutes, with fallbacks), so it runs on
+            // its own thread and connection and never holds up transcript capture. The
+            // next pass starts `distill_every` after the last one ends.
+            if distill_every > 0 {
+                let distill_path = path.clone();
+                std::thread::spawn(move || {
+                    let pause = std::time::Duration::from_secs(distill_every);
+                    let mut conn = loop {
+                        match db::open(&distill_path) {
+                            Ok(c) => break c,
+                            Err(e) => hook::log(&format!("watch distill: {e:#}")),
+                        }
+                        std::thread::sleep(pause);
+                    };
+                    // Recorded even with backfill off, so doctor can tell what ages out.
+                    if let Err(e) = distill::backfill_since(&conn) {
+                        hook::log(&format!("watch distill (backfill): {e:#}"));
+                    }
+                    loop {
+                        std::thread::sleep(pause);
+                        distill::watch_pass(&mut conn);
+                    }
+                });
+            }
             loop {
                 let sources = ingest::discover();
                 match ingest::sweep(&mut conn, sources.clone()) {
@@ -867,26 +903,6 @@ fn main() -> Result<()> {
                         Err(e) => hook::log(&format!("watch backup FAILED: {e:#}")),
                     }
                 }
-                if distill_every > 0 && last_distill.elapsed().as_secs() >= distill_every {
-                    last_distill = Instant::now();
-                    let o = distill::Options {
-                        session: None,
-                        since_days: 2,
-                        limit: 5,
-                        dry_run: false,
-                        include_active: false,
-                    };
-                    match distill::run(&mut conn, &o) {
-                        Ok(s) if s.calls > 0 || !s.errors.is_empty() => hook::log(&format!(
-                            "watch distill: {} calls, {} observations, {} errors",
-                            s.calls,
-                            s.observations,
-                            s.errors.len()
-                        )),
-                        Ok(_) => {}
-                        Err(e) => hook::log(&format!("watch distill: {e:#}")),
-                    }
-                }
                 std::thread::sleep(std::time::Duration::from_secs(interval.max(5)));
             }
         }
@@ -896,20 +912,54 @@ fn main() -> Result<()> {
             limit,
             dry_run,
             active,
+            oldest_first,
+            aged_out,
+            max_calls,
+            verbose,
             quiet,
         } => {
+            let not_before = if aged_out {
+                Some(anyhow::Context::context(
+                    distill::backfill_start(&conn),
+                    "backfill has not started yet",
+                )?)
+            } else {
+                None
+            };
             let t = Instant::now();
             let s = distill::run(
                 &mut conn,
                 &distill::Options {
+                    source: if session.is_some() {
+                        "session"
+                    } else {
+                        "manual"
+                    },
                     session,
-                    since_days,
-                    limit,
                     dry_run,
                     include_active: active,
+                    oldest_first: oldest_first || aged_out,
+                    not_before,
+                    max_calls,
+                    verbose,
+                    ..distill::Options::new(
+                        "manual",
+                        not_before.map_or(since_days, |t| {
+                            (db::now_ms() - t).div_euclid(86_400_000) + 1
+                        }),
+                        limit,
+                    )
                 },
             )?;
-            if !quiet {
+            if dry_run {
+                println!(
+                    "distill (dry run): {} sessions, {} calls would be sent (~{}k input tokens), {} waiting for more work",
+                    s.sessions,
+                    s.would_call,
+                    s.would_chars / 4000,
+                    s.skipped_small
+                );
+            } else if !quiet {
                 println!(
                     "distill: {} sessions, {} calls, {} observations, {} summaries, {} waiting for more work, models {:?}, {:.1}s",
                     s.sessions,
