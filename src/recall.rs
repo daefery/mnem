@@ -30,6 +30,19 @@ const STOP: &[&str] = &[
 ];
 
 /// Search terms from a prompt: distinctive words and file-ish tokens, longest first.
+/// FTS query matching memories with any of the text's meaningful words (None when
+/// fewer than two): the fallback when a plain-language search matches no memory whole.
+pub fn any_terms_query(text: &str) -> Option<String> {
+    let terms = terms(text);
+    (terms.len() >= 2).then(|| {
+        terms
+            .iter()
+            .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    })
+}
+
 pub fn terms(prompt: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in prompt.split(|c: char| c.is_whitespace() || ",;:()[]{}\"'`<>!?".contains(c)) {
@@ -65,7 +78,7 @@ pub enum Mode {
     Fill,
 }
 
-fn semantic_enabled() -> bool {
+pub fn semantic_enabled() -> bool {
     crate::config::CONFIG.semantic.enabled != Some(false)
 }
 
@@ -121,18 +134,33 @@ pub fn rank(
         return Ok(vector.into_iter().take(limit).collect());
     }
     let keyword = keyword_rank(conn, project, prompt, exclude_session, pool)?;
-    let mut fused: Vec<(f64, Hit)> = Vec::new();
-    for (list, weight) in [(&keyword, 1.0), (&vector, VECTOR_WEIGHT)] {
-        for (r, h) in list.iter().enumerate() {
+    let ids = fuse(
+        &keyword.iter().map(|h| h.0).collect::<Vec<_>>(),
+        &vector.iter().map(|h| h.0).collect::<Vec<_>>(),
+        VECTOR_WEIGHT,
+    );
+    Ok(ids
+        .into_iter()
+        .take(limit)
+        .filter_map(|id| keyword.iter().chain(&vector).find(|h| h.0 == id).cloned())
+        .collect())
+}
+
+/// Reciprocal rank fusion of a keyword ranking and a vector ranking, best first. With
+/// a weight below 1 the vector list mostly reorders keyword hits and fills in after them.
+pub fn fuse(keyword: &[i64], vector: &[i64], vector_weight: f64) -> Vec<i64> {
+    let mut fused: Vec<(f64, i64)> = Vec::new();
+    for (list, weight) in [(keyword, 1.0), (vector, vector_weight)] {
+        for (r, id) in list.iter().enumerate() {
             let score = weight / (RRF_K + r as f64 + 1.0);
-            match fused.iter_mut().find(|(_, x)| x.0 == h.0) {
+            match fused.iter_mut().find(|(_, x)| x == id) {
                 Some((s, _)) => *s += score,
-                None => fused.push((score, h.clone())),
+                None => fused.push((score, *id)),
             }
         }
     }
     fused.sort_by(|a, b| b.0.total_cmp(&a.0));
-    Ok(fused.into_iter().take(limit).map(|(_, h)| h).collect())
+    fused.into_iter().map(|(_, id)| id).collect()
 }
 
 /// Vector hits above `min_cos`, with the fields recall shows.
@@ -185,11 +213,15 @@ pub fn fill_with_vectors(
 const RRF_K: f64 = 60.0;
 /// Weight of the vector list relative to keywords in hybrid fusion (best in `mnem eval`).
 const VECTOR_WEIGHT: f64 = 0.5;
+/// The same for explicit search (MCP `search`, viewer): on the eval questions sent
+/// through MCP search, 0.2 beat keywords alone at hit@1 (62% vs 52%) without losing any
+/// target from the top 5 or 20; 0.5 and above pushed targets out of the top 5.
+pub const SEARCH_VECTOR_WEIGHT: f64 = 0.2;
 /// Vector hits below this cosine similarity are not offered. With potion-base-8M, true
 /// targets and the best wrong candidate have nearly the same cosine distribution
 /// (median 0.63 each, `mnem eval --cosines`), so vectors only fill slots; 0.55 (about
 /// the 10th percentile of true targets) trims the weakest filler.
-const MIN_COSINE: f32 = 0.55;
+pub const MIN_COSINE: f32 = 0.55;
 
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
 /// Keyword ranking: memory ids in `project` for `prompt`, best first; `exclude_session`

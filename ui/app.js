@@ -207,6 +207,17 @@
       const extra = state.before !== null ? { before: state.before } : {};
       const data = await getJSON(`/api/feed?${params(extra)}`);
       if (gen !== state.generation) return;
+      // First page of a search: the most relevant memories (keywords and meaning), then
+      // the remaining matches newest first.
+      if (data.best && data.best.length) {
+        feedContent.insertBefore(el("div", { class: "mnem-section" }, "Best matches"), sentinel);
+        for (const it of data.best) {
+          state.keys.add(keyOf(it));
+          state.items.push(it);
+          feedContent.insertBefore(cardFor(it), sentinel);
+        }
+        feedContent.insertBefore(el("div", { class: "mnem-section" }, "Other matches, newest first"), sentinel);
+      }
       for (const it of data.items) {
         const k = keyOf(it);
         if (state.keys.has(k)) continue;

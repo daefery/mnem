@@ -177,7 +177,7 @@ fn tools() -> Value {
             "name": "search",
             "description": "Step 1: Search memory. Returns an index with ids. Params: query, limit, project, platformSource, type, obs_type, dateStart, dateEnd, offset, orderBy",
             "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "Search query (empty: most recent)" },
+                "query": { "type": "string", "description": "Words or a plain-language question (empty: most recent). Relevance order also matches meaning when mnem-watch runs" },
                 "limit": { "type": "number", "description": "Max results (default 20)" },
                 "project": { "type": "string", "description": "Filter by project (substring, e.g. repo name)" },
                 "platformSource": { "type": "string", "description": "Filter by agent: claude, codex or pi" },
@@ -321,7 +321,8 @@ struct Filters {
 }
 
 fn search(conn: &Connection, a: &Value) -> Result<String> {
-    let q = str_arg(a, "query").map(fts_query).unwrap_or_default();
+    let raw = str_arg(a, "query").unwrap_or_default().trim();
+    let q = fts_query(raw);
     let limit = num_arg(a, "limit", 20).clamp(1, 200);
     let offset = num_arg(a, "offset", 0).max(0);
     let f = Filters {
@@ -359,8 +360,21 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
             Some("observations") => Some("observation"),
             _ => None,
         };
+        // Relevance order also asks the watch service for a query vector, so memories
+        // that mean the same thing in other words rank too (keyword search otherwise).
+        let vq = (order == "relevance" && !raw.is_empty() && crate::recall::semantic_enabled())
+            .then(|| crate::embed::query_from_service(conn, raw))
+            .flatten();
         out.extend(search_memories(
-            conn, &q, &f, mem_kind, &obs_types, order, limit, offset,
+            conn,
+            raw,
+            vq.as_ref(),
+            &f,
+            mem_kind,
+            &obs_types,
+            order,
+            limit,
+            offset,
         )?);
     }
     if want_ev {
@@ -391,7 +405,8 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
 #[allow(clippy::too_many_arguments)]
 fn search_memories(
     conn: &Connection,
-    q: &str,
+    raw: &str,
+    vq: Option<&crate::embed::Query>,
     f: &Filters,
     kind: Option<&str>,
     types: &[String],
@@ -399,71 +414,125 @@ fn search_memories(
     limit: i64,
     offset: i64,
 ) -> Result<Vec<String>> {
-    let mut sql = String::from(
-        "SELECT m.id, m.kind, coalesce(m.type, ''), coalesce(m.title, ''), coalesce(m.created_at, 0), coalesce(m.project, '')
-         FROM memories m",
-    );
-    let mut args: Vec<Box<dyn ToSql>> = Vec::new();
-    let mut wh: Vec<String> = Vec::new();
-    if !q.is_empty() {
-        sql.push_str(" JOIN memories_fts ON memories_fts.rowid = m.id");
-        wh.push("memories_fts MATCH ?".into());
-        args.push(Box::new(q.to_string()));
-    }
-    push_common(
-        &mut wh,
-        &mut args,
-        f,
-        "m.project",
-        "m.created_at",
-        "m.session_id",
-    );
-    if let Some(k) = kind {
-        wh.push("m.kind = ?".into());
-        args.push(Box::new(k.to_string()));
-    }
-    if !types.is_empty() {
-        wh.push(format!("m.type IN ({})", vec!["?"; types.len()].join(",")));
-        for t in types {
-            args.push(Box::new(t.clone()));
-        }
-    }
-    if !wh.is_empty() {
-        sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
-    }
-    sql.push_str(match (order, q.is_empty()) {
-        ("date_asc", _) => " ORDER BY m.created_at ASC",
-        ("date_desc", _) | (_, true) => " ORDER BY m.created_at DESC",
-        _ => {
-            " ORDER BY bm25(memories_fts) + (strftime('%s','now') * 1000 - m.created_at) / 2.592e9"
-        }
-    });
-    sql.push_str(" LIMIT ? OFFSET ?");
-    args.push(Box::new(limit));
-    args.push(Box::new(offset));
-    let mut st = conn.prepare(&sql)?;
-    let rows = st.query_map(params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
-        let (id, kind, ty, title, at, project): (i64, String, String, String, i64, String) = (
-            r.get(0)?,
-            r.get(1)?,
-            r.get(2)?,
-            r.get(3)?,
-            r.get(4)?,
-            r.get(5)?,
+    let q = fts_query(raw);
+    // Filters shared by the keyword and the vector ranking.
+    let filters = || {
+        let mut wh: Vec<String> = Vec::new();
+        let mut args: Vec<Box<dyn ToSql>> = Vec::new();
+        push_common(
+            &mut wh,
+            &mut args,
+            f,
+            "m.project",
+            "m.created_at",
+            "m.session_id",
         );
+        if let Some(k) = kind {
+            wh.push("m.kind = ?".into());
+            args.push(Box::new(k.to_string()));
+        }
+        if !types.is_empty() {
+            wh.push(format!("m.type IN ({})", vec!["?"; types.len()].join(",")));
+            for t in types {
+                args.push(Box::new(t.clone()));
+            }
+        }
+        (wh, args)
+    };
+    let keyword = |fq: &str, lim: i64, off: i64| -> Result<Vec<i64>> {
+        let (mut wh, mut args) = filters();
+        let mut sql = String::from("SELECT m.id FROM memories m");
+        if !fq.is_empty() {
+            sql.push_str(" JOIN memories_fts ON memories_fts.rowid = m.id");
+            wh.insert(0, "memories_fts MATCH ?".into());
+            args.insert(0, Box::new(fq.to_string()));
+        }
+        if !wh.is_empty() {
+            sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
+        }
+        sql.push_str(match (order, fq.is_empty()) {
+            ("date_asc", _) => " ORDER BY m.created_at ASC",
+            ("date_desc", _) | (_, true) => " ORDER BY m.created_at DESC",
+            _ => {
+                " ORDER BY bm25(memories_fts) + (strftime('%s','now') * 1000 - m.created_at) / 2.592e9"
+            }
+        });
+        sql.push_str(" LIMIT ? OFFSET ?");
+        args.push(Box::new(lim));
+        args.push(Box::new(off));
+        let mut st = conn.prepare(&sql)?;
+        let ids = st
+            .query_map(params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
+                r.get(0)
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    };
+    if order != "relevance" || q.is_empty() {
+        let ids = keyword(&q, limit, offset)?;
+        return memory_lines(conn, ids);
+    }
+    // Relevance: memories with every word first, then ones with some of the words (a
+    // question in plain language rarely matches every word), fused with the meaning-based
+    // ranking when a query vector is available; the page is cut from that order.
+    let pool = ((offset + limit).max(50) * 2).min(1000);
+    let mut ids = keyword(&q, pool, 0)?;
+    if (ids.len() as i64) < pool
+        && let Some(any) = crate::recall::any_terms_query(raw)
+    {
+        for id in keyword(&any, pool, 0)? {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    if let Some(vq) = vq {
+        let (wh, args) = filters();
+        let filter = if wh.is_empty() {
+            "1".to_string()
+        } else {
+            wh.join(" AND ")
+        };
+        let vector: Vec<i64> = crate::embed::search_where(conn, vq, &filter, args, pool as usize)?
+            .into_iter()
+            .take_while(|(_, cos)| *cos >= crate::recall::MIN_COSINE)
+            .map(|(id, _)| id)
+            .collect();
+        ids = crate::recall::fuse(&ids, &vector, crate::recall::SEARCH_VECTOR_WEIGHT);
+    }
+    let page = ids
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
+    memory_lines(conn, page)
+}
+
+/// Index lines for memory ids, in order.
+fn memory_lines(conn: &Connection, ids: Vec<i64>) -> Result<Vec<String>> {
+    let mut line = conn.prepare_cached(
+        "SELECT m.kind, coalesce(m.type, ''), coalesce(m.title, ''), coalesce(m.created_at, 0), coalesce(m.project, '')
+         FROM memories m WHERE m.id = ?1",
+    )?;
+    let mut out = Vec::new();
+    for id in ids {
+        let (kind, ty, title, at, project): (String, String, String, i64, String) = line
+            .query_row([id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?;
         let label = if kind == "summary" {
             "summary".to_string()
         } else {
             ty
         };
-        Ok(format!(
+        out.push(format!(
             "#{id} [{label}] {} · {} · {}",
             day(at),
             short(&project),
             text::head(&title, 140)
-        ))
-    })?;
-    Ok(rows.collect::<rusqlite::Result<_>>()?)
+        ));
+    }
+    Ok(out)
 }
 
 fn search_events(
@@ -584,7 +653,8 @@ fn timeline(conn: &Connection, a: &Value) -> Result<String> {
             let q = str_arg(a, "query").ok_or_else(|| anyhow::anyhow!("pass anchor or query"))?;
             let hit = search_memories(
                 conn,
-                &fts_query(q),
+                q,
+                None,
                 &Filters {
                     project: str_arg(a, "project").map(str::to_string),
                     agent: None,
@@ -925,6 +995,39 @@ mod tests {
         assert_eq!(r["error"]["code"], -32602);
         let r = handle(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"query":"x","limit":-1}}}"#).unwrap();
         assert_eq!(r["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn plain_language_search_finds_partial_matches() {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        for (id, title) in [
+            (1, "Webhook retries fail while port 3003 is taken"),
+            (2, "Deploy notes for the staging cluster"),
+        ] {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'mnem', ?1, 0)",
+                rusqlite::params![id, title],
+            )
+            .unwrap();
+        }
+        let ask = |q: &str| {
+            super::call(
+                &c,
+                "search",
+                &serde_json::json!({ "query": q, "type": "observations" }),
+            )
+            .unwrap()
+        };
+        // Not every word of a question appears in the memory; it must still be found.
+        let r = ask("why do my webhook retries keep failing");
+        assert!(r.starts_with("#1 "), "{r}");
+        assert!(!r.contains("#2 "), "{r}");
+        assert!(ask("webhook 3003").starts_with("#1 "));
     }
 
     #[test]

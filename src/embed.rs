@@ -377,14 +377,37 @@ pub fn search(
     exclude_session: Option<&str>,
     limit: usize,
 ) -> Result<Vec<(i64, f32)>> {
-    let mut st = conn.prepare_cached(
+    search_where(
+        conn,
+        q,
+        "m.project = ? AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
+         AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ? AND r.memory_id = m.id)",
+        vec![
+            Box::new(project.to_string()),
+            Box::new(exclude_session.unwrap_or("").to_string()),
+        ],
+        limit,
+    )
+}
+
+/// Memory ids by cosine similarity to the query, best first, among memories `m`
+/// matching the SQL condition `filter` (with `?` placeholders bound to `args`).
+pub fn search_where(
+    conn: &Connection,
+    q: &Query,
+    filter: &str,
+    args: Vec<Box<dyn rusqlite::ToSql>>,
+    limit: usize,
+) -> Result<Vec<(i64, f32)>> {
+    let mut st = conn.prepare_cached(&format!(
         "SELECT v.memory_id, v.scale, v.vec FROM memory_vectors v JOIN memories m ON m.id = v.memory_id
-         WHERE v.model = ?1 AND m.project = ?2 AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
-           AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)",
-    )?;
+         WHERE v.model = ? AND ({filter})"
+    ))?;
+    let mut all: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(q.model.clone())];
+    all.extend(args);
     let mut scored: Vec<(i64, f32)> = st
         .query_map(
-            params![q.model, project, exclude_session.unwrap_or("")],
+            rusqlite::params_from_iter(all.iter().map(|b| b.as_ref())),
             |r| {
                 let (id, scale, v): (i64, f32, Vec<u8>) = (r.get(0)?, r.get(1)?, r.get(2)?);
                 Ok((

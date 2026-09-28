@@ -331,6 +331,107 @@ fn summary_fields(
     m
 }
 
+const MEMORY_COLS: &str = "m.id, m.kind, m.type, m.title, m.subtitle, m.narrative, m.facts, m.concepts, m.files_read,
+                m.files_modified, m.data, m.project, m.session_id, coalesce(m.created_at, 0), m.origin";
+
+/// A memory row (selected with MEMORY_COLS) as a feed item.
+fn memory_item(r: &rusqlite::Row) -> Result<(i64, Value)> {
+    let id: i64 = r.get(0)?;
+    let kind: String = r.get(1)?;
+    let session: Option<String> = r.get(12)?;
+    let at: i64 = r.get(13)?;
+    let base = json!({
+        "id": id,
+        "project": r.get::<_, Option<String>>(11)?,
+        "platform_source": agent_of(session.as_deref()),
+        "created_at_epoch": at,
+        "origin": r.get::<_, String>(14)?,
+    });
+    let mut v = base.as_object().cloned().unwrap_or_default();
+    if kind == "summary" {
+        v.insert("itemType".into(), json!("summary"));
+        v.extend(summary_fields(r.get(3)?, r.get(5)?, r.get(10)?));
+    } else {
+        v.insert("itemType".into(), json!("observation"));
+        v.insert(
+            "type".into(),
+            json!(
+                r.get::<_, Option<String>>(2)?
+                    .unwrap_or_else(|| "discovery".into())
+            ),
+        );
+        v.insert("title".into(), json!(r.get::<_, Option<String>>(3)?));
+        v.insert("subtitle".into(), json!(r.get::<_, Option<String>>(4)?));
+        v.insert("narrative".into(), json!(r.get::<_, Option<String>>(5)?));
+        v.insert("facts".into(), json_list(r.get(6)?));
+        v.insert("concepts".into(), json_list(r.get(7)?));
+        v.insert("files_read".into(), json_list(r.get(8)?));
+        v.insert("files_modified".into(), json_list(r.get(9)?));
+    }
+    Ok((at, Value::Object(v)))
+}
+
+/// Memories most relevant to a search, best first: keyword (BM25) and meaning (the
+/// embedding model, when loaded) fused. Shown above the chronological matches.
+fn best_matches(
+    conn: &Connection,
+    text: &str,
+    fq: &str,
+    project: Option<&String>,
+) -> Result<Vec<Value>> {
+    const BEST: usize = 8;
+    const POOL: i64 = 50;
+    let mut st = conn.prepare(
+        "SELECT m.id FROM memories m JOIN memories_fts ON memories_fts.rowid = m.id
+         WHERE memories_fts MATCH ?1 AND (?2 IS NULL OR m.project = ?2)
+         ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) LIMIT ?3",
+    )?;
+    let mut ids = |fq: &str| -> Result<Vec<i64>> {
+        Ok(st
+            .query_map(rusqlite::params![fq, project, POOL], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    // Every word first, then any of the words: plain-language searches rarely match all.
+    let mut keyword = ids(fq)?;
+    if (keyword.len() as i64) < POOL
+        && let Some(any) = crate::recall::any_terms_query(text)
+    {
+        for id in ids(&any)? {
+            if !keyword.contains(&id) {
+                keyword.push(id);
+            }
+        }
+    }
+    let vector: Vec<i64> = match crate::embed::shared() {
+        Some(e) => {
+            let (filter, args): (&str, Vec<Box<dyn ToSql>>) = match project {
+                Some(p) => ("m.project = ?", vec![Box::new(p.clone())]),
+                None => ("1", vec![]),
+            };
+            crate::embed::search_where(conn, &e.query(text), filter, args, POOL as usize)?
+                .into_iter()
+                .take_while(|(_, cos)| *cos >= crate::recall::MIN_COSINE)
+                .map(|(id, _)| id)
+                .collect()
+        }
+        None => vec![],
+    };
+    let mut row = conn.prepare(&format!(
+        "SELECT {MEMORY_COLS} FROM memories m WHERE m.id = ?1"
+    ))?;
+    let mut out = Vec::new();
+    for id in crate::recall::fuse(&keyword, &vector, crate::recall::SEARCH_VECTOR_WEIGHT)
+        .into_iter()
+        .take(BEST)
+    {
+        let mut rows = row.query([id])?;
+        if let Some(r) = rows.next()? {
+            out.push(memory_item(r)?.1);
+        }
+    }
+    Ok(out)
+}
+
 /// Observations, summaries and human prompts, newest first, paged by timestamp.
 /// `before` pages backwards (inclusive; the client drops duplicates at the boundary),
 /// `after` returns only newer items for live updates.
@@ -349,11 +450,7 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     let mut items: Vec<(i64, Value)> = Vec::new();
 
     // Memories.
-    let mut sql = String::from(
-        "SELECT m.id, m.kind, m.type, m.title, m.subtitle, m.narrative, m.facts, m.concepts, m.files_read,
-                m.files_modified, m.data, m.project, m.session_id, coalesce(m.created_at, 0), m.origin
-         FROM memories m",
-    );
+    let mut sql = format!("SELECT {MEMORY_COLS} FROM memories m");
     let mut args: Vec<Box<dyn ToSql>> = Vec::new();
     let mut wh: Vec<&str> = Vec::new();
     if let Some(fq) = &query {
@@ -381,39 +478,8 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     let mut st = conn.prepare(&sql)?;
     let mut rows = st.query(params_from_iter(args.iter().map(|b| b.as_ref())))?;
     while let Some(r) = rows.next()? {
-        let id: i64 = r.get(0)?;
-        let kind: String = r.get(1)?;
-        let session: Option<String> = r.get(12)?;
-        let at: i64 = r.get(13)?;
-        let base = json!({
-            "id": id,
-            "project": r.get::<_, Option<String>>(11)?,
-            "platform_source": agent_of(session.as_deref()),
-            "created_at_epoch": at,
-            "origin": r.get::<_, String>(14)?,
-        });
-        let mut v = base.as_object().cloned().unwrap_or_default();
-        if kind == "summary" {
-            v.insert("itemType".into(), json!("summary"));
-            v.extend(summary_fields(r.get(3)?, r.get(5)?, r.get(10)?));
-        } else {
-            v.insert("itemType".into(), json!("observation"));
-            v.insert(
-                "type".into(),
-                json!(
-                    r.get::<_, Option<String>>(2)?
-                        .unwrap_or_else(|| "discovery".into())
-                ),
-            );
-            v.insert("title".into(), json!(r.get::<_, Option<String>>(3)?));
-            v.insert("subtitle".into(), json!(r.get::<_, Option<String>>(4)?));
-            v.insert("narrative".into(), json!(r.get::<_, Option<String>>(5)?));
-            v.insert("facts".into(), json_list(r.get(6)?));
-            v.insert("concepts".into(), json_list(r.get(7)?));
-            v.insert("files_read".into(), json_list(r.get(8)?));
-            v.insert("files_modified".into(), json_list(r.get(9)?));
-        }
-        items.push((at, Value::Object(v)));
+        let (at, v) = memory_item(r)?;
+        items.push((at, v));
     }
     drop(rows);
 
@@ -468,9 +534,18 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     let next_before = (after.is_none() && items.len() as i64 == limit)
         .then(|| items.last().map(|(t, _)| *t))
         .flatten();
-    Ok(
-        json!({ "items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>(), "next_before": next_before }),
-    )
+    // The first page of a search also carries the best matches by relevance.
+    let best = match (&query, before, after) {
+        (Some(fq), None, None) => {
+            best_matches(conn, q.get("q").map_or("", |s| s.as_str()), fq, project)?
+        }
+        _ => vec![],
+    };
+    Ok(json!({
+        "items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "best": best,
+        "next_before": next_before,
+    }))
 }
 
 fn projects(conn: &Connection) -> Result<Value> {
