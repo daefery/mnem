@@ -46,8 +46,10 @@ const ICONS: &[(&str, &str)] = &[
     ),
 ];
 
-pub fn serve(db_path: PathBuf, port: u16) -> Result<()> {
+/// Serve until the process ends. `bound` runs once the port is listening.
+pub fn serve(db_path: PathBuf, port: u16, bound: impl FnOnce()) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
+    bound();
     println!("mnem ui: http://127.0.0.1:{port}/  (Ctrl-C to stop)");
     static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     for stream in listener.incoming() {

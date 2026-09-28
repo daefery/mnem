@@ -75,9 +75,9 @@ enum Backend {
 pub struct Embedder {
     backend: Backend,
     pub name: String,
-    /// Fingerprint of the model files: vectors from another download of the same model
-    /// name are dropped and recomputed rather than compared against new ones.
-    pub rev: String,
+    /// What vectors and queries are keyed by: the model name plus a fingerprint of its
+    /// files, so vectors from another download of the same name are never compared.
+    pub key: String,
 }
 
 impl Embedder {
@@ -99,7 +99,7 @@ impl Embedder {
             let te = fastembed::TextEmbedding::try_new(opts)?;
             return Ok(Embedder {
                 backend: Backend::Onnx(std::sync::Mutex::new(te)),
-                rev: format!("fastembed-{}", env!("CARGO_PKG_VERSION")),
+                key: format!("{name}@fastembed-{}", env!("CARGO_PKG_VERSION")),
                 name,
             });
         }
@@ -114,7 +114,7 @@ impl Embedder {
         }
         Ok(Embedder {
             backend: Backend::Static(model),
-            rev: hex(&h.finalize()[..8]),
+            key: format!("{name}@{}", hex(&h.finalize()[..8])),
             name,
         })
     }
@@ -192,45 +192,33 @@ fn text_from_row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<String> {
 /// Embedding happens outside any transaction, so a memory can change or disappear
 /// between reading its text and writing its vector. Each write therefore re-reads the
 /// memory inside the write transaction and is skipped unless the text still hashes the
-/// same; the next pass embeds the new text. When the model files change under the same
-/// name, every vector of that model is dropped first.
+/// same; the next pass embeds the new text.
 pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Result<usize> {
-    let rev_key = format!("semantic.rev.{}", e.name);
-    let stored: Option<String> = conn
-        .query_row("SELECT v FROM meta WHERE k = ?1", [&rev_key], |r| r.get(0))
-        .optional()?;
-    if stored.as_deref() != Some(e.rev.as_str()) {
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // No stored revision: vectors predate revisions and lack text hashes, so they are
-        // all re-embedded below; keep them usable until then.
-        if stored.is_some() {
-            tx.execute("DELETE FROM memory_vectors WHERE model = ?1", [&e.name])?;
-        }
-        tx.execute(
-            "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-            params![rev_key, e.rev],
-        )?;
-        tx.commit()?;
-    }
     let rows: Vec<(i64, String)> = {
         let mut st = conn.prepare(&format!(
             "SELECT m.id, {MEMORY_TEXT_COLS}
              FROM memories m LEFT JOIN memory_vectors v ON v.memory_id = m.id AND v.model = ?1
              WHERE (v.memory_id IS NULL OR v.text_hash IS NULL) AND m.kind != 'pinned' LIMIT ?2"
         ))?;
-        st.query_map(
-            params![e.name, limit.map(|l| l as i64).unwrap_or(-1)],
-            |r| Ok((r.get(0)?, text_from_row(r, 1)?)),
-        )?
+        st.query_map(params![e.key, limit.map(|l| l as i64).unwrap_or(-1)], |r| {
+            Ok((r.get(0)?, text_from_row(r, 1)?))
+        })?
         .collect::<rusqlite::Result<_>>()?
     };
     let mut done = 0;
     for chunk in rows.chunks(2048) {
         let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
         let vecs = e.embed(&texts);
-        done += store(conn, &e.name, chunk, vecs)?;
+        done += store(conn, &e.key, chunk, vecs)?;
     }
     Ok(done)
+}
+
+/// Delete vectors of every other model or model revision. Only `mnem embed` calls this:
+/// the long-running service never deletes, so a process still holding an older model
+/// cannot remove vectors a newer one wrote.
+pub fn prune(conn: &Connection, e: &Embedder) -> Result<usize> {
+    Ok(conn.execute("DELETE FROM memory_vectors WHERE model != ?1", [&e.key])?)
 }
 
 /// Write vectors for `(memory id, embedded text)` pairs, skipping any memory whose text
@@ -266,8 +254,8 @@ fn store(
     Ok(done)
 }
 
-/// A query vector and the model that produced it (vectors from different models are
-/// not comparable).
+/// A query vector and the model key (name and revision) that produced it: vectors from
+/// different models or revisions are not comparable.
 pub struct Query {
     pub model: String,
     pub vec: Vec<f32>,
@@ -276,7 +264,7 @@ pub struct Query {
 impl Embedder {
     pub fn query(&self, text: &str) -> Query {
         Query {
-            model: self.name.clone(),
+            model: self.key.clone(),
             vec: self.embed(&[text.to_string()]).pop().unwrap_or_default(),
         }
     }
@@ -313,40 +301,55 @@ pub fn configured_port() -> u16 {
 
 const PORT_KEY: &str = "watch.ui_port";
 
-/// Record the port the running watch service actually listens on (0: none), so hooks
-/// find it even when it came from `mnem watch --ui-port`.
+/// Record the port this watch process listens on (0: none), with its pid, so hooks find
+/// it even when it came from `mnem watch --ui-port`.
 pub fn record_service_port(conn: &Connection, port: u16) -> Result<()> {
     conn.execute(
         "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
-        params![PORT_KEY, port.to_string()],
+        params![PORT_KEY, format!("{port} {}", std::process::id())],
     )?;
     Ok(())
 }
 
-/// Port of the running watch service: MNEM_UI_PORT when set, else what the service
-/// recorded at start, else the configured default.
-pub fn service_port(conn: &Connection) -> u16 {
+/// Port of the running watch service, None when there is none. MNEM_UI_PORT wins; then
+/// the port the service recorded, as long as the process that recorded it is alive (a
+/// stale record must not send prompts to whatever took the port later); without any
+/// record, the configured default.
+pub fn service_port(conn: &Connection) -> Option<u16> {
     if let Some(p) = std::env::var("MNEM_UI_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
     {
-        return p;
+        return Some(p);
     }
-    conn.query_row("SELECT v FROM meta WHERE k = ?1", [PORT_KEY], |r| {
-        r.get::<_, String>(0)
-    })
-    .ok()
-    .and_then(|v| v.parse().ok())
-    .unwrap_or_else(configured_port)
+    let rec: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k = ?1", [PORT_KEY], |r| r.get(0))
+        .ok();
+    let port = match rec {
+        None => configured_port(),
+        Some(v) => {
+            let mut it = v.split_whitespace();
+            let port: u16 = it.next()?.parse().ok()?;
+            let pid: u32 = it.next()?.parse().ok()?;
+            if !process_alive(pid) {
+                return None;
+            }
+            port
+        }
+    };
+    (port != 0).then_some(port)
+}
+
+fn process_alive(pid: u32) -> bool {
+    let proc = std::path::Path::new("/proc");
+    // Without procfs (macOS) the record is trusted as is.
+    !proc.is_dir() || proc.join(pid.to_string()).exists()
 }
 
 /// Embed `text` in the watch service, where the model stays loaded. None when the
 /// service is disabled or not reachable within the timeout (callers fall back to keywords).
 pub fn query_from_service(conn: &Connection, text: &str) -> Option<Query> {
-    let port = service_port(conn);
-    if port == 0 {
-        return None;
-    }
+    let port = service_port(conn)?;
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_millis(300)))
         .build()
@@ -450,5 +453,25 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         assert_eq!(ids, vec![1]);
+    }
+
+    #[test]
+    fn service_port_follows_live_watch() {
+        if std::env::var("MNEM_UI_PORT").is_ok() {
+            return;
+        }
+        let conn = db::open_with(std::path::Path::new(":memory:"), Duration::from_secs(1)).unwrap();
+        record_service_port(&conn, 40123).unwrap();
+        assert_eq!(service_port(&conn), Some(40123));
+        record_service_port(&conn, 0).unwrap();
+        assert_eq!(service_port(&conn), None);
+        if std::path::Path::new("/proc").is_dir() {
+            conn.execute(
+                "UPDATE meta SET v = '40123 4294967295' WHERE k = ?1",
+                [PORT_KEY],
+            )
+            .unwrap();
+            assert_eq!(service_port(&conn), None, "stale record from a dead watch");
+        }
     }
 }

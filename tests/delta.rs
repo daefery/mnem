@@ -376,7 +376,7 @@ fn viewer_rejects_oversized_requests() {
     let path = dir.join("m.db");
     drop(mnem::db::open(&path).unwrap());
     let port = 38000 + (std::process::id() % 1000) as u16;
-    std::thread::spawn(move || mnem::ui::serve(path, port));
+    std::thread::spawn(move || mnem::ui::serve(path, port, || {}));
     std::thread::sleep(std::time::Duration::from_millis(300));
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();

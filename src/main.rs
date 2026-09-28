@@ -335,6 +335,10 @@ fn main() -> Result<()> {
             let t = Instant::now();
             let n = mnem::embed::backfill(&mut conn, &e, limit)?;
             println!("embedded {n} memories in {:.1}s", t.elapsed().as_secs_f64());
+            let pruned = mnem::embed::prune(&conn, &e)?;
+            if pruned > 0 {
+                println!("removed {pruned} vectors of other models or revisions");
+            }
         }
         Cmd::Pins => {
             let mut st = conn.prepare(
@@ -516,7 +520,7 @@ fn main() -> Result<()> {
         }
         Cmd::Ui { port } => {
             drop(conn);
-            ui::serve(path, port)?;
+            ui::serve(path, port, || {})?;
         }
         Cmd::Watch {
             interval,
@@ -524,13 +528,22 @@ fn main() -> Result<()> {
             ui_port,
         } => {
             let ui_port = ui_port.unwrap_or_else(mnem::embed::configured_port);
-            if let Err(e) = mnem::embed::record_service_port(&conn, ui_port) {
+            // Hooks learn where the service listens only after the bind succeeds; until
+            // then (or if it fails) they see no service and use keywords alone.
+            if let Err(e) = mnem::embed::record_service_port(&conn, 0) {
                 hook::log(&format!("watch port: {e:#}"));
             }
             if ui_port != 0 {
                 let ui_path = path.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = ui::serve(ui_path, ui_port) {
+                    let record = || {
+                        if let Err(e) = db::open(&ui_path)
+                            .and_then(|c| mnem::embed::record_service_port(&c, ui_port))
+                        {
+                            hook::log(&format!("watch port: {e:#}"));
+                        }
+                    };
+                    if let Err(e) = ui::serve(ui_path.clone(), ui_port, record) {
                         hook::log(&format!("watch ui: {e:#}"));
                     }
                 });

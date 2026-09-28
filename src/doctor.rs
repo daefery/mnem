@@ -136,7 +136,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
     let model = crate::embed::model_name();
     let vectors: i64 = conn
         .query_row(
-            "SELECT count(*) FROM memory_vectors WHERE model = ?1",
+            "SELECT count(DISTINCT memory_id) FROM memory_vectors WHERE substr(model, 1, length(?1) + 1) = ?1 || '@'",
             [&model],
             |r| r.get(0),
         )
