@@ -226,25 +226,26 @@ pub fn about_in(
         match placement(&path, cwd.as_deref(), place) {
             Match::No => continue,
             Match::Exact => {}
+            // Only when exactly one tracked file ends that way; without a repository to
+            // ask, or when git does not answer, the path cannot tell which file it was.
             Match::Ending => {
-                if let Some(root) = place.root {
-                    let files = listing.get_or_insert_with(|| tracked(root));
-                    if let Some(files) = files {
-                        let got: Vec<&str> = parts(&path);
-                        let n = files
-                            .iter()
-                            .filter(|f| {
-                                f.len() >= got.len()
-                                    && f[f.len() - got.len()..]
-                                        .iter()
-                                        .zip(&got)
-                                        .all(|(a, b)| a == b)
-                            })
-                            .count();
-                        if n > 1 {
-                            continue;
-                        }
-                    }
+                let Some(root) = place.root else { continue };
+                let Some(files) = listing.get_or_insert_with(|| tracked(root)) else {
+                    continue;
+                };
+                let got: Vec<&str> = parts(&path);
+                let n = files
+                    .iter()
+                    .filter(|f| {
+                        f.len() >= got.len()
+                            && f[f.len() - got.len()..]
+                                .iter()
+                                .zip(&got)
+                                .all(|(a, b)| a == b)
+                    })
+                    .count();
+                if n != 1 {
+                    continue;
                 }
             }
         }
@@ -711,8 +712,9 @@ mod tests {
         assert!(!names_file("src/shared.rs", Some("/r/packages/a"), &b));
         // A session at the root recorded repo-relative paths.
         assert!(names_file("packages/b/src/shared.rs", Some("/r"), &b));
-        // Session directory unknown here: fall back to the shared ending.
-        assert!(names_file("src/shared.rs", None, &b));
+        // Session directory unknown here: a shared ending (verified against the
+        // repository's files before it is trusted).
+        assert_eq!(placement("src/shared.rs", None, &b), Match::Ending);
         // A longer relative path is a deeper, different file.
         let short = at("extensions/index.ts", Some(root), "github.com/o/r");
         assert!(!names_file(
@@ -970,6 +972,17 @@ mod tests {
         assert!(ids("packages/b/src/shared.rs").is_empty());
         // Only one tracked file ends in lib/only.rs.
         assert_eq!(ids("packages/c/lib/only.rs"), vec![2]);
+        // Without a repository to check against, an ending alone is not enough.
+        let place = Place {
+            rel: "packages/c/lib/only.rs",
+            root: None,
+            project: "p",
+        };
+        assert!(
+            about_in(&c, &place, &crate::recall::Scope::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

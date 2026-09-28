@@ -813,13 +813,25 @@ pub fn run(
             }
             // A file case judges the memories about the file, with the prompt and the
             // file as context; a prompt case judges what prompt recall showed.
+            // The repository on this machine, from the session's directory, so paths are
+            // placed as they are in production.
+            let case_root: Option<std::path::PathBuf> = c.file.as_ref().and_then(|_| {
+                let cwd: String = conn
+                    .query_row(
+                        "SELECT cwd FROM sessions WHERE id = ?1",
+                        [c.session.as_deref().unwrap_or("")],
+                        |r| r.get(0),
+                    )
+                    .ok()?;
+                crate::files::repo_root(Path::new(&cwd))
+            });
             let (top, question): (Vec<i64>, String) = match &c.file {
                 Some(f) => {
                     let ids: Vec<i64> = crate::files::about_in(
                         conn,
                         &crate::files::Place {
                             rel: f,
-                            root: None,
+                            root: case_root.as_deref(),
                             project: &c.project,
                         },
                         &scope,
