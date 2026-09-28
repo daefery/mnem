@@ -367,24 +367,28 @@ pub fn query_from_service(conn: &Connection, text: &str) -> Option<Query> {
     })
 }
 
-/// Memory ids in `project` by cosine similarity to the query, best first. Pinned and
-/// sensitive memories, and ones already offered to `exclude_session`, are filtered in
+/// Memory ids in `project` by cosine similarity to the query, best first, within
+/// `scope`. Pinned and sensitive memories and those outside the scope are filtered in
 /// SQL so they can never crowd eligible memories out of the top `limit`.
 pub fn search(
     conn: &Connection,
     q: &Query,
     project: &str,
-    exclude_session: Option<&str>,
+    scope: &crate::recall::Scope,
     limit: usize,
 ) -> Result<Vec<(i64, f32)>> {
     search_where(
         conn,
         q,
         "m.project = ? AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
-         AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ? AND r.memory_id = m.id)",
+         AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ? AND r.memory_id = m.id)
+         AND (? = '' OR coalesce(m.session_id, '') != ?) AND coalesce(m.created_at, 0) < ?",
         vec![
             Box::new(project.to_string()),
-            Box::new(exclude_session.unwrap_or("").to_string()),
+            Box::new(scope.offered_to.unwrap_or("").to_string()),
+            Box::new(scope.session.unwrap_or("").to_string()),
+            Box::new(scope.session.unwrap_or("").to_string()),
+            Box::new(scope.before.unwrap_or(i64::MAX)),
         ],
         limit,
     )

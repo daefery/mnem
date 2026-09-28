@@ -91,19 +91,42 @@ pub fn semantic_embedder() -> Option<crate::embed::Embedder> {
 
 type Hit = (i64, String, String, i64);
 
+/// Which memories a recall may use.
+#[derive(Default, Clone, Copy)]
+pub struct Scope<'a> {
+    /// The session asking: memories distilled from it are left out, since the agent
+    /// already has that conversation in context.
+    pub session: Option<&'a str>,
+    /// Memories already offered to this session are left out (never repeated).
+    pub offered_to: Option<&'a str>,
+    /// Only memories created before this time (ms): replaying an old prompt.
+    pub before: Option<i64>,
+}
+
+impl<'a> Scope<'a> {
+    /// Recall for a live session.
+    pub fn session(session: &'a str) -> Scope<'a> {
+        Scope {
+            session: Some(session),
+            offered_to: Some(session),
+            before: None,
+        }
+    }
+}
+
 /// Rank memories for a prompt by keywords, by meaning, or both fused (reciprocal rank
 /// fusion). Without an embedder every mode is keyword ranking.
 pub fn rank(
     conn: &Connection,
     project: &str,
     prompt: &str,
-    exclude_session: Option<&str>,
+    scope: &Scope,
     limit: usize,
     query: Option<&crate::embed::Query>,
     mode: Mode,
 ) -> Result<Vec<Hit>> {
     let Some(q) = query.filter(|_| mode != Mode::Keyword) else {
-        return keyword_rank(conn, project, prompt, exclude_session, limit);
+        return keyword_rank(conn, project, prompt, scope, limit);
     };
     // Same gate as keywords: harness text and very short prompts carry no query.
     let Some((clean, label)) = classify_prompt(prompt) else {
@@ -113,10 +136,10 @@ pub fn rank(
         return Ok(vec![]);
     }
     if mode == Mode::Fill {
-        let mut out = keyword_rank(conn, project, prompt, exclude_session, limit * 2)?;
+        let mut out = keyword_rank(conn, project, prompt, scope, limit * 2)?;
         gate(conn, q, &mut out)?;
         out.truncate(limit);
-        fill_with_vectors(conn, q, project, exclude_session, &mut out, limit)?;
+        fill_with_vectors(conn, q, project, scope, &mut out, limit)?;
         return Ok(out);
     }
     let pool = limit * 6;
@@ -124,7 +147,7 @@ pub fn rank(
         conn,
         q,
         project,
-        exclude_session,
+        scope,
         pool,
         if mode == Mode::Vector {
             0.0
@@ -135,7 +158,7 @@ pub fn rank(
     if mode == Mode::Vector {
         return Ok(vector.into_iter().take(limit).collect());
     }
-    let keyword = keyword_rank(conn, project, prompt, exclude_session, pool)?;
+    let keyword = keyword_rank(conn, project, prompt, scope, pool)?;
     let ids = fuse(
         &keyword.iter().map(|h| h.0).collect::<Vec<_>>(),
         &vector.iter().map(|h| h.0).collect::<Vec<_>>(),
@@ -172,7 +195,7 @@ fn vector_hits(
     conn: &Connection,
     q: &crate::embed::Query,
     project: &str,
-    exclude_session: Option<&str>,
+    scope: &Scope,
     limit: usize,
     min_cos: f32,
 ) -> Result<Vec<Hit>> {
@@ -180,7 +203,7 @@ fn vector_hits(
         "SELECT coalesce(type, kind), coalesce(title, ''), coalesce(created_at, 0) FROM memories WHERE id = ?1",
     )?;
     let mut out = Vec::new();
-    for (id, cos) in crate::embed::search(conn, q, project, exclude_session, limit)? {
+    for (id, cos) in crate::embed::search(conn, q, project, scope, limit)? {
         if cos < min_cos {
             break;
         }
@@ -195,14 +218,14 @@ pub fn fill_with_vectors(
     conn: &Connection,
     q: &crate::embed::Query,
     project: &str,
-    exclude_session: Option<&str>,
+    scope: &Scope,
     out: &mut Vec<Hit>,
     limit: usize,
 ) -> Result<()> {
     if out.len() >= limit {
         return Ok(());
     }
-    for h in vector_hits(conn, q, project, exclude_session, limit * 2, MIN_COSINE)? {
+    for h in vector_hits(conn, q, project, scope, limit * 2, MIN_COSINE)? {
         if out.len() >= limit {
             break;
         }
@@ -244,13 +267,14 @@ pub const SEARCH_VECTOR_WEIGHT: f64 = 0.2;
 pub const MIN_COSINE: f32 = 0.55;
 
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
-/// Keyword ranking: memory ids in `project` for `prompt`, best first; `exclude_session`
-/// hides memories already offered to that session. Empty when the prompt carries no query.
+/// Keyword ranking: memory ids in `project` for `prompt`, best first, within `scope`.
+/// Empty when the prompt carries no query. (Term rarity is measured over all memories,
+/// also when `scope.before` replays an old prompt.)
 pub fn keyword_rank(
     conn: &Connection,
     project: &str,
     prompt: &str,
-    exclude_session: Option<&str>,
+    scope: &Scope,
     limit: usize,
 ) -> Result<Vec<(i64, String, String, i64)>> {
     // Harness wrappers and very short prompts ("yes", "continue") carry no query.
@@ -298,6 +322,7 @@ pub fn keyword_rank(
            -- Personal details stay out of automatic injection; explicit search still finds them.
            AND coalesce(m.type, '') != 'sensitive'
            AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)
+           AND (?5 = '' OR coalesce(m.session_id, '') != ?5) AND coalesce(m.created_at, 0) < ?6
          -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `mnem eval`.
          ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
          LIMIT ?4",
@@ -307,8 +332,10 @@ pub fn keyword_rank(
             params![
                 query,
                 project,
-                exclude_session.unwrap_or(""),
-                (limit * 4) as i64
+                scope.offered_to.unwrap_or(""),
+                (limit * 4) as i64,
+                scope.session.unwrap_or(""),
+                scope.before.unwrap_or(i64::MAX)
             ],
             |r| {
                 Ok((
@@ -340,7 +367,8 @@ pub fn recall(
     // Keywords rank (they score best at top five in `mnem eval`); the query vector from
     // the watch service drops keyword hits that share words but not meaning, then fills
     // empty slots. Without the service, keywords alone.
-    let mut rows = keyword_rank(conn, project, prompt, Some(session), TOP * 2)?;
+    let scope = Scope::session(session);
+    let mut rows = keyword_rank(conn, project, prompt, &scope, TOP * 2)?;
     if semantic_enabled()
         && classify_prompt(prompt)
             .is_some_and(|(c, l)| l.is_none() && c.split_whitespace().count() >= 4)
@@ -348,7 +376,7 @@ pub fn recall(
     {
         gate(conn, &q, &mut rows)?;
         rows.truncate(TOP);
-        fill_with_vectors(conn, &q, project, Some(session), &mut rows, TOP)?;
+        fill_with_vectors(conn, &q, project, &scope, &mut rows, TOP)?;
     }
     rows.truncate(TOP);
     if rows.is_empty() {

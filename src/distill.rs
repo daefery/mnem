@@ -232,6 +232,13 @@ impl Llm {
         out
     }
 
+    /// This one model only, no fallback (exclusions still apply).
+    pub fn only(mut self, model: &str) -> Llm {
+        self.chain = vec![model.to_string()];
+        self.auto_fallback = false;
+        self
+    }
+
     pub fn candidates(&self) -> Vec<String> {
         let blocked = |m: &String| {
             let l = m.to_lowercase();

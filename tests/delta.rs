@@ -158,11 +158,22 @@ fn recall_matches_prompt_once_per_session() {
         )
         .unwrap();
     }
+    // Distilled from the asking session itself: the agent already has it in context.
+    c.execute(
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at, session_id)
+         VALUES ('observation', 'feature', 'Watch service blocks backup restore while running', 'proj', 'mnem', 'own', ?1, 'claude:me')",
+        params![mnem::db::now_ms()],
+    )
+    .unwrap();
     let prompt = "why does the backup restore refuse while the watch service is running";
     let r = mnem::recall::recall(&c, "claude:me", "proj", prompt)
         .unwrap()
         .expect("a match");
     assert!(r.contains("Backup restore"), "{r}");
+    assert!(
+        !r.contains("Watch service blocks"),
+        "own session left out: {r}"
+    );
     assert!(!r.contains("Viewer"), "{r}");
     assert!(
         mnem::recall::recall(&c, "claude:me", "proj", prompt)
@@ -284,7 +295,7 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
         &c,
         "proj",
         prompt,
-        None,
+        &mnem::recall::Scope::default(),
         5,
         Some(&query),
         mnem::recall::Mode::Fill,
@@ -373,7 +384,14 @@ fn ineligible_memories_cannot_crowd_out_vector_hits() {
         model: "test-model".into(),
         vec: vec![1.0, 0.0, 0.0, 0.0],
     };
-    let hits = mnem::embed::search(&c, &q, "proj", Some("claude:me"), 5).unwrap();
+    let hits = mnem::embed::search(
+        &c,
+        &q,
+        "proj",
+        &mnem::recall::Scope::session("claude:me"),
+        5,
+    )
+    .unwrap();
     assert_eq!(hits.first().map(|h| h.0), Some(eligible), "{hits:?}");
 }
 

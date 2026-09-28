@@ -188,6 +188,9 @@ enum Cmd {
         /// Have the distillation models judge what recall shows for real prompts
         #[arg(long)]
         judge: bool,
+        /// Judge with this one model instead (and report agreement with the default judge)
+        #[arg(long)]
+        judge_model: Option<String>,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -390,6 +393,7 @@ fn main() -> Result<()> {
             set,
             build_real,
             judge,
+            judge_model,
         } => {
             if let Some(n) = build_real {
                 let (dev, test) = mnem::eval::build_real(&conn, n)?;
@@ -427,7 +431,8 @@ fn main() -> Result<()> {
                 let written = mnem::eval::build(&conn, n, &path)?;
                 println!("built {written} questions in {}", path.display());
             }
-            let r = mnem::eval::run(&conn, &path, mode, judge)?;
+            let judge_with = judge_model.as_deref().or(judge.then_some("chain"));
+            let r = mnem::eval::run(&conn, &path, mode, judge_with)?;
             if r.judged.prompts > 0 {
                 let j = &r.judged;
                 println!(
@@ -435,20 +440,37 @@ fn main() -> Result<()> {
                     j.prompts,
                     j.shown as f64 / j.prompts as f64
                 );
-                if judge {
+                if let Some(name) = judge_with {
+                    let (lo, hi) = mnem::eval::wilson(j.right, j.judged_shown);
+                    let (plo, phi) = mnem::eval::wilson(j.helped, j.judged_prompts);
                     println!(
-                        "judged: {} of {} shown helped ({:.0}%) · {} shown did not · {} prompts got a useful memory{}",
+                        "judged ({name}): {} of {} memories shown helped ({:.0}%, 95% CI {:.0}-{:.0}%) · {} did not",
                         j.right,
-                        j.shown,
-                        100.0 * j.right as f64 / j.shown.max(1) as f64,
-                        j.shown - j.right,
+                        j.judged_shown,
+                        100.0 * j.right as f64 / j.judged_shown.max(1) as f64,
+                        100.0 * lo,
+                        100.0 * hi,
+                        j.judged_shown - j.right,
+                    );
+                    println!(
+                        "prompts with a useful memory: {} of {} judged ({:.0}%, 95% CI {:.0}-{:.0}%){}",
                         j.helped,
+                        j.judged_prompts,
+                        100.0 * j.helped as f64 / j.judged_prompts.max(1) as f64,
+                        100.0 * plo,
+                        100.0 * phi,
                         if j.unjudged > 0 {
-                            format!(" · {} not judged (model failed)", j.unjudged)
+                            format!(" · {} not judged (judge failed), left out", j.unjudged)
                         } else {
                             String::new()
                         }
                     );
+                    if name != "chain" {
+                        let (n, agreed, kappa) = mnem::eval::agreement("chain", name);
+                        println!(
+                            "agreement with the default judge: {agreed} of {n} shared memories, kappa {kappa:.2}"
+                        );
+                    }
                 } else {
                     println!("add --judge to have the distillation models judge them");
                 }
