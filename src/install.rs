@@ -318,6 +318,14 @@ export default function (pi: ExtensionAPI) {
 		}
 	};
 
+	// Tools the agent calls: failures are reported, not passed off as "no results", and
+	// relative paths start from the session's current directory.
+	const call = async (args: string[], signal: AbortSignal | undefined, cwd: string) => {
+		const r = await pi.exec(MNEM, args, { signal, cwd });
+		if (r.code !== 0) throw new Error(`mnem failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
+		return r.stdout.trim();
+	};
+
 	pi.on("session_start", async (_event, ctx) => {
 		session = `pi:${ctx.sessionManager.getSessionId()}`;
 		const file = ctx.sessionManager.getSessionFile();
@@ -354,29 +362,32 @@ export default function (pi: ExtensionAPI) {
 		if (session) void run(["snapshot", "--session", session, "--cwd", ctx.cwd]);
 	});
 
-	const tool = (name: string, description: string, parameters: any) =>
+	const tool = (name: string, description: string, parameters: any, promptSnippet?: string) =>
 		defineTool({
 			name: `mnem_${name}`,
 			label: `mnem ${name}`,
 			description,
+			promptSnippet,
 			parameters,
-			async execute(_id, params) {
-				const text = await run(["tool", name, JSON.stringify(params ?? {})]);
+			async execute(_id, params, signal, _onUpdate, ctx) {
+				const args: any = { ...(params ?? {}) };
+				if (name === "recall_file" && !args.cwd) args.cwd = ctx.cwd;
+				const text = await call(["tool", name, JSON.stringify(args)], signal, ctx.cwd);
 				return { content: [{ type: "text", text: text || "No results." }], details: {} };
 			},
 		});
 
 	pi.registerTool(
-		tool("search", "Search long-term memory (all agents, all projects). Returns an index with ids; then use mnem_get_observations.", Type.Object({
+		tool("search", "Search past work across all agents (decisions, bugs, fixes, what was tried): use when the user refers to earlier work (\"like last time\", \"that bug\", \"why did we\"), or when unsure whether a design question was already settled in this project (pass project). Not for general programming knowledge. Returns a one-line-per-hit index with ids for mnem_get_observations.", Type.Object({
 			query: Type.String({ description: "Search query" }),
 			project: Type.Optional(Type.String({ description: "Filter by project (substring)" })),
 			type: Type.Optional(Type.String({ description: "observations | sessions | prompts | events" })),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 20)" })),
-		})),
+		}), "mnem_search: search past work (decisions, bugs, fixes) when the user refers to earlier work"),
 	);
 	pi.registerTool(
-		tool("timeline", "Show what happened around one memory id (number) or event id (\"E123\").", Type.Object({
-			anchor: Type.String({ description: "Observation id or E<id>" }),
+		tool("timeline", "What happened around one memory (\"58645\") or transcript event (\"E123\"). Rarely needed: use when you must reconstruct a sequence (what led to a bug, what was tried before a fix).", Type.Object({
+			anchor: Type.Union([Type.String(), Type.Number()], { description: "Memory id or E<id>" }),
 			depth_before: Type.Optional(Type.Number()),
 			depth_after: Type.Optional(Type.Number()),
 		})),
@@ -388,9 +399,16 @@ export default function (pi: ExtensionAPI) {
 		})),
 	);
 	pi.registerTool(
-		tool("get_observations", "Full details for ids returned by mnem_search or mnem_timeline.", Type.Object({
-			ids: Type.Array(Type.String(), { description: "Ids, e.g. [\"58645\", \"E72923\"]" }),
-		})),
+		tool("get_observations", "Full text of memories or transcript events: use when a memory you were shown or found looks relevant, since titles alone can mislead. Includes, when available, excerpts of the transcript evidence and whether the files a memory names changed since (no note does not mean unchanged).", Type.Object({
+			ids: Type.Array(Type.Union([Type.String(), Type.Number()]), { description: "Ids, e.g. [58645, \"E72923\"]" }),
+		}), "mnem_get_observations: full text of a memory shown to you (#id) that looks relevant"),
+	);
+	pi.registerTool(
+		tool("recall_file", "Memories about one file (past bugs, decisions, changes), one line each, marked with whether the file changed since: use before changing a file you have not worked on in this session; once per file. Says so when there are none.", Type.Object({
+			path: Type.String({ description: "The file, absolute or relative to the session's working directory" }),
+			cwd: Type.Optional(Type.String({ description: "Directory a relative path starts from (default: the session's)" })),
+			limit: Type.Optional(Type.Number({ description: "Max memories (default 5)" })),
+		}), "mnem_recall_file: past bugs and decisions about a file, before you change it"),
 	);
 }
 "#;

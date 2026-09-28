@@ -13,10 +13,18 @@ use rusqlite::{Connection, OptionalExtension, ToSql, params_from_iter};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
-const INSTRUCTIONS: &str = "mnem is long-term memory built from every Claude Code, Codex and pi session. \
-Workflow: 1) search(query) returns a compact index with ids; 2) timeline(anchor) shows what happened around one; \
-3) get_observations(ids) fetches full details only for the ids you need. Numeric ids are distilled observations \
-and summaries; ids like \"E123\" are raw transcript events (prompts, answers, commands, errors, edits).";
+const INSTRUCTIONS: &str = "mnem is this machine's memory of past work: decisions, bugs, fixes and what was tried, \
+captured from every Claude Code, Codex and pi session. Use it when:
+- the user points at earlier work (\"like last time\", \"that bug\", \"why did we\", \"what did we decide\"), or \
+you are unsure whether a design question was already settled in this project: search(query, project). Not for \
+general programming knowledge or for what this conversation already shows; refine a search instead of repeating it;
+- a memory shown to you (at session start, with a prompt, or when a file was opened) looks relevant to the task: \
+get_observations([ids]) gives its full text and, when available, the transcript evidence behind it; titles alone \
+can mislead;
+- you are about to change a file and no memories about it were shown in this session (Claude Code shows them \
+when a file is first opened): recall_file(path), once per file.
+Numeric ids are memories; ids like \"E123\" are raw transcript events. \
+Call remember(fact) only when the user asks you to remember something.";
 
 /// Protocol versions this server implements, newest first.
 const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -180,7 +188,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search",
-            "description": "Step 1: Search memory. Returns an index with ids. Params: query, limit, project, platformSource, type, obs_type, dateStart, dateEnd, offset, orderBy",
+            "description": "Search past work across all agents (decisions, bugs, fixes, what was tried): use when the user refers to earlier work, or when unsure whether a design question was already settled in this project (pass project). Not for general programming knowledge. Words or a plain question; returns a one-line-per-hit index with ids for get_observations.",
             "inputSchema": { "type": "object", "properties": {
                 "query": { "type": "string", "description": "Words or a plain-language question (empty: most recent). Relevance order also matches meaning when mnem-watch runs" },
                 "limit": { "type": "number", "description": "Max results (default 20)" },
@@ -196,7 +204,7 @@ fn tools() -> Value {
         },
         {
             "name": "timeline",
-            "description": "Step 2: Context around a result. Params: anchor (observation id, or \"E<id>\" event) OR query, depth_before, depth_after, project",
+            "description": "What happened around a memory or transcript event (the steps before and after it). Rarely needed: use when you must reconstruct a sequence (what led to a bug, what was tried before a fix). anchor is an id or \"E<id>\".",
             "inputSchema": { "type": "object", "properties": {
                 "anchor": { "type": ["number", "string"], "description": "Observation id or \"E<id>\"" },
                 "query": { "type": "string", "description": "Find the anchor with a search instead" },
@@ -207,7 +215,7 @@ fn tools() -> Value {
         },
         {
             "name": "get_observations",
-            "description": "Step 3: Full details for ids from search/timeline. Params: ids (required; numbers or \"E<id>\"), limit",
+            "description": "Full text of memories or transcript events: use when a memory you were shown or found looks relevant, since titles alone can mislead. Includes, when available, excerpts of the transcript evidence and whether the files a memory names changed since (no note does not mean unchanged). ids are numbers or \"E<id>\".",
             "inputSchema": { "type": "object", "required": ["ids"], "properties": {
                 "ids": { "type": "array", "items": { "type": ["number", "string"] }, "description": "Ids to fetch" },
                 "limit": { "type": "number", "description": "Max items" }
@@ -224,16 +232,16 @@ fn tools() -> Value {
         },
         {
             "name": "recall_file",
-            "description": "Memories about one file: past bugs, decisions and changes that read or modified it, those that changed it first, each marked with whether the file changed since (commits, uncommitted edits). Use before editing a file you have not worked on in this session.",
+            "description": "Memories about one file: past bugs, decisions and changes that read or modified it, one line each, marked with whether the file changed since (commits, uncommitted edits, lines). Use before changing a file when no memories about it were shown in this session; once per file. Says so when there are none.",
             "inputSchema": { "type": "object", "required": ["path"], "properties": {
                 "path": { "type": "string", "description": "The file, absolute or relative to cwd" },
                 "cwd": { "type": "string", "description": "Directory relative paths start from (default: this server's working directory)" },
-                "limit": { "type": "number", "description": "Max memories (default 10)" }
+                "limit": { "type": "number", "description": "Max memories (default 5)" }
             }}
         },
         {
             "name": "session_start_context",
-            "description": "The context mnem injects at session start for a project: recent sessions across agents, last summary, observations.",
+            "description": "The context mnem injects at session start for a project (recent sessions across agents, last summary, observations). Use only if no mnem context appeared at the start of this session.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project id (default: this server's working directory)" },
                 "cwd": { "type": "string", "description": "Resolve the project from this directory" }
@@ -871,7 +879,7 @@ fn recall_file(conn: &Connection, a: &Value) -> Result<String> {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_default();
-    let limit = num_arg(a, "limit", 10).clamp(1, 50) as usize;
+    let limit = num_arg(a, "limit", 5).clamp(1, 50) as usize;
     match crate::files::resolve(path, &cwd) {
         Some(t) => crate::files::report(conn, &t, limit),
         None => Ok(format!(
