@@ -69,13 +69,27 @@ impl Place<'_> {
     }
 }
 
+/// How a recorded path was matched: exactly (placed inside the repository, or the same
+/// repo-relative path) or only by a shared ending (its context unknown).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Match {
+    No,
+    Exact,
+    Ending,
+}
+
 /// Does a path recorded in a memory (whose session ran in `cwd`) name the file at
 /// `place`?
 pub fn names_file(recorded: &str, cwd: Option<&str>, place: &Place) -> bool {
+    placement(recorded, cwd, place) != Match::No
+}
+
+pub fn placement(recorded: &str, cwd: Option<&str>, place: &Place) -> Match {
+    let hit = |b: bool| if b { Match::Exact } else { Match::No };
     let want = parts(place.rel);
     let got = parts(recorded);
     if want.is_empty() || got.is_empty() {
-        return false;
+        return Match::No;
     }
     let root = place.root.map(|r| r.to_string_lossy().replace('\\', "/"));
     let under_root = |p: &str| -> Option<Vec<String>> {
@@ -87,29 +101,45 @@ pub fn names_file(recorded: &str, cwd: Option<&str>, place: &Place) -> bool {
     };
     if is_absolute(recorded) {
         if let Some(inside) = under_root(recorded) {
-            return inside == want;
+            return hit(inside == want);
         }
         // Another machine or checkout: same ending, and the repository named before it.
         if got.len() < want.len() || !got.ends_with(&want) {
-            return false;
+            return Match::No;
         }
         let names = place.names();
-        return got[..got.len() - want.len()]
+        return hit(got[..got.len() - want.len()]
             .iter()
-            .any(|c| names.contains(&c.to_lowercase()));
+            .any(|c| names.contains(&c.to_lowercase())));
     }
     // Relative to the session's directory, when that is inside this repository.
     if let Some(sub) = cwd.and_then(under_root) {
         let joined = format!("{}/{}", sub.join("/"), recorded);
-        return parts(&joined) == want;
+        return hit(parts(&joined) == want);
     }
     // Otherwise a relative path may be relative to a package directory, so it can be
     // shorter than the repo-relative path and end the same way; a longer one names a
     // deeper, different file. A lone name only matches itself.
-    if got.len() == 1 || want.len() == 1 {
-        return got == want;
+    if got.len() == 1 || want.len() == 1 || got.len() == want.len() {
+        return hit(got == want);
     }
-    got.len() <= want.len() && want.ends_with(&got)
+    if got.len() < want.len() && want.ends_with(&got) {
+        Match::Ending
+    } else {
+        Match::No
+    }
+}
+
+/// Files git tracks in `root`, as components (for telling whether a shared ending is
+/// ambiguous). None when git cannot say.
+fn tracked(root: &Path) -> Option<Vec<Vec<String>>> {
+    let list = git(root, &["ls-files", "-z"])?;
+    Some(
+        list.split('\0')
+            .filter(|f| !f.is_empty())
+            .map(|f| parts(f).iter().map(|c| c.to_string()).collect())
+            .collect(),
+    )
 }
 
 /// A memory about a file.
@@ -167,6 +197,9 @@ pub fn about_in(
           ORDER BY m.created_at DESC",
     )?;
     let mut out: Vec<About> = Vec::new();
+    // For matches by ending only: how many tracked files end that way (more than one
+    // means the recorded path cannot tell which file it was), computed once.
+    let mut listing: Option<Option<Vec<Vec<String>>>> = None;
     let rows = st.query_map(
         params![
             name,
@@ -190,8 +223,30 @@ pub fn about_in(
     )?;
     for row in rows {
         let (id, modified, path, kind, title, created_at, as_of, cwd) = row?;
-        if !names_file(&path, cwd.as_deref(), place) {
-            continue;
+        match placement(&path, cwd.as_deref(), place) {
+            Match::No => continue,
+            Match::Exact => {}
+            Match::Ending => {
+                if let Some(root) = place.root {
+                    let files = listing.get_or_insert_with(|| tracked(root));
+                    if let Some(files) = files {
+                        let got: Vec<&str> = parts(&path);
+                        let n = files
+                            .iter()
+                            .filter(|f| {
+                                f.len() >= got.len()
+                                    && f[f.len() - got.len()..]
+                                        .iter()
+                                        .zip(&got)
+                                        .all(|(a, b)| a == b)
+                            })
+                            .count();
+                        if n > 1 {
+                            continue;
+                        }
+                    }
+                }
+            }
         }
         match out.iter_mut().find(|a| a.id == id) {
             Some(a) => a.modified |= modified,
@@ -222,6 +277,8 @@ pub struct History {
     pub commits: Vec<i64>,
     pub uncommitted: bool,
     pub exists: bool,
+    /// Git answered both questions; without that nothing is known about changes.
+    pub known: bool,
 }
 
 /// Longest any one git call may take; a stalled repository is treated as unknown.
@@ -271,18 +328,18 @@ pub fn repo_root(path: &Path) -> Option<PathBuf> {
 
 /// The file's history in `root`, `rel` being repo-relative.
 pub fn history(root: &Path, rel: &str) -> History {
-    let commits = git(root, &["log", "--format=%ct", "-n", "500", "--", rel])
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| l.trim().parse::<i64>().ok().map(|t| t * 1000))
-                .collect()
-        })
-        .unwrap_or_default();
-    let uncommitted =
-        git(root, &["status", "--porcelain", "--", rel]).is_some_and(|s| !s.trim().is_empty());
+    let log = git(root, &["log", "--format=%ct", "-n", "500", "--", rel]);
+    let status = git(root, &["status", "--porcelain", "--", rel]);
     History {
-        commits,
-        uncommitted,
+        known: log.is_some() && status.is_some(),
+        commits: log
+            .map(|s| {
+                s.lines()
+                    .filter_map(|l| l.trim().parse::<i64>().ok().map(|t| t * 1000))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        uncommitted: status.is_some_and(|s| !s.trim().is_empty()),
         exists: root.join(rel).exists(),
     }
 }
@@ -329,7 +386,7 @@ pub fn lines_since(root: &Path, rel: &str, as_of: i64) -> Option<Lines> {
 
 /// Whether anything happened to the file after `as_of`.
 fn changed(h: &History, as_of: i64) -> bool {
-    h.commits.iter().any(|t| *t > as_of) || h.uncommitted || !h.exists
+    !h.known || h.commits.iter().any(|t| *t > as_of) || h.uncommitted || !h.exists
 }
 
 /// How the file changed after `as_of`, in words; None when it did not.
@@ -338,6 +395,10 @@ pub fn change_since(h: &History, as_of: i64, now: i64, lines: Option<Lines>) -> 
     let mut parts = Vec::new();
     if !h.exists {
         parts.push("the file no longer exists".to_string());
+    }
+    if !h.known {
+        parts.push("history unknown (git did not answer in time)".to_string());
+        return Some(parts.join(", "));
     }
     if let Some(latest) = after.first() {
         parts.push(format!(
@@ -473,6 +534,7 @@ fn touch_text(t: &Target, found: &[About]) -> String {
             stale += 1;
             match (h.exists, lines_since(&t.root, &t.rel, a.as_of)) {
                 (false, _) => " (file gone since)".to_string(),
+                _ if !h.known => " (file history unknown)".to_string(),
                 (true, Some(Lines::Counted(0, 0))) => " (no net change since)".to_string(),
                 (true, Some(Lines::Counted(x, y))) => format!(" (file since: +{x} −{y} lines)"),
                 (true, Some(Lines::Binary)) => " (binary content changed since)".to_string(),
@@ -494,7 +556,7 @@ fn touch_text(t: &Target, found: &[About]) -> String {
         let summary = change_since(&h, newest, now, None)
             .unwrap_or_else(|| "it changed since some of them".into());
         w.push_str(&format!(
-            "{stale} of {} predate changes to the file ({summary}); check the code before relying on them.\n",
+            "{stale} of {} predate changes to the file: {summary}. Check the code before relying on them.\n",
             found.len()
         ));
     }
@@ -666,6 +728,7 @@ mod tests {
             commits: vec![3_000, 2_000, 1_000],
             uncommitted: false,
             exists: true,
+            known: true,
         };
         assert_eq!(change_since(&h, 3_000, 10_000, None), None);
         assert_eq!(
@@ -679,8 +742,15 @@ mod tests {
         );
         let gone = History {
             exists: false,
+            known: true,
             ..Default::default()
         };
+        let unknown = History::default();
+        assert!(
+            change_since(&unknown, 0, 0, None)
+                .unwrap()
+                .contains("history unknown")
+        );
         assert_eq!(
             change_since(&gone, 0, 0, Some(Lines::Counted(0, 0))).unwrap(),
             "the file no longer exists"
@@ -828,7 +898,7 @@ mod tests {
         let touch = on_touch(&c, "claude:s", &t, 3).unwrap().unwrap();
         assert!(touch.contains("(file since: +1 −0 lines)"), "{touch}");
         assert!(
-            touch.contains("1 of 1 predate changes to the file"),
+            touch.contains("1 of 1 predate changes to the file: "),
             "{touch}"
         );
         assert!(
@@ -841,6 +911,65 @@ mod tests {
         let r = report(&c, &t, 10).unwrap();
         let after = r.split("#2 ").nth(1).unwrap();
         assert!(after.lines().nth(1).unwrap().contains("unchanged"), "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_ending_that_fits_several_tracked_files_does_not_match() {
+        let dir = std::env::temp_dir().join(format!("mnem-files-amb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for p in ["packages/a/src", "packages/b/src", "packages/c/lib"] {
+            std::fs::create_dir_all(dir.join(p)).unwrap();
+        }
+        std::fs::write(dir.join("packages/a/src/shared.rs"), "a\n").unwrap();
+        std::fs::write(dir.join("packages/b/src/shared.rs"), "b\n").unwrap();
+        std::fs::write(dir.join("packages/c/lib/only.rs"), "c\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        let c = crate::db::open_with(Path::new(":memory:"), Duration::from_secs(1)).unwrap();
+        for (id, file) in [(1, "src/shared.rs"), (2, "lib/only.rs")] {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
+                 VALUES (?1, 'p', 'observation', 'bugfix', 't', ?2, 'mnem', ?1, 1)",
+                params![id, format!("[\"{file}\"]")],
+            )
+            .unwrap();
+        }
+        let root = dir.canonicalize().unwrap();
+        let ids = |rel: &str| -> Vec<i64> {
+            let place = Place {
+                rel,
+                root: Some(&root),
+                project: "p",
+            };
+            about_in(&c, &place, &crate::recall::Scope::default(), 10)
+                .unwrap()
+                .iter()
+                .map(|a| a.id)
+                .collect()
+        };
+        // Which package's src/shared.rs? Unknown: neither gets the memory.
+        assert!(ids("packages/a/src/shared.rs").is_empty());
+        assert!(ids("packages/b/src/shared.rs").is_empty());
+        // Only one tracked file ends in lib/only.rs.
+        assert_eq!(ids("packages/c/lib/only.rs"), vec![2]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
