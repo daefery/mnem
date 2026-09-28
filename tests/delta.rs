@@ -271,7 +271,10 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
     let meaning_hit = add("Snapshots can be recovered safely", [1.0, 0.0, 0.0, 0.0]);
     let _unrelated = add("Viewer colours changed", [0.0, 1.0, 0.0, 0.0]);
     // Shares the prompt's words but not its meaning: dropped.
-    let word_noise = add("Database backup restore button colours", [0.0, 1.0, 0.0, 0.0]);
+    let word_noise = add(
+        "Database backup restore button colours",
+        [0.0, 1.0, 0.0, 0.0],
+    );
     let query = mnem::embed::Query {
         model: "test-model".into(),
         vec: vec![0.9, 0.1, 0.0, 0.0],
@@ -296,7 +299,10 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
         "keyword order first: {ids:?}"
     );
     assert!(ids.contains(&meaning_hit), "meaning fills the gap: {ids:?}");
-    assert!(!ids.contains(&word_noise), "same words, other meaning: {ids:?}");
+    assert!(
+        !ids.contains(&word_noise),
+        "same words, other meaning: {ids:?}"
+    );
 }
 
 fn add_vector_memory(c: &Connection, title: &str, ty: &str, v: [f32; 4]) -> i64 {

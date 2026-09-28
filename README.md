@@ -44,7 +44,7 @@ something since, a short "meanwhile" update.
   "distill": {
     "base_url": "http://127.0.0.1:8317/v1",
     "api_key_json": "~/.pi/agent/cliproxyapi.json",
-    "models": ["gpt-5.6-luna", "gemini-3.5-flash-lite", "developer/claude-haiku-4-5-20251001"],
+    "models": ["gpt-5.6-luna", "developer/claude-haiku-4-5-20251001"],
     "auto_fallback": true
   }
 }
@@ -53,9 +53,17 @@ something since, a short "meanwhile" update.
 - `semantic.model` (default `minishlab/potion-base-8M`), `semantic.enabled`: local
   semantic recall. The watch service keeps the model loaded and embeds new memories;
   hooks ask it for query vectors over localhost and fall back to keywords if it is down.
-  Prompt recall keeps keyword order and lets meaning-based matches fill empty slots,
-  which scored best on `mnem eval` (a fused ranking puts the right memory first more
-  often but in the top five less often).
+  Prompt recall keeps keyword order, drops keyword hits that are far from the prompt
+  in meaning (cosine below 0.45), and lets meaning-based matches fill empty slots.
+  On 79 held-out real prompts judged by the distillation models, that showed 29% fewer
+  unhelpful memories than keywords alone for 11% fewer helpful ones (57% of memories
+  shown helped, against 52%).
+- `mnem eval`: measures recall on test sets in `~/.mnem/eval/` (private; they hold
+  your prompts). `--set recall` (model-written questions, `--build N`), `--set vague`
+  (hand-written, `"id": null` for prompts nothing should answer), `--set real-dev` /
+  `real-test` (real prompts replayed as of when they were typed, `--build-real N`;
+  add `--judge` to have the distillation models judge what recall showed). Tune on
+  `real-dev`; read `real-test` only to confirm.
 - `distill.exclude_providers` / `distill.exclude_models`: never use these models, e.g.
   `["antigravity"]` and `["gemini"]`.
 - `harness_prompts`: prompts matching these patterns are labelled as tooling-injected,

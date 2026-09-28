@@ -81,8 +81,17 @@ struct Case {
     /// The memory that answers the question; None for a prompt no memory answers,
     /// where the right outcome is to recall nothing.
     id: Option<i64>,
+    /// Further memories that equally answer it (any one counts as found).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ids: Vec<i64>,
     project: String,
     question: String,
+    /// Replay the prompt as of this time (ms): memories created later are ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before: Option<i64>,
+    /// A real prompt whose right answer is unknown: recall is judged (`--judge`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    open: bool,
 }
 
 /// A named test set in ~/.mnem/eval: `recall` (model-written) or `vague` (hand-written
@@ -130,8 +139,11 @@ pub fn build(conn: &Connection, n: usize, path: &Path) -> Result<usize> {
                         "{}",
                         serde_json::to_string(&Case {
                             id: Some(id),
+                            ids: vec![],
                             project,
-                            question: q.to_string()
+                            question: q.to_string(),
+                            before: None,
+                            open: false,
                         })?
                     )?;
                     written += 1;
@@ -142,6 +154,144 @@ pub fn build(conn: &Connection, n: usize, path: &Path) -> Result<usize> {
     }
     llm.save_cooldowns(conn)?;
     Ok(written)
+}
+
+/// Sample `n` real human prompts from transcripts, split by a hash of their text into
+/// `real-dev` (for tuning) and `real-test` (look once, never tune on it). Each is
+/// replayed as of when it was typed; its answer is unknown, so recall is judged.
+pub fn build_real(conn: &Connection, n: usize) -> Result<(usize, usize)> {
+    let mut st = conn.prepare(
+        "SELECT e.text, e.ts, s.project FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.kind = 'prompt' AND e.label IS NULL AND e.thread IS NULL AND e.ts IS NOT NULL
+           AND length(e.text) BETWEEN 40 AND 800 AND s.project NOT LIKE '/%'
+           AND s.project IN (SELECT project FROM memories GROUP BY project HAVING count(*) >= 200)
+         ORDER BY abs(random()) LIMIT ?1",
+    )?;
+    let rows: Vec<(String, i64, String)> = st
+        .query_map([n as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let dir = db::data_dir().join("eval");
+    std::fs::create_dir_all(&dir)?;
+    let mut dev = std::fs::File::create(set_path("real-dev"))?;
+    let mut test = std::fs::File::create(set_path("real-test"))?;
+    let (mut a, mut b) = (0, 0);
+    for (question, ts, project) in rows {
+        let case = serde_json::to_string(&Case {
+            id: None,
+            ids: vec![],
+            project,
+            question: question.trim().to_string(),
+            before: Some(ts),
+            open: true,
+        })?;
+        if question_key(&question).ends_with(['0', '2', '4', '6', '8', 'a', 'c', 'e']) {
+            writeln!(dev, "{case}")?;
+            a += 1;
+        } else {
+            writeln!(test, "{case}")?;
+            b += 1;
+        }
+    }
+    Ok((a, b))
+}
+
+fn question_key(q: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(q.trim().as_bytes())[..8]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+const JUDGE: &str = r#"You judge a memory system for coding agents. Given a developer's prompt to their
+coding agent and past memories (notes from earlier sessions in the same project), mark each
+memory 1 if showing it to the agent now would likely help with this prompt (same task,
+component, decision, bug, rule or context), else 0. Topic overlap alone is not enough.
+Return JSON only: {"relevant": [0 or 1 for each memory, in order]}"#;
+
+/// Relevance of each memory to the prompt, judged by the distillation models and cached
+/// in ~/.mnem/eval/judgments.jsonl so reruns cost nothing. None if the judge failed.
+fn judge(
+    conn: &Connection,
+    llm: &Llm,
+    cache: &mut std::collections::HashMap<(String, i64), bool>,
+    project: &str,
+    question: &str,
+    ids: &[i64],
+) -> Result<Option<Vec<bool>>> {
+    let key = question_key(question);
+    let todo: Vec<i64> = ids
+        .iter()
+        .copied()
+        .filter(|id| !cache.contains_key(&(key.clone(), *id)))
+        .collect();
+    if !todo.is_empty() {
+        let mut lines = Vec::new();
+        for (i, id) in todo.iter().enumerate() {
+            let (t, s, n): (String, String, String) = conn.query_row(
+                "SELECT coalesce(title, ''), coalesce(subtitle, ''), coalesce(narrative, '') FROM memories WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            lines.push(format!(
+                "{}. {t} — {s} — {}",
+                i + 1,
+                crate::text::head(&n, 300)
+            ));
+        }
+        let user = format!(
+            "Project: {project}\nPrompt:\n{}\n\nMemories:\n{}",
+            crate::text::head(question, 1500),
+            lines.join("\n")
+        );
+        let Ok((v, _)) = llm.ask(JUDGE, &user) else {
+            return Ok(None);
+        };
+        let marks: Vec<bool> = v["relevant"]
+            .as_array()
+            .map(|a| a.iter().map(|x| x.as_i64() == Some(1)).collect())
+            .unwrap_or_default();
+        if marks.len() != todo.len() {
+            return Ok(None);
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(set_path("judgments"))?;
+        for (id, rel) in todo.iter().zip(marks) {
+            writeln!(f, "{}", json!({ "q": key, "id": id, "relevant": rel }))?;
+            cache.insert((key.clone(), *id), rel);
+        }
+    }
+    Ok(Some(
+        ids.iter().map(|id| cache[&(key.clone(), *id)]).collect(),
+    ))
+}
+
+fn load_judgments() -> std::collections::HashMap<(String, i64), bool> {
+    let mut m = std::collections::HashMap::new();
+    if let Ok(f) = std::fs::File::open(set_path("judgments")) {
+        for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str::<Value>(&l)
+                && let (Some(q), Some(id), Some(rel)) =
+                    (v["q"].as_str(), v["id"].as_i64(), v["relevant"].as_bool())
+            {
+                m.insert((q.to_string(), id), rel);
+            }
+        }
+    }
+    m
+}
+
+/// Recall on real prompts as judged: memories shown, how many helped, and how many
+/// prompts got at least one useful memory.
+#[derive(Default)]
+pub struct Judged {
+    pub prompts: usize,
+    pub shown: usize,
+    pub right: usize,
+    pub helped: usize,
+    pub unjudged: usize,
 }
 
 pub struct Report {
@@ -157,9 +307,23 @@ pub struct Report {
     /// Prompts no memory answers, and how many of them still recalled something.
     pub negatives: usize,
     pub false_alarms: Vec<String>,
+    /// Mean share of the top five that are targets, over cases that recalled anything.
+    pub precision5: f64,
+    /// Answerable cases that recalled nothing at all.
+    pub silent: usize,
+    pub judged: Judged,
 }
 
-pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report> {
+pub fn run(conn: &Connection, path: &Path, mode: recall::Mode, judging: bool) -> Result<Report> {
+    let llm = if judging {
+        let l = Llm::from_config()?;
+        l.load_cooldowns(conn);
+        Some(l)
+    } else {
+        None
+    };
+    let mut cache = load_judgments();
+    let mut judged = Judged::default();
     let embedder = recall::semantic_embedder();
     let f = std::fs::File::open(path).with_context(|| {
         format!(
@@ -177,6 +341,8 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
     let mut misses = Vec::new();
     let mut skipped = 0;
     let (mut negatives, mut false_alarms) = (0, Vec::new());
+    let (mut precision, mut precise_n, mut silent) = (0.0, 0, 0);
+    let mut created = conn.prepare("SELECT coalesce(created_at, 0) FROM memories WHERE id = ?1")?;
     for c in &cases {
         // Sensitive memories are kept out of automatic recall on purpose; not a miss.
         let sensitive: bool = c.id.is_some_and(|id| {
@@ -193,24 +359,61 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
         }
         let t = Instant::now();
         let query = embedder.as_ref().map(|e| e.query(&c.question));
-        let ranked = recall::rank(
+        let mut ranked = recall::rank(
             conn,
             &c.project,
             &c.question,
             None,
-            10,
+            if c.before.is_some() { 60 } else { 10 },
             query.as_ref(),
             mode,
         )?;
         times.push(t.elapsed().as_secs_f64() * 1000.0);
-        let Some(target) = c.id else {
+        // Replaying an old prompt: drop what did not exist yet. Scores are per memory,
+        // so the order of the rest is the order recall would have produced then.
+        if let Some(before) = c.before {
+            ranked.retain(|r| {
+                created
+                    .query_row([r.0], |x| x.get::<_, i64>(0))
+                    .is_ok_and(|t| t < before)
+            });
+            ranked.truncate(10);
+        }
+        let targets: Vec<i64> = c.id.into_iter().chain(c.ids.iter().copied()).collect();
+        if c.open {
+            let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
+            judged.prompts += 1;
+            judged.shown += top.len();
+            if let Some(llm) = &llm
+                && !top.is_empty()
+            {
+                match judge(conn, llm, &mut cache, &c.project, &c.question, &top)? {
+                    Some(marks) => {
+                        let right = marks.iter().filter(|m| **m).count();
+                        judged.right += right;
+                        judged.helped += (right > 0) as usize;
+                    }
+                    None => judged.unjudged += 1,
+                }
+            }
+            continue;
+        }
+        let Some(&target) = targets.first() else {
             negatives += 1;
             if !ranked.is_empty() {
                 false_alarms.push(c.question.clone());
             }
             continue;
         };
-        match ranked.iter().position(|r| r.0 == target) {
+        let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
+        if top.is_empty() {
+            silent += 1;
+        } else {
+            precision +=
+                top.iter().filter(|id| targets.contains(id)).count() as f64 / top.len() as f64;
+            precise_n += 1;
+        }
+        match ranked.iter().position(|r| targets.contains(&r.0)) {
             Some(i) => {
                 hit1 += (i == 0) as usize;
                 hit5 += (i < 5) as usize;
@@ -229,7 +432,10 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
             .copied()
             .unwrap_or(0.0)
     };
-    let positives = cases.len() - skipped - negatives;
+    if let Some(llm) = &llm {
+        llm.save_cooldowns(conn)?;
+    }
+    let positives = cases.len() - skipped - negatives - judged.prompts;
     Ok(Report {
         cases: positives,
         skipped,
@@ -242,6 +448,13 @@ pub fn run(conn: &Connection, path: &Path, mode: recall::Mode) -> Result<Report>
         },
         negatives,
         false_alarms,
+        precision5: if precise_n == 0 {
+            0.0
+        } else {
+            precision / precise_n as f64
+        },
+        silent,
+        judged,
         p50_ms: pct(0.5),
         p95_ms: pct(0.95),
         misses,
@@ -273,4 +486,31 @@ pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
     target.sort_by(f32::total_cmp);
     wrong.sort_by(f32::total_cmp);
     Ok((target, wrong))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Case;
+
+    #[test]
+    fn test_set_lines_old_and_new() {
+        let old: Case = serde_json::from_str(r#"{"id":7,"project":"p","question":"why"}"#).unwrap();
+        assert_eq!(
+            (old.id, old.ids.len(), old.open, old.before),
+            (Some(7), 0, false, None)
+        );
+        let none: Case =
+            serde_json::from_str(r#"{"id":null,"project":"p","question":"dinner?"}"#).unwrap();
+        assert!(none.id.is_none() && !none.open);
+        let real: Case = serde_json::from_str(
+            r#"{"id":null,"project":"p","question":"fix it","before":5,"open":true}"#,
+        )
+        .unwrap();
+        assert!(real.open && real.before == Some(5));
+        // Written back, defaults stay out of the file.
+        assert_eq!(
+            serde_json::to_string(&old).unwrap(),
+            r#"{"id":7,"project":"p","question":"why"}"#
+        );
+    }
 }

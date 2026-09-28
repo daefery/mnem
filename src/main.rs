@@ -178,9 +178,16 @@ enum Cmd {
         /// Print the cosine distribution of true targets vs best wrong candidates
         #[arg(long)]
         cosines: bool,
-        /// Test set in ~/.mnem/eval: recall (model-written) or vague (hand-written)
+        /// Test set in ~/.mnem/eval: recall (model-written), vague (hand-written),
+        /// real-dev or real-test (real prompts, see --build-real)
         #[arg(long, default_value = "recall")]
         set: String,
+        /// Sample N real prompts from transcripts into real-dev and real-test
+        #[arg(long)]
+        build_real: Option<usize>,
+        /// Have the distillation models judge what recall shows for real prompts
+        #[arg(long)]
+        judge: bool,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -381,7 +388,14 @@ fn main() -> Result<()> {
             mode,
             cosines,
             set,
+            build_real,
+            judge,
         } => {
+            if let Some(n) = build_real {
+                let (dev, test) = mnem::eval::build_real(&conn, n)?;
+                println!("sampled {dev} prompts into real-dev and {test} into real-test");
+                return Ok(());
+            }
             let path = mnem::eval::set_path(&set);
             if cosines {
                 let (t, w) = mnem::eval::cosines(&conn, &path)?;
@@ -413,7 +427,35 @@ fn main() -> Result<()> {
                 let written = mnem::eval::build(&conn, n, &path)?;
                 println!("built {written} questions in {}", path.display());
             }
-            let r = mnem::eval::run(&conn, &path, mode)?;
+            let r = mnem::eval::run(&conn, &path, mode, judge)?;
+            if r.judged.prompts > 0 {
+                let j = &r.judged;
+                println!(
+                    "real prompts: {} · memories shown {:.1} per prompt",
+                    j.prompts,
+                    j.shown as f64 / j.prompts as f64
+                );
+                if judge {
+                    println!(
+                        "judged: {} of {} shown helped ({:.0}%) · {} shown did not · {} prompts got a useful memory{}",
+                        j.right,
+                        j.shown,
+                        100.0 * j.right as f64 / j.shown.max(1) as f64,
+                        j.shown - j.right,
+                        j.helped,
+                        if j.unjudged > 0 {
+                            format!(" · {} not judged (model failed)", j.unjudged)
+                        } else {
+                            String::new()
+                        }
+                    );
+                } else {
+                    println!("add --judge to have the distillation models judge them");
+                }
+                if r.cases == 0 && r.negatives == 0 {
+                    return Ok(());
+                }
+            }
             println!(
                 "recall eval: {} cases ({} sensitive skipped) · hit@1 {:.0}% · hit@5 {:.0}% · MRR {:.2} · p50 {:.1} ms · p95 {:.1} ms",
                 r.cases,
@@ -423,6 +465,11 @@ fn main() -> Result<()> {
                 r.mrr,
                 r.p50_ms,
                 r.p95_ms
+            );
+            println!(
+                "top-5 precision {:.0}% (share of recalled memories that are targets) · recalled nothing for {} answerable",
+                100.0 * r.precision5,
+                r.silent
             );
             if r.negatives > 0 {
                 println!(
