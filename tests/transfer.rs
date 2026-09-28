@@ -78,6 +78,14 @@ fn back_up_download_and_import_on_another_machine() {
     std::fs::write(a.join("config.json"), r#"{"harness_prompts":["^from-a"]}"#).unwrap();
     let db_a = a.join("mnem.db");
     seed(&db_a, "claude:old", "Backup restore stages the database");
+    // A transcript that exists only on machine A.
+    Connection::open(&db_a)
+        .unwrap()
+        .execute(
+            "INSERT INTO sources(path, agent) VALUES ('/nonexistent/machine-a/session.jsonl', 'claude')",
+            [],
+        )
+        .unwrap();
     let port_a = 39000 + (std::process::id() % 1000) as u16;
     serve(db_a.clone(), port_a);
 
@@ -133,7 +141,61 @@ fn back_up_download_and_import_on_another_machine() {
     let junk = request(port_b, "POST", "/api/import", OK, b"definitely not sqlite");
     assert_eq!(junk.status, 422, "{}", String::from_utf8_lossy(&junk.body));
 
-    let preview = request(port_b, "POST", "/api/import", OK, &got.body);
+    // The same backup, as if taken on another host, once with broken settings.
+    let variant = |host: &str, config: &str| -> Vec<u8> {
+        let f = b.join(format!("variant-{host}.db"));
+        std::fs::write(&f, &got.body).unwrap();
+        let c = Connection::open(&f).unwrap();
+        c.execute("UPDATE meta SET v = ?1 WHERE k = 'export.host'", [host])
+            .unwrap();
+        c.execute("UPDATE meta SET v = ?1 WHERE k = 'export.config'", [config])
+            .unwrap();
+        drop(c);
+        std::fs::read(&f).unwrap()
+    };
+    let broken = request(
+        port_b,
+        "POST",
+        "/api/import",
+        OK,
+        &variant("old-laptop", r#"{"distill": 5}"#),
+    );
+    assert_eq!(
+        broken.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&broken.body)
+    );
+    let bp = json(&broken);
+    assert_eq!(bp["settings"]["valid"], false);
+    let refused = request(
+        port_b,
+        "POST",
+        &format!(
+            "/api/import/apply?file={}&settings=1",
+            bp["file"].as_str().unwrap()
+        ),
+        OK,
+        b"",
+    );
+    assert_eq!(refused.status, 422);
+    assert_eq!(json(&refused)["changed"], false);
+    let title: String = Connection::open(&db_b)
+        .unwrap()
+        .query_row("SELECT title FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        title, "Viewer colours changed",
+        "refused import changed nothing"
+    );
+
+    let preview = request(
+        port_b,
+        "POST",
+        "/api/import",
+        OK,
+        &variant("old-laptop", r#"{"harness_prompts":["^from-a"]}"#),
+    );
     assert_eq!(
         preview.status,
         200,
@@ -143,6 +205,9 @@ fn back_up_download_and_import_on_another_machine() {
     let p = json(&preview);
     assert_eq!(p["backup"]["memories"], 1);
     assert_eq!(p["origin"]["has_settings"], true);
+    assert_eq!(p["origin"]["host"], "old-laptop");
+    assert_eq!(p["settings"]["valid"], true);
+    assert_eq!(p["settings"]["changes"][0][0], "harness_prompts");
     assert_eq!(p["current"]["sessions"], 1);
     // Nothing changed yet.
     let title: String = Connection::open(&db_b)
@@ -176,7 +241,10 @@ fn back_up_download_and_import_on_another_machine() {
         "{}",
         String::from_utf8_lossy(&applied.body)
     );
-    assert_eq!(json(&applied)["settings_applied"], true);
+    let done = json(&applied);
+    assert_eq!(done["settings_applied"], true);
+    assert_eq!(done["changed"], true);
+    assert_eq!(done["foreign_transcripts"], 1);
 
     let c = Connection::open(&db_b).unwrap();
     let title: String = c

@@ -246,6 +246,47 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Make a database from elsewhere safe to adopt: drop every trigger, view and index and
+/// every table this build does not define, then recreate the schema objects from this
+/// build. A crafted file can then carry only data, never code that runs on later writes.
+pub fn sanitize_schema(conn: &Connection) -> Result<()> {
+    let known: Vec<String> = {
+        let fresh = Connection::open_in_memory()?;
+        fresh.execute_batch(SCHEMA)?;
+        migrate(&fresh)?;
+        let mut st = fresh.prepare("SELECT name FROM sqlite_master WHERE type = 'table'")?;
+        st.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let objects: Vec<(String, String)> = {
+        let mut st =
+            conn.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?;
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let quote = |n: &str| format!("\"{}\"", n.replace('"', "\"\""));
+    // Triggers and views first: they may reference the tables dropped below.
+    for kind in ["trigger", "view", "index"] {
+        for (t, name) in objects.iter().filter(|(t, _)| t == kind) {
+            conn.execute_batch(&format!(
+                "DROP {} IF EXISTS {}",
+                t.to_uppercase(),
+                quote(name)
+            ))?;
+        }
+    }
+    for (_, name) in objects
+        .iter()
+        .filter(|(t, n)| t == "table" && !known.contains(n))
+    {
+        // Shadow tables of an unknown virtual table go with it.
+        conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote(name)))?;
+    }
+    conn.execute_batch(SCHEMA)?;
+    migrate(conn)?;
+    Ok(())
+}
+
 /// Migrations for databases created by older builds.
 fn migrate(conn: &Connection) -> Result<()> {
     // quarantine gained a generation column in its primary key; it only holds diagnostics.

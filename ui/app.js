@@ -362,7 +362,7 @@
   async function postJSON(url) {
     const r = await fetch(url, { method: "POST", headers: { "X-Mnem": "1" } });
     const data = await r.json().catch(() => ({ error: `${r.status}` }));
-    if (!r.ok) throw new Error(data.error || `${r.status}`);
+    if (!r.ok) throw Object.assign(new Error(data.error || `${r.status}`), { data });
     return data;
   }
 
@@ -449,10 +449,37 @@
     }
   }
 
+  const show = (v) => (v === null || v === undefined ? "(not set)" : typeof v === "string" ? v : JSON.stringify(v));
+
+  // What taking the backup's settings would change; off unless the user opts in.
+  function settingsBlock(review) {
+    if (!review) return { node: el("p", { class: "move-help" }, "This backup carries no settings; this machine keeps its own."), box: null };
+    if (!review.valid) {
+      return { node: el("p", { class: "move-help error" }, `The backup’s settings are not valid (${review.error}); they will not be used.`), box: null };
+    }
+    if (!review.changes.length) {
+      return { node: el("p", { class: "move-help" }, "The backup’s settings match this machine’s."), box: null };
+    }
+    const box = el("input", { type: "checkbox", id: "move-settings" });
+    const rows = review.changes.map(([key, here, theirs]) =>
+      el("li", { class: review.sensitive.includes(key) ? "sensitive" : null },
+        el("code", {}, key), `: ${show(here)} → ${show(theirs)}`));
+    return {
+      box,
+      node: el("div", { class: "move-settings" },
+        el("label", {}, box, el("span", {}, "Also use the backup’s settings (this machine’s are kept as config.json.bak). They would change:")),
+        el("ul", {}, rows),
+        review.sensitive.length
+          ? el("p", { class: "move-help error" }, "Marked lines change where prompts and memories are sent or which key is used. Only tick this if you recognise them.")
+          : null,
+        review.warning ? el("p", { class: "move-help error" }, review.warning) : null),
+    };
+  }
+
   function renderPreview(p) {
     const preview = $("move-preview");
     const o = p.origin;
-    const settings = el("input", { type: "checkbox", id: "move-settings", checked: o.has_settings ? "" : null });
+    const { node: settingsNode, box: settings } = settingsBlock(p.settings);
     const apply = el("button", { class: "move-btn danger" }, "Replace this machine’s memory with the backup");
     const cancel = el("button", { class: "move-btn quiet" }, "Cancel");
     const result = el("p", { class: "move-help", role: "status" });
@@ -463,9 +490,7 @@
         el("div", {}, el("b", {}, `This machine now (${p.current.host})`), countsText(p.current))),
       el("p", { class: "move-warn" },
         "Importing replaces this machine’s memory with the backup. The current memory is saved as a backup first, and transcripts still on this machine are read again afterwards, so their sessions come back."),
-      o.has_settings
-        ? el("label", {}, settings, el("span", {}, "Also use the backup’s settings (models, exclusions, embedding model). This machine’s settings are kept as config.json.bak."))
-        : el("p", { class: "move-help" }, "This backup carries no settings; this machine keeps its own."),
+      settingsNode,
       el("div", { class: "move-actions" }, apply, cancel),
       result,
     );
@@ -480,10 +505,15 @@
       result.classList.remove("error");
       result.textContent = "Saving the current memory, then restoring the backup…";
       try {
-        const useSettings = o.has_settings && settings.checked ? "1" : "0";
+        const useSettings = settings && settings.checked ? "1" : "0";
         const r = await postJSON(`/api/import/apply?file=${encodeURIComponent(p.file)}&settings=${useSettings}`);
         result.replaceChildren(`Imported: this machine now holds ${countsText(r.current)}.`);
-        if (r.settings_applied) {
+        if (r.foreign_transcripts) {
+          result.append(` ${fmtNum(r.foreign_transcripts)} transcripts from the other machine are kept as history.`);
+        }
+        if (r.settings_error) {
+          result.append(` The settings could not be written (${r.settings_error}); this machine keeps its own.`);
+        } else if (r.settings_applied) {
           if (r.can_restart) {
             const restart = el("button", { class: "move-btn primary" }, "Restart mnem to use the settings");
             restart.addEventListener("click", () => restartMnem(restart, result));
@@ -495,9 +525,12 @@
         reset();
         loadHealth();
       } catch (e) {
+        const changed = e.data && e.data.changed;
         result.classList.add("error");
-        result.textContent = `Import failed, nothing changed: ${e.message}`;
-        apply.disabled = cancel.disabled = false;
+        result.textContent = changed
+          ? `The memory was replaced, but: ${e.message}`
+          : `Import failed, nothing changed: ${e.message}`;
+        apply.disabled = cancel.disabled = !!changed;
       }
     });
   }

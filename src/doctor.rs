@@ -68,7 +68,16 @@ pub fn run(conn: &Connection) -> Result<bool> {
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )?;
     let quarantined: i64 = conn.query_row("SELECT count(*) FROM quarantine", [], |r| r.get(0))?;
+    let foreign: i64 =
+        conn.query_row("SELECT count(*) FROM sources WHERE excluded = 2", [], |r| {
+            r.get(0)
+        })?;
     println!("  deleted by agent: {missing} files | quarantined lines: {quarantined}");
+    if foreign > 0 {
+        println!(
+            "  from another machine: {foreign} transcripts (history imported; files not here)"
+        );
+    }
     if lost_files > 0 {
         // Permanent: the agent deleted these before mnem read their tail.
         println!(

@@ -13,6 +13,7 @@ use crate::db;
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -192,6 +193,119 @@ pub fn check_import(path: &Path) -> Result<(Manifest, Origin)> {
     Ok((m, origin(path)?))
 }
 
+/// What adopting a snapshot's settings would change on this machine.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsReview {
+    /// The settings parse as a mnem config.
+    pub valid: bool,
+    pub error: Option<String>,
+    /// Setting paths (e.g. distill.base_url) whose value differs: (path, here, backup).
+    pub changes: Vec<(String, Value, Value)>,
+    /// Changes that decide where prompts and memories are sent, or which key is used.
+    pub sensitive: Vec<String>,
+    /// Why this build could not use them fully, if so.
+    pub warning: Option<String>,
+}
+
+fn flatten(prefix: &str, v: &Value, out: &mut std::collections::BTreeMap<String, Value>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                let p = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                flatten(&p, x, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string(), v.clone());
+        }
+    }
+}
+
+pub fn review_settings(snapshot: &Path) -> Result<Option<SettingsReview>> {
+    let Some(cfg) = origin(snapshot)?.config else {
+        return Ok(None);
+    };
+    let parsed = serde_json::from_str::<crate::config::Config>(&cfg);
+    let theirs: Value = serde_json::from_str(&cfg).unwrap_or(Value::Null);
+    let ours: Value = std::fs::read_to_string(db::data_dir().join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| Value::Object(Default::default()));
+    let (mut a, mut b) = (Default::default(), Default::default());
+    flatten("", &ours, &mut a);
+    flatten("", &theirs, &mut b);
+    let keys: std::collections::BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+    let changes: Vec<(String, Value, Value)> = keys
+        .into_iter()
+        .filter(|k| a.get(*k) != b.get(*k))
+        .map(|k| {
+            (
+                k.clone(),
+                a.get(k).cloned().unwrap_or(Value::Null),
+                b.get(k).cloned().unwrap_or(Value::Null),
+            )
+        })
+        .collect();
+    let sensitive = changes
+        .iter()
+        .map(|c| c.0.clone())
+        .filter(|k| k.starts_with("distill.base_url") || k.starts_with("distill.api_key"))
+        .collect();
+    let model = b
+        .get("semantic.model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let warning = (model.starts_with("fastembed:") && !cfg!(feature = "fastembed")).then(|| {
+        format!("this mnem was built without ONNX support, so it cannot run {model}; recall would use keywords only. Install with `cargo install --features fastembed` first, or keep this machine's settings.")
+    });
+    Ok(Some(SettingsReview {
+        valid: parsed.is_ok(),
+        error: parsed.err().map(|e| e.to_string()),
+        changes,
+        sensitive,
+        warning,
+    }))
+}
+
+/// Transcripts the database knows but this machine does not have: after a move, mark
+/// them as another machine's (their history is kept) instead of "deleted by agent".
+/// A file that shows up later is read again as usual.
+pub fn mark_foreign_sources(conn: &Connection) -> Result<usize> {
+    let paths: Vec<String> = conn
+        .prepare("SELECT path FROM sources WHERE excluded = 0")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut n = 0;
+    let mut st = conn.prepare("UPDATE sources SET excluded = 2 WHERE path = ?1")?;
+    for p in paths.iter().filter(|p| !Path::new(p).exists()) {
+        n += st.execute([p])?;
+    }
+    Ok(n)
+}
+
+/// Free bytes on the filesystem holding `path`, when the platform can tell.
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0 {
+            return Some(s.f_bavail as u64 * s.f_frsize as u64);
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
 /// Replace config.json with the settings a snapshot carried, keeping the current file
 /// as config.json.bak-<time>. Returns false when the snapshot carried none. The
 /// settings must parse as a mnem config; they take effect when mnem restarts.
@@ -199,7 +313,13 @@ pub fn apply_settings(snapshot: &Path) -> Result<bool> {
     let Some(cfg) = origin(snapshot)?.config else {
         return Ok(false);
     };
-    serde_json::from_str::<crate::config::Config>(&cfg)
+    apply_settings_file(&cfg)?;
+    Ok(true)
+}
+
+/// Write settings text as config.json (validated first), keeping the old file.
+pub fn apply_settings_file(cfg: &str) -> Result<()> {
+    serde_json::from_str::<crate::config::Config>(cfg)
         .context("the backup's settings are not a valid mnem config")?;
     let path = db::data_dir().join("config.json");
     if path.exists() {
@@ -211,7 +331,7 @@ pub fn apply_settings(snapshot: &Path) -> Result<bool> {
     let tmp = db::data_dir().join("config.json.partial");
     std::fs::write(&tmp, cfg)?;
     std::fs::rename(&tmp, &path)?;
-    Ok(true)
+    Ok(())
 }
 
 /// Snapshots in `dir`, newest first, with their manifests when present.
@@ -271,11 +391,16 @@ fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
     let want: Option<Manifest> = std::fs::read_to_string(manifest_path(snapshot))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
-    let staged = std::env::temp_dir().join(format!(
-        "mnem-restore-{}-{}.db",
-        std::process::id(),
-        db::now_ms()
-    ));
+    // Beside the snapshot (same disk, counted by the import space check), with a name
+    // rotation never matches.
+    let staged = snapshot
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".restore-{}-{}.db",
+            std::process::id(),
+            db::now_ms()
+        ));
     std::fs::copy(snapshot, &staged).with_context(|| format!("copy {}", snapshot.display()))?;
     let result = (|| -> Result<Manifest> {
         let got = inspect(&staged)?;
@@ -286,8 +411,10 @@ fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
                 "row counts differ from manifest"
             );
         }
-        // Opening through mnem runs migrations exactly as a restored database would.
+        // Opening through mnem runs migrations exactly as a restored database would, and
+        // only this build's own triggers, views and indexes survive.
         let c = db::open(&staged)?;
+        db::sanitize_schema(&c)?;
         for t in ["memories_fts", "events_fts"] {
             c.execute(
                 &format!("INSERT INTO {t}({t}) VALUES ('integrity-check')"),
@@ -357,20 +484,20 @@ fn restore_with_wait(
     // otherwise delete the very snapshot being restored.
     let (m, staged) = stage(snapshot)?;
     let result = (|| -> Result<()> {
-        let keep = create(conn, backups, KEEP + 1)
-            .context("could not snapshot the current database before restoring")?;
-        println!("current database saved as {}", keep.file);
+        let live = conn
+            .path()
+            .map(PathBuf::from)
+            .context("the live database has no file path")?;
         let src = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let backup = rusqlite::backup::Backup::new(&src, conn)?;
-        // One step copies every page under a single lock, so the result is consistent.
-        // A busy database is retried until RESTORE_WAIT, then restore stops before any
-        // page is written: the live database is left exactly as it was.
+        // First take the live database's write lock (a step of zero pages) and hold it
+        // until the copy is done, so nothing can commit between the safety snapshot and
+        // the replacement. Writers wait; hooks fail open and catch up from transcripts.
         let deadline = std::time::Instant::now() + wait;
         loop {
             use rusqlite::backup::StepResult::{Busy, Done, Locked, More};
-            match backup.step(i32::MAX)? {
-                Done => break,
-                More => continue,
+            match backup.step(0)? {
+                More | Done => break,
                 Busy | Locked if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(100))
                 }
@@ -378,6 +505,23 @@ fn restore_with_wait(
                     "another process kept the database locked for {}s; nothing was changed. Retry, or stop mnem-watch.service first",
                     wait.as_secs()
                 ),
+                _ => bail!("unexpected backup step result"),
+            }
+        }
+        // The snapshot reads through its own connection; readers are not blocked.
+        let reader = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let keep = create(&reader, backups, KEEP + 1).context(
+            "could not snapshot the current database before restoring; nothing was changed",
+        )?;
+        println!("current database saved as {}", keep.file);
+        loop {
+            use rusqlite::backup::StepResult::{Busy, Done, Locked, More};
+            match backup.step(i32::MAX)? {
+                Done => break,
+                More => continue,
+                Busy | Locked => {
+                    bail!("lost the database lock during restore; nothing was changed")
+                }
                 _ => bail!("unexpected backup step result"),
             }
         }
@@ -513,6 +657,105 @@ mod tests {
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "live database unchanged");
+    }
+
+    #[test]
+    fn restore_drops_code_a_backup_smuggles_in() {
+        let d = std::env::temp_dir().join(format!("mnem-restore-evil-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let backups = d.join("backups");
+        let evil = d.join("evil.db");
+        {
+            let c = db::open(&evil).unwrap();
+            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'kept', 'mnem', 'a')", [])
+                .unwrap();
+            c.execute_batch(
+                "CREATE TRIGGER wipe AFTER INSERT ON memories BEGIN DELETE FROM memories; END;
+                 CREATE VIEW peek AS SELECT * FROM memories;
+                 CREATE TABLE stash(x);
+                 DROP TRIGGER memories_vec_ad;
+                 CREATE TRIGGER memories_vec_ad AFTER DELETE ON memories BEGIN DELETE FROM sessions; END;",
+            )
+            .unwrap();
+        }
+        let mut conn = db::open(&d.join("m.db")).unwrap();
+        restore(&evil, &mut conn, &backups).unwrap();
+        let names: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE name IN ('wipe', 'peek', 'stash')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(names.is_empty(), "{names:?}");
+        let sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'memories_vec_ad'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            sql.contains("memory_vectors") && !sql.contains("sessions"),
+            "{sql}"
+        );
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'new', 'mnem', 'b')", [])
+            .unwrap();
+        let n: i64 = conn
+            .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn no_write_is_lost_during_restore() {
+        let d = std::env::temp_dir().join(format!("mnem-restore-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let backups = d.join("backups");
+        let live = d.join("m.db");
+        let mut conn = db::open(&live).unwrap();
+        let src = d.join("other.db");
+        {
+            let c = db::open(&src).unwrap();
+            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'imported', 'mnem', 'x')", [])
+                .unwrap();
+        }
+        // A writer keeps committing while the restore runs.
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer = {
+            let (live, stop) = (live.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let c = db::open_with(&live, std::time::Duration::from_millis(5)).unwrap();
+                let mut ok = Vec::new();
+                let mut i = 0;
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    i += 1;
+                    let key = format!("w{i}");
+                    if c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'w', 'mnem', ?1)", [&key]).is_ok() {
+                        ok.push(key);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                ok
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        restore(&src, &mut conn, &backups).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let committed = writer.join().unwrap();
+        assert!(!committed.is_empty());
+        // Every committed write is in the restored database or in the safety snapshot.
+        let snap = list(&backups).unwrap()[0].0.clone();
+        let s = Connection::open(&snap).unwrap();
+        for key in committed {
+            let q = "SELECT count(*) FROM memories WHERE origin_id = ?1";
+            let here: i64 = conn.query_row(q, [&key], |r| r.get(0)).unwrap();
+            let saved: i64 = s.query_row(q, [&key], |r| r.get(0)).unwrap();
+            assert!(here + saved > 0, "write {key} was lost");
+        }
     }
 
     #[test]

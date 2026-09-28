@@ -2552,6 +2552,11 @@
     .move-compare div { padding: 10px; border-radius: 6px; background: var(--color-bg-secondary); font-variant-numeric: tabular-nums; }
     .move-compare b { display: block; margin-bottom: 4px; color: var(--color-text-primary); }
     .move-preview label { display: flex; gap: 8px; align-items: flex-start; }
+    .move-settings { display: flex; flex-direction: column; gap: 8px; }
+    .move-settings ul { margin: 0; padding-left: 26px; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+    .move-settings li { overflow-wrap: anywhere; }
+    .move-settings li.sensitive { color: var(--color-accent-error); }
+    .move-settings code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; }
     .move-warn { margin: 0; color: var(--color-text-primary); }
     .mnem-match {
       padding: 2px 8px;

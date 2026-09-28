@@ -101,10 +101,19 @@ In the viewer (http://127.0.0.1:37777), open **Backup & move**:
 2. On the new machine, install mnem (`mnem install`), open the viewer, **Choose backup
    file**. It is uploaded and checked on a scratch copy (integrity, schema, search);
    you see it next to what this machine holds. Nothing changes until you confirm.
-3. **Replace** restores it through SQLite's online-backup API after saving the current
-   memory as a backup. Tick the settings box to take the old machine's settings too,
-   then **Restart mnem** (systemd brings it back in about 10 s). Transcripts on the new
-   machine are read again afterwards, so its own sessions return.
+3. **Replace** restores it through SQLite's online-backup API. mnem first takes the
+   database's write lock, then saves the current memory, then copies, so no write can
+   fall between the two. Only data is taken from the file: its triggers, views and
+   indexes are dropped and rebuilt from this build. Settings are off by default; the
+   preview lists every setting that would change and flags any that change where
+   prompts go or which key is used. After ticking them, **Restart mnem** (under systemd
+   it comes back in about 10 s). Transcripts on the new machine are read again
+   afterwards, so its own sessions return; the old machine's are kept as history and
+   `mnem doctor` lists them as from another machine.
+
+Needs free space for about twice the backup plus the current database. A backup whose
+settings use `fastembed:` models needs a build with `--features fastembed`; the preview
+says so. Model files are downloaded again on first use.
 
 From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
 `mnem restore <file> --apply [--settings]`. Nightly backups carry settings too.

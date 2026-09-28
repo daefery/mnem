@@ -408,8 +408,40 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             Response::json(&json!({ "backup": m }))
         }
         "/api/import" => {
+            static UPLOADING: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if UPLOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Ok(Response::error(
+                    "409 Conflict",
+                    "another import is being uploaded",
+                ));
+            }
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    UPLOADING.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            let _done = Done;
             let dir = incoming();
             std::fs::create_dir_all(&dir)?;
+            // The upload, its checked copy and a snapshot of the current memory all sit on
+            // this disk at once.
+            let length = body.length.unwrap_or(0);
+            let live = db_path.metadata().map(|m| m.len()).unwrap_or(0);
+            let need = 2 * length + live + (64 << 20);
+            if let Some(free) = crate::backup::free_bytes(&dir)
+                && free < need
+            {
+                return Ok(Response::error(
+                    "507 Insufficient Storage",
+                    format!(
+                        "importing this backup needs about {} MB free next to mnem's data; {} MB are free",
+                        need / 1_000_000,
+                        free / 1_000_000
+                    ),
+                ));
+            }
             // One pending import at a time: older uploads are dropped.
             for e in std::fs::read_dir(&dir)?.flatten() {
                 let _ = std::fs::remove_file(e.path());
@@ -429,6 +461,7 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             }
             match crate::backup::check_import(&dir.join(&name)) {
                 Ok((m, origin)) => Response::json(&json!({
+                    "settings": crate::backup::review_settings(&dir.join(&name)).ok().flatten(),
                     "file": name,
                     "backup": { "sessions": m.sessions, "events": m.events, "memories": m.memories,
                                 "bytes": m.bytes, "schema": m.schema_version },
@@ -443,27 +476,81 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             }
         }
         "/api/import/apply" => {
+            // Every answer says whether this machine's memory changed.
+            let fail = |status, changed: bool, msg: String| {
+                Response::text(
+                    status,
+                    "application/json; charset=utf-8",
+                    json!({ "error": msg, "changed": changed }).to_string(),
+                )
+            };
             let Some(name) = q.get("file").and_then(|f| safe_name(f, "upload-")) else {
-                return Ok(Response::error("400 Bad Request", "no such upload"));
+                return Ok(fail("400 Bad Request", false, "no such upload".into()));
             };
             let file = incoming().join(name);
             if !file.is_file() {
-                return Ok(Response::error(
+                return Ok(fail(
                     "404 Not Found",
-                    "the upload is gone; upload it again",
+                    false,
+                    "the upload is gone; upload it again".into(),
                 ));
             }
+            let want_settings = q.get("settings").map(String::as_str) == Some("1");
+            // Settings are checked before anything changes.
+            if want_settings {
+                match crate::backup::review_settings(&file) {
+                    Ok(Some(r)) if r.valid => {}
+                    Ok(Some(r)) => {
+                        return Ok(fail(
+                            "422 Unprocessable Content",
+                            false,
+                            format!(
+                                "the backup's settings are not valid ({}); import without them",
+                                r.error.unwrap_or_default()
+                            ),
+                        ));
+                    }
+                    Ok(None) => {
+                        return Ok(fail(
+                            "422 Unprocessable Content",
+                            false,
+                            "the backup carries no settings".into(),
+                        ));
+                    }
+                    Err(e) => {
+                        return Ok(fail("500 Internal Server Error", false, format!("{e:#}")));
+                    }
+                }
+            }
+            let origin = crate::backup::origin(&file).unwrap_or_default();
             let mut conn = db::open(db_path)?;
-            let m = crate::backup::restore(&file, &mut conn, &crate::backup::dir())?;
-            let settings = if q.get("settings").map(String::as_str) == Some("1") {
-                crate::backup::apply_settings(&file)?
-            } else {
-                false
-            };
+            if let Err(e) = crate::backup::restore(&file, &mut conn, &crate::backup::dir()) {
+                return Ok(fail("500 Internal Server Error", false, format!("{e:#}")));
+            }
             let _ = std::fs::remove_file(&file);
+            // From here on the memory has been replaced; report the rest honestly.
+            let foreign = if origin
+                .host
+                .as_deref()
+                .is_some_and(|h| h != crate::backup::hostname())
+            {
+                crate::backup::mark_foreign_sources(&conn).unwrap_or(0)
+            } else {
+                0
+            };
+            let (settings, settings_error) = if want_settings {
+                match crate::backup::apply_settings_file(&file_settings(&origin)) {
+                    Ok(()) => (true, None),
+                    Err(e) => (false, Some(format!("{e:#}"))),
+                }
+            } else {
+                (false, None)
+            };
             Response::json(&json!({
-                "restored": { "sessions": m.sessions, "events": m.events, "memories": m.memories },
+                "changed": true,
                 "settings_applied": settings,
+                "settings_error": settings_error,
+                "foreign_transcripts": foreign,
                 "can_restart": under_service(),
                 "current": counts(&conn, db_path)?,
             }))
@@ -490,6 +577,11 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
         }
         _ => not_found(),
     })
+}
+
+/// The settings text an origin carried (checked before the restore began).
+fn file_settings(origin: &crate::backup::Origin) -> String {
+    origin.config.clone().unwrap_or_default()
 }
 
 /// True when systemd supervises this process (it sets INVOCATION_ID).

@@ -631,8 +631,27 @@ fn main() -> Result<()> {
             settings,
         } => {
             if apply {
-                backup::check_import(&snapshot)?;
+                let (_, origin) = backup::check_import(&snapshot)?;
+                if settings
+                    && let Some(r) = backup::review_settings(&snapshot)?
+                    && !r.valid
+                {
+                    anyhow::bail!(
+                        "the backup's settings are not valid ({}); nothing was changed. Retry without --settings",
+                        r.error.unwrap_or_default()
+                    );
+                }
                 let m = backup::restore(&snapshot, &mut conn, &backup::dir())?;
+                if origin
+                    .host
+                    .as_deref()
+                    .is_some_and(|h| h != backup::hostname())
+                {
+                    let n = backup::mark_foreign_sources(&conn)?;
+                    if n > 0 {
+                        println!("{n} transcripts from the other machine are kept as history");
+                    }
+                }
                 println!(
                     "restored {} ({} memories, {} events)",
                     m.file, m.memories, m.events
