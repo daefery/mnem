@@ -58,9 +58,22 @@ pub fn snapshot(src: &Path, dest: &Path) -> Result<()> {
 }
 
 pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
-    let snap = db::data_dir().join("claude-mem.snapshot.db");
-    snapshot(src, &snap)?;
-    let cm = Connection::open_with_flags(&snap, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    // A snapshot of this run's own (two imports at once must not share one), removed
+    // however the import ends.
+    struct Snap(std::path::PathBuf);
+    impl Drop for Snap {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    static RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let snap = Snap(db::data_dir().join(format!(
+        ".claude-mem.snapshot-{}-{}.db",
+        std::process::id(),
+        RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    )));
+    snapshot(src, &snap.0)?;
+    let cm = Connection::open_with_flags(&snap.0, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stats = Stats::default();
 
     // claude-mem session -> mnem session. memory_session_id is what observations reference.
@@ -342,7 +355,8 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
         ],
     )?;
     tx.commit()?;
-    let _ = std::fs::remove_file(&snap);
+    drop(cm);
+    drop(snap);
     Ok(stats)
 }
 
