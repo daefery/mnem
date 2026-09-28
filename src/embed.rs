@@ -458,6 +458,12 @@ pub fn shared() -> Option<std::sync::Arc<Embedder>> {
     }
     *st = State::Loading;
     std::thread::spawn(|| {
+        // The service fetches a missing static model once (for example after moving to a
+        // new machine); hooks never download anything.
+        let name = model_name();
+        if crate::recall::semantic_enabled() && !name.starts_with("fastembed:") {
+            let _ = fetch(&name);
+        }
         let loaded = crate::recall::semantic_embedder().map(Arc::new);
         if let Ok(mut st) = STATE.lock() {
             *st = match loaded {

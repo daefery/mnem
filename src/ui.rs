@@ -254,13 +254,38 @@ impl Body<'_> {
         anyhow::ensure!(length <= limit, "upload larger than {limit} bytes");
         let first = self.early.len().min(length as usize);
         out.write_all(&self.early[..first])?;
-        let rest = length - first as u64;
-        let copied = std::io::copy(&mut std::io::Read::take(self.stream, rest), out)?;
-        anyhow::ensure!(
-            copied == rest,
-            "upload ended early ({} of {length} bytes)",
-            first as u64 + copied
-        );
+        // A whole-upload deadline, so a slow drip cannot hold the only upload slot:
+        // 30 s plus one second per 10 MB (a 440 MB backup gets 74 s; a browser on the
+        // same machine sends it in a few). The caller removes the partial file.
+        self.save_within(
+            out,
+            length,
+            Duration::from_secs(30 + length / 10_000_000),
+            first,
+        )
+    }
+
+    fn save_within(
+        self,
+        out: &mut impl Write,
+        length: u64,
+        allowed: Duration,
+        first: usize,
+    ) -> Result<u64> {
+        let deadline = std::time::Instant::now() + allowed;
+        let mut done = first as u64;
+        let mut buf = vec![0u8; 1 << 20];
+        while done < length {
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "upload too slow; stopped after {done} of {length} bytes"
+            );
+            let want = buf.len().min((length - done) as usize);
+            let n = std::io::Read::read(self.stream, &mut buf[..want])?;
+            anyhow::ensure!(n > 0, "upload ended early ({done} of {length} bytes)");
+            out.write_all(&buf[..n])?;
+            done += n as u64;
+        }
         Ok(length)
     }
 }
@@ -381,7 +406,9 @@ fn backups(conn: &Connection, db_path: &Path) -> Result<Value> {
             }))
         })
         .collect();
-    Ok(json!({ "current": counts(conn, db_path)?, "backups": list }))
+    Ok(
+        json!({ "current": counts(conn, db_path)?, "backups": list, "can_restart": under_service() }),
+    )
 }
 
 /// Stream a verified snapshot as a download.
@@ -565,13 +592,14 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             if !under_service() {
                 return Ok(Response::error(
                     "409 Conflict",
-                    "not running under systemd: restart mnem yourself",
+                    "mnem is not running under a systemd unit that restarts it: restart mnem yourself",
                 ));
             }
             // systemd (Restart=always) starts mnem again; answer first, then exit.
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
-                std::process::exit(0);
+                // EX_TEMPFAIL: Restart=always and on-failure both start mnem again.
+                std::process::exit(75);
             });
             Response::json(&json!({ "restarting": true }))
         }
@@ -584,9 +612,32 @@ fn file_settings(origin: &crate::backup::Origin) -> String {
     origin.config.clone().unwrap_or_default()
 }
 
-/// True when systemd supervises this process (it sets INVOCATION_ID).
+/// True when systemd supervises this process (it sets INVOCATION_ID) and its unit
+/// restarts it after the exit code the restart action uses.
 fn under_service() -> bool {
     std::env::var_os("INVOCATION_ID").is_some()
+        && restart_policy().is_some_and(|p| p == "always" || p == "on-failure")
+}
+
+/// The Restart= policy of the systemd unit running this process, read from its cgroup.
+fn restart_policy() -> Option<String> {
+    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let unit = cgroup
+        .lines()
+        .flat_map(|l| l.rsplit('/'))
+        .find(|p| p.ends_with(".service"))?
+        .to_string();
+    let mut cmd = std::process::Command::new("systemctl");
+    if cgroup.contains("/user@") {
+        cmd.arg("--user");
+    }
+    let out = cmd
+        .args(["show", "-p", "Restart", "--value", &unit])
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn not_found() -> Response {
@@ -939,7 +990,40 @@ fn stats(conn: &Connection) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{HashMap, Value, decode, parse_query, summary_fields};
+    use super::{Body, HashMap, Value, decode, parse_query, summary_fields};
+
+    #[test]
+    fn a_dripping_upload_is_stopped_at_its_deadline() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let drip = std::thread::spawn(move || {
+            use std::io::Write;
+            let mut c = std::net::TcpStream::connect(addr).unwrap();
+            for _ in 0..40 {
+                if c.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        let (mut stream, _) = listener.accept().unwrap();
+        let body = Body {
+            early: vec![],
+            stream: &mut stream,
+            length: Some(1000),
+        };
+        let t = std::time::Instant::now();
+        let r = body.save_within(
+            &mut Vec::new(),
+            1000,
+            std::time::Duration::from_millis(500),
+            0,
+        );
+        assert!(r.unwrap_err().to_string().contains("too slow"));
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        drop(stream);
+        let _ = drip.join();
+    }
 
     #[test]
     fn decodes_queries() {

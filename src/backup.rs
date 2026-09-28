@@ -259,9 +259,17 @@ pub fn review_settings(snapshot: &Path) -> Result<Option<SettingsReview>> {
         .get("semantic.model")
         .and_then(Value::as_str)
         .unwrap_or("");
-    let warning = (model.starts_with("fastembed:") && !cfg!(feature = "fastembed")).then(|| {
-        format!("this mnem was built without ONNX support, so it cannot run {model}; recall would use keywords only. Install with `cargo install --features fastembed` first, or keep this machine's settings.")
-    });
+    let warning = if model.starts_with("fastembed:") && !cfg!(feature = "fastembed") {
+        Some(format!(
+            "this mnem was built without ONNX support, so it cannot run {model}; recall would use keywords only. Install with `cargo install --features fastembed` first, or keep this machine's settings."
+        ))
+    } else if !model.is_empty() && model != crate::embed::model_name() {
+        Some(format!(
+            "{model} is not this machine's embedding model: after the restart mnem downloads it if needed (internet required) and re-embeds every memory in the background, which can take a while; recall uses keywords until then."
+        ))
+    } else {
+        None
+    };
     Ok(Some(SettingsReview {
         valid: parsed.is_ok(),
         error: parsed.err().map(|e| e.to_string()),

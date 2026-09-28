@@ -113,7 +113,10 @@ In the viewer (http://127.0.0.1:37777), open **Backup & move**:
 
 Needs free space for about twice the backup plus the current database. A backup whose
 settings use `fastembed:` models needs a build with `--features fastembed`; the preview
-says so. Model files are downloaded again on first use.
+says so. The watch service downloads a missing embedding model when it starts (internet
+required) and re-embeds memories in the background; recall uses keywords until then.
+The viewer's restart button appears only when mnem runs under a systemd unit with
+`Restart=always` or `on-failure` (as `mnem install` sets up).
 
 From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
 `mnem restore <file> --apply [--settings]`. Nightly backups carry settings too.
