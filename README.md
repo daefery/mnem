@@ -56,13 +56,19 @@ something since, a short "meanwhile" update.
   Prompt recall leaves out memories from the asking session (the agent has that
   conversation already), keeps keyword order, drops keyword hits that are far from the
   prompt in meaning, and lets meaning-based matches fill empty slots.
-  Better: `fastembed:AllMiniLML6V2` (build with `--features fastembed`; ONNX, 46 MB
-  binary, ~30 memories/s to embed, 14 ms per query in the service). Screened against
-  six other models on judged real prompts, it separated helpful from unhelpful
-  memories best (AUC 0.73 against 0.66 for potion-8M), and on 90 held-out real prompts
-  it showed more helpful memories (179 vs 149 by gpt-5.6-luna, 141 vs 100 by
-  claude-haiku-4-5) without more unhelpful ones. `mnem embed --import <db>` reuses
-  vectors computed in another copy of the database when the memory text still matches.
+  Recommended: `fastembed:AllMiniLML6V2` (build with `--features fastembed`; ONNX,
+  46 MB binary, ~30 memories/s to embed, 14 ms per query in the service). Seven models
+  were screened on judged real prompts for the job the model does in recall: reordering
+  and filtering keyword candidates (not retrieval on its own). MiniLM separated helpful
+  from unhelpful candidates best (AUC 0.731 against 0.657 for potion-8M, bootstrap 95%
+  CI of the difference +0.008 to +0.144); bge-small-en-v1.5 (0.711) is within noise of
+  it and half as fast. On 90 held-out real prompts, run once, MiniLM showed more helpful
+  memories (179 vs 149 by gpt-5.6-luna, 141 vs 100 by claude-haiku-4-5) without more
+  unhelpful ones. The trade: on the model-written set hit@1 fell 61% to 55% (two cases)
+  and on the hand-written set prompts with no answer that still recalled something rose
+  from 1 to 3 of 10. Reproduce with `mnem eval --set real-dev --judge --dump <file>` per
+  model, then `mnem eval --analyze <files>`. `mnem embed --import <db>` reuses vectors
+  computed in another copy of the database when the memory text still matches.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
   and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge

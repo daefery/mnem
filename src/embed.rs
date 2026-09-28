@@ -15,12 +15,31 @@ use std::time::Duration;
 pub const DEFAULT_MODEL: &str = "minishlab/potion-base-8M";
 const FILES: &[&str] = &["tokenizer.json", "model.safetensors", "config.json"];
 
+/// The configured model, under one canonical name per model (thresholds and vector
+/// keys depend on it): fastembed models by their enum name, whatever the config says.
 pub fn model_name() -> String {
-    crate::config::CONFIG
+    let name = crate::config::CONFIG
         .semantic
         .model
         .clone()
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string());
+    #[cfg(feature = "fastembed")]
+    if let Some(m) = name.strip_prefix("fastembed:")
+        && let Some(info) = fastembed_info(m)
+    {
+        return format!("fastembed:{:?}", info.model);
+    }
+    name
+}
+
+/// A model fastembed lists, by its Hugging Face code or enum name.
+#[cfg(feature = "fastembed")]
+fn fastembed_info(m: &str) -> Option<fastembed::ModelInfo<fastembed::EmbeddingModel>> {
+    fastembed::TextEmbedding::list_supported_models()
+        .into_iter()
+        .find(|i| {
+            i.model_code.eq_ignore_ascii_case(m) || format!("{:?}", i.model).eq_ignore_ascii_case(m)
+        })
 }
 
 fn model_dir(name: &str) -> PathBuf {
@@ -69,7 +88,7 @@ enum Backend {
     Static(StaticModel),
     /// Transformer model through ONNX Runtime (build with `--features fastembed`).
     #[cfg(feature = "fastembed")]
-    Onnx(std::sync::Mutex<fastembed::TextEmbedding>),
+    Onnx(Box<std::sync::Mutex<fastembed::TextEmbedding>>),
 }
 
 pub struct Embedder {
@@ -89,23 +108,37 @@ impl Embedder {
         let name = model_name();
         #[cfg(feature = "fastembed")]
         if let Some(m) = name.strip_prefix("fastembed:") {
-            // Any model fastembed lists, by its Hugging Face code or enum name.
-            let info = fastembed::TextEmbedding::list_supported_models()
-                .into_iter()
-                .find(|i| {
-                    i.model_code.eq_ignore_ascii_case(m)
-                        || format!("{:?}", i.model).eq_ignore_ascii_case(m)
-                })
-                .with_context(|| format!("unknown fastembed model {m}"))?;
+            let info = fastembed_info(m).with_context(|| format!("unknown fastembed model {m}"))?;
+            let cache = db::data_dir().join("models").join("fastembed");
             let opts = fastembed::TextInitOptions::new(info.model.clone())
-                .with_cache_dir(db::data_dir().join("models").join("fastembed"))
-                .with_max_length(256)
+                .with_cache_dir(cache.clone())
+                .with_max_length(MAX_TOKENS)
                 .with_show_download_progress(false);
             let te = fastembed::TextEmbedding::try_new(opts)?;
+            // Key vectors by what produced them: the model files as downloaded, the input
+            // length and the prefixes; any change keeps old vectors from being compared.
+            let prefixes = prefixes(m);
+            let mut h = Sha256::new();
+            let snapshots = cache
+                .join(format!("models--{}", info.model_code.replace('/', "--")))
+                .join("snapshots");
+            let mut files = Vec::new();
+            collect_files(&snapshots, &mut files);
+            files.sort();
+            for f in &files {
+                h.update(
+                    f.strip_prefix(&snapshots)
+                        .unwrap_or(f)
+                        .to_string_lossy()
+                        .as_bytes(),
+                );
+                h.update(std::fs::read(f)?);
+            }
+            h.update(format!("{MAX_TOKENS}|{}|{}", prefixes.0, prefixes.1).as_bytes());
             return Ok(Embedder {
-                backend: Backend::Onnx(std::sync::Mutex::new(te)),
-                key: format!("{name}@fastembed-{}", env!("CARGO_PKG_VERSION")),
-                prefixes: prefixes(m),
+                backend: Backend::Onnx(Box::new(std::sync::Mutex::new(te))),
+                key: format!("{name}@{}", hex(&h.finalize()[..8])),
+                prefixes,
                 name,
             });
         }
@@ -146,6 +179,22 @@ impl Embedder {
                 .lock()
                 .map(|mut m| m.embed(texts, Some(64)).unwrap_or_default())
                 .unwrap_or_default(),
+        }
+    }
+}
+
+/// Input length for ONNX models, in tokens (memories are embedded from their head).
+#[cfg(feature = "fastembed")]
+const MAX_TOKENS: usize = 256;
+
+#[cfg(feature = "fastembed")]
+fn collect_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_files(&p, out);
+        } else if p.is_file() {
+            out.push(p);
         }
     }
 }
@@ -254,7 +303,12 @@ pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Re
 /// Copy this model's vectors from another mnem database (for example one where a model
 /// was tried out), keeping only those whose memory text here still hashes the same.
 /// Returns (copied, skipped).
-pub fn import(conn: &mut Connection, key: &str, from: &std::path::Path) -> Result<(usize, usize)> {
+pub fn import(
+    conn: &mut Connection,
+    key: &str,
+    dim: usize,
+    from: &std::path::Path,
+) -> Result<(usize, usize)> {
     let src = Connection::open_with_flags(from, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut st = src.prepare(
         "SELECT memory_id, dim, scale, vec, text_hash FROM memory_vectors WHERE model = ?1 AND text_hash IS NOT NULL",
@@ -274,10 +328,13 @@ pub fn import(conn: &mut Connection, key: &str, from: &std::path::Path) -> Resul
             "INSERT OR REPLACE INTO memory_vectors(memory_id, model, dim, scale, vec, text_hash)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        for (id, dim, scale, vec, hash) in rows {
+        for (id, stored_dim, scale, vec, hash) in rows {
+            // Only well-formed vectors of this model's size, for text that still matches.
+            let sound =
+                stored_dim == dim as i64 && vec.len() == dim && scale.is_finite() && scale > 0.0;
             let now: Option<String> = cur.query_row([id], |r| text_from_row(r, 0)).optional()?;
-            if now.as_deref().map(text_hash).as_deref() == Some(hash.as_str()) {
-                ins.execute(params![id, key, dim, scale, vec, hash])?;
+            if sound && now.as_deref().map(text_hash).as_deref() == Some(hash.as_str()) {
+                ins.execute(params![id, key, stored_dim, scale, vec, hash])?;
                 copied += 1;
             } else {
                 skipped += 1;
@@ -348,22 +405,36 @@ impl Embedder {
 }
 
 /// The embedding model, loaded once per process and shared (the watch service uses it
-/// for its HTTP endpoint and background embedding). A failed load is retried at most
-/// once a minute, so downloading the model later needs no restart.
+/// for its HTTP endpoint and background embedding). Loading runs on its own thread, so a
+/// slow or stalled model download never holds up the caller: until it is ready this
+/// returns None (hooks fall back to keywords). A failed load is retried at most once a
+/// minute, so downloading the model later needs no restart.
 pub fn shared() -> Option<std::sync::Arc<Embedder>> {
     use std::sync::{Arc, Mutex};
-    static STATE: Mutex<(Option<Arc<Embedder>>, Option<std::time::Instant>)> =
-        Mutex::new((None, None));
+    enum State {
+        Idle(Option<std::time::Instant>),
+        Loading,
+        Ready(Arc<Embedder>),
+    }
+    static STATE: Mutex<State> = Mutex::new(State::Idle(None));
     let mut st = STATE.lock().ok()?;
-    if let Some(e) = &st.0 {
-        return Some(e.clone());
+    match &*st {
+        State::Ready(e) => return Some(e.clone()),
+        State::Loading => return None,
+        State::Idle(Some(t)) if t.elapsed() < Duration::from_secs(60) => return None,
+        State::Idle(_) => {}
     }
-    if st.1.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
-        return None;
-    }
-    st.1 = Some(std::time::Instant::now());
-    st.0 = crate::recall::semantic_embedder().map(Arc::new);
-    st.0.clone()
+    *st = State::Loading;
+    std::thread::spawn(|| {
+        let loaded = crate::recall::semantic_embedder().map(Arc::new);
+        if let Ok(mut st) = STATE.lock() {
+            *st = match loaded {
+                Some(e) => State::Ready(e),
+                None => State::Idle(Some(std::time::Instant::now())),
+            };
+        }
+    });
+    None
 }
 
 /// Port `mnem watch` serves the viewer and embeddings on unless told otherwise:
@@ -635,15 +706,29 @@ mod tests {
             .unwrap();
         dst.execute("DELETE FROM memories WHERE id = 3", [])
             .unwrap();
-        assert_eq!(import(&mut dst, "m", &src_path).unwrap(), (1, 2));
-        let n: i64 = dst
-            .query_row(
+        assert_eq!(import(&mut dst, "m", 4, &src_path).unwrap(), (1, 2));
+        let count = |c: &Connection| -> i64 {
+            c.query_row(
                 "SELECT count(*) FROM memory_vectors WHERE memory_id = 1",
                 [],
                 |r| r.get(0),
             )
-            .unwrap();
-        assert_eq!(n, 1);
+            .unwrap()
+        };
+        assert_eq!(count(&dst), 1);
+        // Malformed vectors are never copied, even for unchanged text.
+        let bad = Connection::open(&src_path).unwrap();
+        bad.execute(
+            "UPDATE memory_vectors SET scale = -1.0 WHERE memory_id = 1",
+            [],
+        )
+        .unwrap();
+        drop(bad);
+        dst.execute("DELETE FROM memory_vectors", []).unwrap();
+        assert_eq!(import(&mut dst, "m", 4, &src_path).unwrap(), (0, 3));
+        assert_eq!(count(&dst), 0);
+        // Nor vectors of another size than the model's.
+        assert_eq!(import(&mut dst, "m", 8, &src_path).unwrap(), (0, 3));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

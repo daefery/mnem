@@ -194,6 +194,9 @@ enum Cmd {
         /// Write each real prompt's top ten candidates with cosine and judgment (JSONL)
         #[arg(long)]
         dump: Option<PathBuf>,
+        /// Compare --dump files from different models (AUC, bootstrap CI, thresholds)
+        #[arg(long, num_args = 1..)]
+        analyze: Vec<PathBuf>,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -347,9 +350,10 @@ fn main() -> Result<()> {
             let t_load = Instant::now();
             let e = mnem::embed::Embedder::load()?;
             println!(
-                "model {name}: ready in {:.1}s, loads in {} ms",
+                "model {name}: ready in {:.1}s, loads in {} ms; vectors keyed {}",
                 t.elapsed().as_secs_f64(),
-                t_load.elapsed().as_millis()
+                t_load.elapsed().as_millis(),
+                e.key
             );
             if let Some(p) = probe {
                 let t = Instant::now();
@@ -361,7 +365,12 @@ fn main() -> Result<()> {
                 );
             }
             if let Some(from) = import {
-                let (copied, skipped) = mnem::embed::import(&mut conn, &e.key, &from)?;
+                let (copied, skipped) = mnem::embed::import(
+                    &mut conn,
+                    &e.key,
+                    e.embed(&["dimension".to_string()])[0].len(),
+                    &from,
+                )?;
                 println!(
                     "imported {copied} vectors ({skipped} skipped: text changed or memory gone)"
                 );
@@ -420,7 +429,12 @@ fn main() -> Result<()> {
             judge,
             judge_model,
             dump,
+            analyze,
         } => {
+            if !analyze.is_empty() {
+                print!("{}", mnem::eval::analyze(&analyze)?);
+                return Ok(());
+            }
             if let Some(n) = build_real {
                 let (dev, test) = mnem::eval::build_real(&conn, n)?;
                 println!("sampled {dev} prompts into real-dev and {test} into real-test");

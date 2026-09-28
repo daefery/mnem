@@ -398,6 +398,144 @@ fn candidate_cosines(
         .collect())
 }
 
+/// One dumped prompt: its candidates' (cosine, judged helpful).
+type Dumped = (String, Vec<(Option<f32>, Option<bool>)>);
+
+fn read_dump(path: &Path) -> Result<Vec<Dumped>> {
+    let f = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut out = Vec::new();
+    for l in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+        let v: Value = serde_json::from_str(&l)?;
+        let cands = v["cands"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|c| (c["cos"].as_f64().map(|x| x as f32), c["relevant"].as_bool()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.push((v["q"].as_str().unwrap_or_default().to_string(), cands));
+    }
+    Ok(out)
+}
+
+/// Probability that a helpful candidate scores above an unhelpful one (ties half).
+fn auc<'a>(cases: impl Iterator<Item = &'a Dumped>) -> Option<f64> {
+    let (mut pos, mut neg) = (Vec::new(), Vec::new());
+    for (_, cands) in cases {
+        for (cos, rel) in cands {
+            if let (Some(c), Some(r)) = (cos, rel) {
+                if *r { pos.push(*c) } else { neg.push(*c) }
+            }
+        }
+    }
+    if pos.is_empty() || neg.is_empty() {
+        return None;
+    }
+    let wins: f64 = pos
+        .iter()
+        .map(|p| {
+            neg.iter()
+                .map(|n| {
+                    if p > n {
+                        1.0
+                    } else if p == n {
+                        0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .sum::<f64>()
+        })
+        .sum();
+    Some(wins / (pos.len() * neg.len()) as f64)
+}
+
+/// Compare `mnem eval --dump` files from different models: AUC of cosine for the judged
+/// candidates, a prompt-level bootstrap interval for each model's AUC minus the first
+/// one's, and what a relevance threshold would keep of each prompt's top five.
+pub fn analyze(paths: &[std::path::PathBuf]) -> Result<String> {
+    let dumps: Vec<(String, Vec<Dumped>)> = paths
+        .iter()
+        .map(|p| {
+            Ok((
+                p.file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned(),
+                read_dump(p)?,
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let mut out = String::new();
+    let Some((base_name, base)) = dumps.first() else {
+        return Ok(out);
+    };
+    let base_by_q: std::collections::HashMap<&str, &Dumped> =
+        base.iter().map(|d| (d.0.as_str(), d)).collect();
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for (name, cases) in &dumps {
+        let a = auc(cases.iter()).unwrap_or(f64::NAN);
+        out.push_str(&format!("{name}: AUC {a:.3} over {} prompts", cases.len()));
+        if name != base_name {
+            // Resample prompts (not candidates: those of one prompt move together).
+            let shared: Vec<(&Dumped, &Dumped)> = cases
+                .iter()
+                .filter_map(|d| base_by_q.get(d.0.as_str()).map(|b| (d, *b)))
+                .collect();
+            let mut diffs = Vec::new();
+            for _ in 0..1000 {
+                let pick: Vec<usize> = (0..shared.len())
+                    .map(|_| (next() % shared.len().max(1) as u64) as usize)
+                    .collect();
+                if let (Some(x), Some(y)) = (
+                    auc(pick.iter().map(|i| shared[*i].0)),
+                    auc(pick.iter().map(|i| shared[*i].1)),
+                ) {
+                    diffs.push(x - y);
+                }
+            }
+            diffs.sort_by(f64::total_cmp);
+            if !diffs.is_empty() {
+                let q = |p: f64| diffs[((diffs.len() - 1) as f64 * p) as usize];
+                out.push_str(&format!(
+                    " · minus {base_name}: {:+.3} (95% CI {:+.3} to {:+.3}, above zero in {:.0}% of resamples)",
+                    diffs.iter().sum::<f64>() / diffs.len() as f64,
+                    q(0.025),
+                    q(0.975),
+                    100.0 * diffs.iter().filter(|d| **d > 0.0).count() as f64 / diffs.len() as f64
+                ));
+            }
+        }
+        out.push('\n');
+        for step in 0..=16 {
+            let t = step as f32 * 0.05;
+            let (mut right, mut wrong, mut helped) = (0, 0, 0);
+            for (_, cands) in cases {
+                let kept: Vec<&(Option<f32>, Option<bool>)> = cands
+                    .iter()
+                    .filter(|(c, _)| c.is_none_or(|c| c >= t))
+                    .take(5)
+                    .collect();
+                let r = kept.iter().filter(|(_, j)| *j == Some(true)).count();
+                right += r;
+                wrong += kept.iter().filter(|(_, j)| *j == Some(false)).count();
+                helped += (r > 0) as usize;
+            }
+            out.push_str(&format!(
+                "  threshold {t:.2}: {right} helpful, {wrong} unhelpful shown, {helped} prompts helped\n"
+            ));
+        }
+    }
+    Ok(out)
+}
+
 /// 95% Wilson interval for k successes out of n.
 pub fn wilson(k: usize, n: usize) -> (f64, f64) {
     if n == 0 {
@@ -671,7 +809,7 @@ pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Case, parse_marks, wilson};
+    use super::{Case, auc, parse_marks, wilson};
     use serde_json::json;
 
     #[test]
@@ -689,6 +827,15 @@ mod tests {
         ] {
             assert_eq!(parse_marks(&bad, 2), None, "{bad}");
         }
+        let d = |c: Vec<(Option<f32>, Option<bool>)>| (String::new(), c);
+        let perfect = [d(vec![(Some(0.9), Some(true)), (Some(0.1), Some(false))])];
+        assert_eq!(auc(perfect.iter()), Some(1.0));
+        let tie = [d(vec![
+            (Some(0.5), Some(true)),
+            (Some(0.5), Some(false)),
+            (None, Some(true)),
+        ])];
+        assert_eq!(auc(tie.iter()), Some(0.5));
         let (lo, hi) = wilson(50, 100);
         assert!((lo - 0.404).abs() < 0.01 && (hi - 0.596).abs() < 0.01);
     }
