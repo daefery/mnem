@@ -89,7 +89,13 @@ fn cites(text: &str, id: i64) -> bool {
 
 pub fn report(conn: &Connection, days: i64) -> Result<Report> {
     let from = crate::db::now_ms() - days * 86_400_000;
-    let since: Option<i64> = conn.query_row("SELECT min(at) FROM offers", [], |r| r.get(0))?;
+    // Recording starts with whichever of the three records came first.
+    let since: Option<i64> = conn.query_row(
+        "SELECT min(t) FROM (SELECT min(at) t FROM offers UNION ALL SELECT min(at) FROM mcp_calls
+                            UNION ALL SELECT min(at) FROM hook_runs)",
+        [],
+        |r| r.get(0),
+    )?;
     // Memory ids fetched over MCP, per project, with when.
     let mut fetches: HashMap<i64, Vec<(i64, Option<String>)>> = HashMap::new();
     {
