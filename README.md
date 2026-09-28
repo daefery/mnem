@@ -119,9 +119,18 @@ recall got worse:
 - known questions in the top 5 may drop by at most one case, found first by two;
 - vague questions in the top 5 by at most one;
 - prompts with no answer that still recall something: at most 3, and at most one more;
-- judged helpful share of shown memories on real prompts: at most 3 points lower;
-  prompts helped: at most two fewer; the judge must have judged every prompt;
-- the slowest 5% of recalls stays under 300 ms.
+- real prompts, judged: helpful share of shown memories at most 3 points lower (its
+  95% interval is printed beside it), unhelpful memories at most 10% (+3) more,
+  prompts shown only unhelpful memories at most two more, prompts helped at most two
+  fewer, and every prompt judged; the judge is always the live settings' models;
+- MCP search on the known questions: top 5 and top 20 at most one lower, and no
+  personal-detail memory listed unasked;
+- speed: the slowest 5% of rankings, and of prompt recall as the hook runs it (process
+  start plus a round trip to the build's own service on a copy of the data), stay
+  under 300 ms, with at most one fallback to keywords.
+
+Both builds run on their own copy of one snapshot, taken read-only before anything
+opens the live database. Test sets that are missing or too small make it fail.
 
 The real-prompt test half is never used by the gate, so repeated gating cannot tune
 recall to it; read it once when a change is final. The gate takes about a minute; new

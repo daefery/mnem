@@ -78,6 +78,8 @@ pub struct Llm {
     key: String,
     chain: Vec<String>,
     auto_fallback: bool,
+    exclude_models: Vec<String>,
+    exclude_providers: Vec<String>,
     cooldowns: std::cell::RefCell<HashMap<String, i64>>,
 }
 
@@ -142,7 +144,12 @@ pub fn order_candidates(
 
 impl Llm {
     pub fn from_config() -> Result<Llm> {
-        let c = &CONFIG.distill;
+        Self::from_distill(&CONFIG.distill)
+    }
+
+    /// A client for the given distillation settings (the recall gate pins its judge to
+    /// the live settings this way, whatever settings the candidate runs with).
+    pub fn from_distill(c: &crate::config::DistillConfig) -> Result<Llm> {
         let key = if let Some(env) = &c.api_key_env {
             std::env::var(env).with_context(|| format!("env {env} not set"))?
         } else if let Some(path) = &c.api_key_json {
@@ -172,6 +179,8 @@ impl Llm {
             key,
             chain,
             auto_fallback: c.auto_fallback.unwrap_or(true),
+            exclude_models: c.exclude_models.clone(),
+            exclude_providers: c.exclude_providers.clone(),
             cooldowns: Default::default(),
         })
     }
@@ -195,7 +204,6 @@ impl Llm {
             .call()
             .ok()?;
         let v: Value = r.body_mut().read_json().ok()?;
-        let c = &CONFIG.distill;
         Some(
             v["data"]
                 .as_array()?
@@ -203,7 +211,8 @@ impl Llm {
                 // Blocked providers (CLIProxyAPI's owned_by, e.g. "antigravity") never serve.
                 .filter(|m| {
                     let owner = m["owned_by"].as_str().unwrap_or_default();
-                    !c.exclude_providers
+                    !self
+                        .exclude_providers
                         .iter()
                         .any(|p| p.eq_ignore_ascii_case(owner))
                 })
@@ -251,9 +260,7 @@ impl Llm {
     pub fn candidates(&self) -> Vec<String> {
         let blocked = |m: &String| {
             let l = m.to_lowercase();
-            CONFIG
-                .distill
-                .exclude_models
+            self.exclude_models
                 .iter()
                 .any(|x| !x.is_empty() && l.contains(&x.to_lowercase()))
         };
@@ -263,8 +270,7 @@ impl Llm {
             .map(|a| a.into_iter().filter(|m| !blocked(m)).collect());
         // Without the endpoint's model list, provider blocks cannot be checked: in that
         // case only the explicit chain is tried, never an automatic fallback.
-        let auto = self.auto_fallback
-            && (available.is_some() || CONFIG.distill.exclude_providers.is_empty());
+        let auto = self.auto_fallback && (available.is_some() || self.exclude_providers.is_empty());
         order_candidates(
             &chain,
             available,

@@ -617,7 +617,18 @@ pub fn run(
     let mut dump = dump.map(std::fs::File::create).transpose()?;
     let llm = match judge_with {
         Some(j) => {
-            let l = Llm::from_config()?;
+            // The gate pins the judge to the live settings (MNEM_JUDGE_CONFIG) so a
+            // candidate's settings cannot change who grades it.
+            let l = match std::env::var_os("MNEM_JUDGE_CONFIG") {
+                Some(p) => {
+                    let cfg: crate::config::Config =
+                        serde_json::from_str(&std::fs::read_to_string(&p).with_context(|| {
+                            format!("read judge settings {}", p.to_string_lossy())
+                        })?)?;
+                    Llm::from_distill(&cfg.distill)?
+                }
+                None => Llm::from_config()?,
+            };
             l.load_cooldowns(conn);
             Some(if j == "chain" { l } else { l.only(j) })
         }

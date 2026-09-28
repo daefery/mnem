@@ -261,6 +261,18 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.db.unwrap_or_else(|| db::data_dir().join("mnem.db"));
+    // The gate never opens the live database for writing (opening can migrate it): it
+    // only snapshots it read-only and measures copies.
+    if let Cmd::Eval {
+        gate: true,
+        baseline,
+        candidate_config,
+        no_judge,
+        ..
+    } = &cli.cmd
+    {
+        return run_gate(&path, baseline.clone(), candidate_config.clone(), !no_judge);
+    }
     // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
     let in_turn = matches!(
         cli.cmd,
@@ -461,14 +473,11 @@ fn main() -> Result<()> {
             gate_metrics,
         } => {
             if gate_metrics {
-                let m = mnem::gate::metrics(&conn, !no_judge)?;
+                let m = mnem::gate::metrics(&conn, &path, !no_judge)?;
                 println!("{}", serde_json::to_string(&m)?);
                 return Ok(());
             }
-            if gate {
-                drop(conn);
-                return run_gate(&path, baseline, candidate_config, !no_judge);
-            }
+            let _ = (gate, baseline, candidate_config);
             if !analyze.is_empty() {
                 print!("{}", mnem::eval::analyze(&analyze, "cos")?);
                 return Ok(());
@@ -966,10 +975,20 @@ fn run_gate(
             .unwrap_or_default()
     );
     let t = Instant::now();
+    // Each build gets its own copy of one snapshot (a newer build may migrate its copy),
+    // and both are graded by the live settings' judge.
     let snap = mnem::gate::Snapshot::take(live)?;
-    let b = mnem::gate::metrics_of(&baseline, &snap.0, None, judge)?;
-    let c = mnem::gate::metrics_of(&candidate, &snap.0, candidate_config.as_deref(), judge)?;
-    drop(snap);
+    let copy = snap.copy()?;
+    let judge_config = mnem::config::path();
+    let b = mnem::gate::metrics_of(&baseline, &snap.0, None, &judge_config, judge)?;
+    let c = mnem::gate::metrics_of(
+        &candidate,
+        &copy.0,
+        candidate_config.as_deref(),
+        &judge_config,
+        judge,
+    )?;
+    drop((snap, copy));
     println!(
         "measured in {:.0}s ({} → {})\n",
         t.elapsed().as_secs_f64(),
