@@ -275,16 +275,35 @@ impl Body<'_> {
         let deadline = std::time::Instant::now() + allowed;
         let mut done = first as u64;
         let mut buf = vec![0u8; 1 << 20];
+        let too_slow =
+            |done: u64| anyhow::anyhow!("upload too slow; stopped after {done} of {length} bytes");
         while done < length {
-            anyhow::ensure!(
-                std::time::Instant::now() < deadline,
-                "upload too slow; stopped after {done} of {length} bytes"
-            );
+            // No read may wait past the deadline.
+            let left = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| too_slow(done))?;
+            self.stream
+                .set_read_timeout(Some(left.min(Duration::from_secs(10))))?;
             let want = buf.len().min((length - done) as usize);
-            let n = std::io::Read::read(self.stream, &mut buf[..want])?;
+            let n = match std::io::Read::read(self.stream, &mut buf[..want]) {
+                Ok(n) => n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) && std::time::Instant::now() >= deadline =>
+                {
+                    return Err(too_slow(done));
+                }
+                Err(e) => return Err(e.into()),
+            };
             anyhow::ensure!(n > 0, "upload ended early ({done} of {length} bytes)");
             out.write_all(&buf[..n])?;
             done += n as u64;
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(too_slow(done));
         }
         Ok(length)
     }
@@ -1020,7 +1039,12 @@ mod tests {
             0,
         );
         assert!(r.unwrap_err().to_string().contains("too slow"));
-        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        // Stopped at the deadline, not up to a read timeout later.
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(800),
+            "{:?}",
+            t.elapsed()
+        );
         drop(stream);
         let _ = drip.join();
     }
