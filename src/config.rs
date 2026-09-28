@@ -73,8 +73,16 @@ pub struct DistillConfig {
     pub exclude_models: Vec<String>,
 }
 
+/// The settings file: $MNEM_CONFIG when set (the recall gate evaluates a candidate
+/// config this way), else config.json in mnem's data directory.
+pub fn path() -> std::path::PathBuf {
+    std::env::var_os("MNEM_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| db::data_dir().join("config.json"))
+}
+
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
-    let path = db::data_dir().join("config.json");
+    let path = path();
     match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
             eprintln!("mnem: ignoring {}: {e}", path.display());

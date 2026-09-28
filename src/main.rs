@@ -204,6 +204,22 @@ enum Cmd {
         /// Also score each dumped candidate with this reranker (fastembed enum name)
         #[arg(long)]
         rerank: Option<String>,
+        /// Release gate: run the installed mnem and this build on the same data and
+        /// fail (exit 1) if recall got worse
+        #[arg(long)]
+        gate: bool,
+        /// The baseline build for --gate (default: the mnem on PATH)
+        #[arg(long)]
+        baseline: Option<PathBuf>,
+        /// Gate a settings change: the candidate runs with this config file
+        #[arg(long)]
+        candidate_config: Option<PathBuf>,
+        /// Skip the judged real-prompt checks (the gate then fails; for a quick look)
+        #[arg(long)]
+        no_judge: bool,
+        /// Print this build's gate metrics as JSON (used by --gate)
+        #[arg(long, hide = true)]
+        gate_metrics: bool,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -438,7 +454,21 @@ fn main() -> Result<()> {
             dump,
             analyze,
             rerank,
+            gate,
+            baseline,
+            candidate_config,
+            no_judge,
+            gate_metrics,
         } => {
+            if gate_metrics {
+                let m = mnem::gate::metrics(&conn, !no_judge)?;
+                println!("{}", serde_json::to_string(&m)?);
+                return Ok(());
+            }
+            if gate {
+                drop(conn);
+                return run_gate(&path, baseline, candidate_config, !no_judge);
+            }
             if !analyze.is_empty() {
                 print!("{}", mnem::eval::analyze(&analyze, "cos")?);
                 return Ok(());
@@ -895,5 +925,77 @@ fn main() -> Result<()> {
             search::run(&conn, &query.join(" "), project.as_deref(), limit)?;
         }
     }
+    Ok(())
+}
+
+/// `mnem eval --gate`: baseline and candidate on the same data, then the verdict.
+fn run_gate(
+    live: &std::path::Path,
+    baseline: Option<PathBuf>,
+    candidate_config: Option<PathBuf>,
+    judge: bool,
+) -> Result<()> {
+    let candidate = std::env::current_exe()?;
+    let baseline = match baseline {
+        Some(b) => b,
+        None => std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .map(|d| d.join("mnem"))
+            .find(|p| p.is_file())
+            .ok_or_else(|| anyhow::anyhow!("no mnem on PATH to compare with; pass --baseline"))?,
+    };
+    let same = std::fs::canonicalize(&baseline).ok() == std::fs::canonicalize(&candidate).ok();
+    if same && candidate_config.is_none() {
+        anyhow::bail!(
+            "the candidate is the installed mnem itself; run the build you want to ship (for example target/release/mnem eval --gate), or pass --candidate-config"
+        );
+    }
+    if let Some(c) = &candidate_config {
+        let text = std::fs::read_to_string(c)?;
+        serde_json::from_str::<mnem::config::Config>(&text)
+            .map_err(|e| anyhow::anyhow!("{} is not a valid mnem config: {e}", c.display()))?;
+    }
+    println!("baseline:  {}", baseline.display());
+    println!(
+        "candidate: {}{}",
+        candidate.display(),
+        candidate_config
+            .as_ref()
+            .map(|c| format!(" with {}", c.display()))
+            .unwrap_or_default()
+    );
+    let t = Instant::now();
+    let snap = mnem::gate::Snapshot::take(live)?;
+    let b = mnem::gate::metrics_of(&baseline, &snap.0, None, judge)?;
+    let c = mnem::gate::metrics_of(&candidate, &snap.0, candidate_config.as_deref(), judge)?;
+    drop(snap);
+    println!(
+        "measured in {:.0}s ({} → {})\n",
+        t.elapsed().as_secs_f64(),
+        b.model,
+        c.model
+    );
+    let checks = mnem::gate::compare(&b, &c);
+    let width = checks.iter().map(|k| k.name.len()).max().unwrap_or(0);
+    for k in &checks {
+        println!(
+            "{} {:<width$}  {:>14} → {:<14} (needs {})",
+            if k.pass { "PASS" } else { "FAIL" },
+            k.name,
+            k.baseline,
+            k.candidate,
+            k.limit
+        );
+    }
+    let failed = checks.iter().filter(|k| !k.pass).count();
+    if failed > 0 {
+        println!(
+            "\nrecall gate: FAILED ({failed} of {} checks); do not ship this change",
+            checks.len()
+        );
+        std::process::exit(1);
+    }
+    println!("\nrecall gate: passed ({} checks)", checks.len());
     Ok(())
 }

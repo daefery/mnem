@@ -121,7 +121,7 @@ pub fn create(conn: &Connection, dir: &Path, keep: usize) -> Result<Manifest> {
 /// Record in a fresh snapshot where and when it was taken and the settings in use.
 fn stamp_origin(snapshot: &Path) -> Result<()> {
     let c = Connection::open(snapshot)?;
-    let config = std::fs::read_to_string(db::data_dir().join("config.json")).ok();
+    let config = std::fs::read_to_string(crate::config::path()).ok();
     let mut put = c.prepare(
         "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
     )?;
@@ -231,7 +231,7 @@ pub fn review_settings(snapshot: &Path) -> Result<Option<SettingsReview>> {
     };
     let parsed = serde_json::from_str::<crate::config::Config>(&cfg);
     let theirs: Value = serde_json::from_str(&cfg).unwrap_or(Value::Null);
-    let ours: Value = std::fs::read_to_string(db::data_dir().join("config.json"))
+    let ours: Value = std::fs::read_to_string(crate::config::path())
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| Value::Object(Default::default()));
@@ -329,7 +329,7 @@ pub fn apply_settings(snapshot: &Path) -> Result<bool> {
 pub fn apply_settings_file(cfg: &str) -> Result<()> {
     serde_json::from_str::<crate::config::Config>(cfg)
         .context("the backup's settings are not a valid mnem config")?;
-    let path = db::data_dir().join("config.json");
+    let path = crate::config::path();
     if path.exists() {
         std::fs::copy(
             &path,

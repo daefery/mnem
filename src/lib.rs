@@ -8,6 +8,7 @@ pub mod doctor;
 pub mod embed;
 pub mod eval;
 pub mod forget;
+pub mod gate;
 pub mod gitstate;
 pub mod health;
 pub mod hook;

@@ -99,6 +99,34 @@ something since, a short "meanwhile" update.
   `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
   first. `mnem models` shows the live order and cooldowns.
 
+## Changing recall: the release gate
+
+Build the change, then run the new build's gate before installing it:
+
+```sh
+cargo build --release --features fastembed
+target/release/mnem eval --gate                      # this build vs the installed mnem
+mnem eval --gate --candidate-config new-config.json  # a settings change instead
+```
+
+It runs the installed mnem and the candidate one after the other on one frozen copy
+of the database and the same cached judgments (live sessions cannot move one run and
+not the other), over the
+model-written, hand-written and real-prompt (tuning half) test sets, and exits 1 if
+recall got worse:
+
+- the embedding model must still load;
+- known questions in the top 5 may drop by at most one case, found first by two;
+- vague questions in the top 5 by at most one;
+- prompts with no answer that still recall something: at most 3, and at most one more;
+- judged helpful share of shown memories on real prompts: at most 3 points lower;
+  prompts helped: at most two fewer; the judge must have judged every prompt;
+- the slowest 5% of recalls stays under 300 ms.
+
+The real-prompt test half is never used by the gate, so repeated gating cannot tune
+recall to it; read it once when a change is final. The gate takes about a minute; new
+candidates are judged once by the configured models and cached.
+
 ## Moving to another machine
 
 In the viewer (http://127.0.0.1:37777), open **Backup & move**:
