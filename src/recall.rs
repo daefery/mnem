@@ -292,7 +292,7 @@ pub fn recall(
         && semantic_enabled()
         && classify_prompt(prompt)
             .is_some_and(|(c, l)| l.is_none() && c.split_whitespace().count() >= 4)
-        && let Some(q) = crate::embed::query_from_service(prompt)
+        && let Some(q) = crate::embed::query_from_service(conn, prompt)
     {
         fill_with_vectors(conn, &q, project, Some(session), &mut rows, TOP)?;
     }

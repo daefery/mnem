@@ -523,7 +523,10 @@ fn main() -> Result<()> {
             distill_every,
             ui_port,
         } => {
-            let ui_port = ui_port.unwrap_or_else(mnem::embed::service_port);
+            let ui_port = ui_port.unwrap_or_else(mnem::embed::configured_port);
+            if let Err(e) = mnem::embed::record_service_port(&conn, ui_port) {
+                hook::log(&format!("watch port: {e:#}"));
+            }
             if ui_port != 0 {
                 let ui_path = path.clone();
                 std::thread::spawn(move || {

@@ -7,7 +7,8 @@
 use crate::db;
 use anyhow::{Context, Result, bail};
 use model2vec_rs::model::StaticModel;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -74,6 +75,9 @@ enum Backend {
 pub struct Embedder {
     backend: Backend,
     pub name: String,
+    /// Fingerprint of the model files: vectors from another download of the same model
+    /// name are dropped and recomputed rather than compared against new ones.
+    pub rev: String,
 }
 
 impl Embedder {
@@ -95,6 +99,7 @@ impl Embedder {
             let te = fastembed::TextEmbedding::try_new(opts)?;
             return Ok(Embedder {
                 backend: Backend::Onnx(std::sync::Mutex::new(te)),
+                rev: format!("fastembed-{}", env!("CARGO_PKG_VERSION")),
                 name,
             });
         }
@@ -103,8 +108,13 @@ impl Embedder {
             bail!("embedding model {name} not downloaded (run `mnem embed`)");
         }
         let model = StaticModel::from_pretrained(&dir, None, Some(true), None)?;
+        let mut h = Sha256::new();
+        for f in FILES {
+            h.update(std::fs::read(dir.join(f))?);
+        }
         Ok(Embedder {
             backend: Backend::Static(model),
+            rev: hex(&h.finalize()[..8]),
             name,
         })
     }
@@ -156,27 +166,61 @@ pub fn memory_text(title: &str, subtitle: &str, narrative: &str, facts: &str) ->
     t
 }
 
-/// Embed memories that have no vector for the current model. Returns how many.
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// Identity of the text a vector was computed from.
+pub fn text_hash(text: &str) -> String {
+    hex(&Sha256::digest(text.as_bytes())[..8])
+}
+
+const MEMORY_TEXT_COLS: &str = "coalesce(m.title, ''), coalesce(m.subtitle, ''), coalesce(m.narrative, ''), coalesce(m.facts, '[]')";
+
+fn text_from_row(r: &rusqlite::Row, at: usize) -> rusqlite::Result<String> {
+    Ok(memory_text(
+        &r.get::<_, String>(at)?,
+        &r.get::<_, String>(at + 1)?,
+        &r.get::<_, String>(at + 2)?,
+        &r.get::<_, String>(at + 3)?,
+    ))
+}
+
+/// Embed memories that have no current vector for this model (none yet, or one from
+/// before text hashes were stored). Returns how many were written.
+///
+/// Embedding happens outside any transaction, so a memory can change or disappear
+/// between reading its text and writing its vector. Each write therefore re-reads the
+/// memory inside the write transaction and is skipped unless the text still hashes the
+/// same; the next pass embeds the new text. When the model files change under the same
+/// name, every vector of that model is dropped first.
 pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Result<usize> {
-    let rows: Vec<(i64, String)> = {
-        let mut st = conn.prepare(
-            "SELECT m.id, coalesce(m.title, ''), coalesce(m.subtitle, ''), coalesce(m.narrative, ''), coalesce(m.facts, '[]')
-             FROM memories m LEFT JOIN memory_vectors v ON v.memory_id = m.id AND v.model = ?1
-             WHERE v.memory_id IS NULL AND m.kind != 'pinned' LIMIT ?2",
+    let rev_key = format!("semantic.rev.{}", e.name);
+    let stored: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k = ?1", [&rev_key], |r| r.get(0))
+        .optional()?;
+    if stored.as_deref() != Some(e.rev.as_str()) {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // No stored revision: vectors predate revisions and lack text hashes, so they are
+        // all re-embedded below; keep them usable until then.
+        if stored.is_some() {
+            tx.execute("DELETE FROM memory_vectors WHERE model = ?1", [&e.name])?;
+        }
+        tx.execute(
+            "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            params![rev_key, e.rev],
         )?;
+        tx.commit()?;
+    }
+    let rows: Vec<(i64, String)> = {
+        let mut st = conn.prepare(&format!(
+            "SELECT m.id, {MEMORY_TEXT_COLS}
+             FROM memories m LEFT JOIN memory_vectors v ON v.memory_id = m.id AND v.model = ?1
+             WHERE (v.memory_id IS NULL OR v.text_hash IS NULL) AND m.kind != 'pinned' LIMIT ?2"
+        ))?;
         st.query_map(
             params![e.name, limit.map(|l| l as i64).unwrap_or(-1)],
-            |r| {
-                Ok((
-                    r.get(0)?,
-                    memory_text(
-                        &r.get::<_, String>(1)?,
-                        &r.get::<_, String>(2)?,
-                        &r.get::<_, String>(3)?,
-                        &r.get::<_, String>(4)?,
-                    ),
-                ))
-            },
+            |r| Ok((r.get(0)?, text_from_row(r, 1)?)),
         )?
         .collect::<rusqlite::Result<_>>()?
     };
@@ -184,19 +228,41 @@ pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Re
     for chunk in rows.chunks(2048) {
         let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
         let vecs = e.embed(&texts);
-        let tx = conn.transaction()?;
-        {
-            let mut ins = tx.prepare_cached(
-                "INSERT OR REPLACE INTO memory_vectors(memory_id, model, dim, scale, vec) VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for ((id, _), v) in chunk.iter().zip(vecs) {
-                let (scale, q) = quantize(&v);
-                ins.execute(params![id, e.name, q.len() as i64, scale, q])?;
-            }
-        }
-        tx.commit()?;
-        done += chunk.len();
+        done += store(conn, &e.name, chunk, vecs)?;
     }
+    Ok(done)
+}
+
+/// Write vectors for `(memory id, embedded text)` pairs, skipping any memory whose text
+/// no longer matches (changed or deleted since it was read).
+fn store(
+    conn: &mut Connection,
+    model: &str,
+    chunk: &[(i64, String)],
+    vecs: Vec<Vec<f32>>,
+) -> Result<usize> {
+    let mut done = 0;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    {
+        let mut cur = tx.prepare_cached(&format!(
+            "SELECT {MEMORY_TEXT_COLS} FROM memories m WHERE m.id = ?1 AND m.kind != 'pinned'"
+        ))?;
+        let mut ins = tx.prepare_cached(
+            "INSERT OR REPLACE INTO memory_vectors(memory_id, model, dim, scale, vec, text_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for ((id, text), v) in chunk.iter().zip(vecs) {
+            let hash = text_hash(text);
+            let now: Option<String> = cur.query_row([id], |r| text_from_row(r, 0)).optional()?;
+            if v.is_empty() || now.as_deref().map(text_hash).as_deref() != Some(hash.as_str()) {
+                continue;
+            }
+            let (scale, q) = quantize(&v);
+            ins.execute(params![id, model, q.len() as i64, scale, q, hash])?;
+            done += 1;
+        }
+    }
+    tx.commit()?;
     Ok(done)
 }
 
@@ -235,8 +301,9 @@ pub fn shared() -> Option<std::sync::Arc<Embedder>> {
     st.0.clone()
 }
 
-/// Port of the local viewer/embedding service run by `mnem watch`.
-pub fn service_port() -> u16 {
+/// Port `mnem watch` serves the viewer and embeddings on unless told otherwise:
+/// MNEM_UI_PORT, then config `ui_port`, then 37777.
+pub fn configured_port() -> u16 {
     std::env::var("MNEM_UI_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -244,14 +311,47 @@ pub fn service_port() -> u16 {
         .unwrap_or(37777)
 }
 
+const PORT_KEY: &str = "watch.ui_port";
+
+/// Record the port the running watch service actually listens on (0: none), so hooks
+/// find it even when it came from `mnem watch --ui-port`.
+pub fn record_service_port(conn: &Connection, port: u16) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        params![PORT_KEY, port.to_string()],
+    )?;
+    Ok(())
+}
+
+/// Port of the running watch service: MNEM_UI_PORT when set, else what the service
+/// recorded at start, else the configured default.
+pub fn service_port(conn: &Connection) -> u16 {
+    if let Some(p) = std::env::var("MNEM_UI_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+    {
+        return p;
+    }
+    conn.query_row("SELECT v FROM meta WHERE k = ?1", [PORT_KEY], |r| {
+        r.get::<_, String>(0)
+    })
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or_else(configured_port)
+}
+
 /// Embed `text` in the watch service, where the model stays loaded. None when the
-/// service is not reachable within the timeout (callers fall back to keywords).
-pub fn query_from_service(text: &str) -> Option<Query> {
+/// service is disabled or not reachable within the timeout (callers fall back to keywords).
+pub fn query_from_service(conn: &Connection, text: &str) -> Option<Query> {
+    let port = service_port(conn);
+    if port == 0 {
+        return None;
+    }
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_millis(300)))
         .build()
         .new_agent();
-    let url = format!("http://127.0.0.1:{}/api/embed", service_port());
+    let url = format!("http://127.0.0.1:{port}/api/embed");
     let mut r = agent.get(&url).query("q", text).call().ok()?;
     let v: serde_json::Value = r.body_mut().read_json().ok()?;
     Some(Query {
@@ -318,5 +418,37 @@ mod tests {
         let (scale, q) = quantize(&a);
         let exact: f32 = a.iter().map(|x| x * x).sum();
         assert!((dot_q(&a, scale, &q) - exact).abs() < 0.01);
+    }
+
+    #[test]
+    fn stale_text_is_not_stored() {
+        let mut conn =
+            db::open_with(std::path::Path::new(":memory:"), Duration::from_secs(1)).unwrap();
+        for id in [1, 2, 3] {
+            conn.execute(
+                "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'mnem', ?1, 0)",
+                params![id, format!("title {id}")],
+            )
+            .unwrap();
+        }
+        let read: Vec<(i64, String)> = [1, 2, 3]
+            .iter()
+            .map(|id| (*id, memory_text(&format!("title {id}"), "", "n", "[]")))
+            .collect();
+        // Between reading and storing: #2 is edited, #3 is deleted.
+        conn.execute("UPDATE memories SET title = 'edited' WHERE id = 2", [])
+            .unwrap();
+        conn.execute("DELETE FROM memories WHERE id = 3", [])
+            .unwrap();
+        let n = store(&mut conn, "m", &read, vec![vec![0.5; 4]; 3]).unwrap();
+        assert_eq!(n, 1);
+        let ids: Vec<i64> = conn
+            .prepare("SELECT memory_id FROM memory_vectors")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(ids, vec![1]);
     }
 }

@@ -159,6 +159,8 @@ CREATE TABLE IF NOT EXISTS memory_vectors(
   dim INTEGER NOT NULL,
   scale REAL NOT NULL,
   vec BLOB NOT NULL,
+  -- Hash of the exact text embedded; backfill re-checks it against the memory at commit.
+  text_hash TEXT,
   PRIMARY KEY(memory_id, model)
 );
 
@@ -209,7 +211,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -263,6 +265,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("events", "thread", "TEXT"),
         ("events", "label", "TEXT"),
         ("events", "tool_raw", "TEXT"),
+        ("memory_vectors", "text_hash", "TEXT"),
     ] {
         let has: bool = conn.query_row(
             &format!("SELECT count(*) FROM pragma_table_info('{table}') WHERE name = ?1"),
@@ -287,7 +290,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "DROP TABLE IF EXISTS memory_vectors;
              CREATE TABLE memory_vectors(memory_id INTEGER NOT NULL, model TEXT NOT NULL, dim INTEGER NOT NULL,
-               scale REAL NOT NULL, vec BLOB NOT NULL, PRIMARY KEY(memory_id, model));",
+               scale REAL NOT NULL, vec BLOB NOT NULL, text_hash TEXT, PRIMARY KEY(memory_id, model));",
         )?;
     }
     Ok(())
