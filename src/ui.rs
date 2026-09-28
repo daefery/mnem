@@ -371,70 +371,11 @@ fn memory_item(r: &rusqlite::Row) -> Result<(i64, Value)> {
     Ok((at, Value::Object(v)))
 }
 
-/// Memories most relevant to a search, best first: keyword (BM25) and meaning (the
-/// embedding model, when loaded) fused. Shown above the chronological matches.
-fn best_matches(
-    conn: &Connection,
-    text: &str,
-    fq: &str,
-    project: Option<&String>,
-) -> Result<Vec<Value>> {
-    const BEST: usize = 8;
-    const POOL: i64 = 50;
-    let mut st = conn.prepare(
-        "SELECT m.id FROM memories m JOIN memories_fts ON memories_fts.rowid = m.id
-         WHERE memories_fts MATCH ?1 AND (?2 IS NULL OR m.project = ?2)
-         ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) LIMIT ?3",
-    )?;
-    let mut ids = |fq: &str| -> Result<Vec<i64>> {
-        Ok(st
-            .query_map(rusqlite::params![fq, project, POOL], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?)
-    };
-    // Every word first, then any of the words: plain-language searches rarely match all.
-    let mut keyword = ids(fq)?;
-    if (keyword.len() as i64) < POOL
-        && let Some(any) = crate::recall::any_terms_query(text)
-    {
-        for id in ids(&any)? {
-            if !keyword.contains(&id) {
-                keyword.push(id);
-            }
-        }
-    }
-    let vector: Vec<i64> = match crate::embed::shared() {
-        Some(e) => {
-            let (filter, args): (&str, Vec<Box<dyn ToSql>>) = match project {
-                Some(p) => ("m.project = ?", vec![Box::new(p.clone())]),
-                None => ("1", vec![]),
-            };
-            crate::embed::search_where(conn, &e.query(text), filter, args, POOL as usize)?
-                .into_iter()
-                .take_while(|(_, cos)| *cos >= crate::recall::MIN_COSINE)
-                .map(|(id, _)| id)
-                .collect()
-        }
-        None => vec![],
-    };
-    let mut row = conn.prepare(&format!(
-        "SELECT {MEMORY_COLS} FROM memories m WHERE m.id = ?1"
-    ))?;
-    let mut out = Vec::new();
-    for id in crate::recall::fuse(&keyword, &vector, crate::recall::SEARCH_VECTOR_WEIGHT)
-        .into_iter()
-        .take(BEST)
-    {
-        let mut rows = row.query([id])?;
-        if let Some(r) = rows.next()? {
-            out.push(memory_item(r)?.1);
-        }
-    }
-    Ok(out)
-}
-
-/// Observations, summaries and human prompts, newest first, paged by timestamp.
-/// `before` pages backwards (inclusive; the client drops duplicates at the boundary),
-/// `after` returns only newer items for live updates.
+/// Observations, summaries and human prompts. Without a search: newest first, paged by
+/// timestamp (`before` pages backwards, inclusive, and the client drops duplicates at the
+/// boundary; `after` returns only newer items for live updates). With a search: memories
+/// by relevance (words and meaning), then matching prompts newest first, paged by
+/// `offset`; each item says what matched it.
 fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     let limit: i64 = q
         .get("limit")
@@ -442,22 +383,24 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
         .unwrap_or(40)
         .clamp(1, 200);
     let project = q.get("project").filter(|p| !p.is_empty());
-    let query = q.get("q").map(|s| fts_query(s)).filter(|s| !s.is_empty());
+    let text = q.get("q").map(|s| s.trim()).unwrap_or_default();
+    let query = Some(fts_query(text)).filter(|s| !s.is_empty());
     let before: Option<i64> = q.get("before").and_then(|v| v.parse().ok());
     let after: Option<i64> = q.get("after").and_then(|v| v.parse().ok());
+    if query.is_some() && after.is_none() {
+        let offset: i64 = q
+            .get("offset")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+            .max(0);
+        return ranked_feed(conn, text, project, limit, offset);
+    }
     let order = if after.is_some() { "ASC" } else { "DESC" };
 
     let mut items: Vec<(i64, Value)> = Vec::new();
-
-    // Memories.
     let mut sql = format!("SELECT {MEMORY_COLS} FROM memories m");
     let mut args: Vec<Box<dyn ToSql>> = Vec::new();
     let mut wh: Vec<&str> = Vec::new();
-    if let Some(fq) = &query {
-        sql.push_str(" JOIN memories_fts ON memories_fts.rowid = m.id");
-        wh.push("memories_fts MATCH ?");
-        args.push(Box::new(fq.clone()));
-    }
     if let Some(p) = project {
         wh.push("m.project = ?");
         args.push(Box::new(p.clone()));
@@ -478,22 +421,93 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     let mut st = conn.prepare(&sql)?;
     let mut rows = st.query(params_from_iter(args.iter().map(|b| b.as_ref())))?;
     while let Some(r) = rows.next()? {
-        let (at, v) = memory_item(r)?;
-        items.push((at, v));
+        items.push(memory_item(r)?);
     }
     drop(rows);
+    items.extend(prompt_items(
+        conn, None, project, before, after, order, limit, 0,
+    )?);
+    items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    items.truncate(limit as usize);
+    let next_before = (after.is_none() && items.len() as i64 == limit)
+        .then(|| items.last().map(|(t, _)| *t))
+        .flatten();
+    Ok(json!({
+        "items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
+        "next_before": next_before,
+    }))
+}
 
-    // Human prompts from transcripts (and imported history).
+/// A page of search results: memories by relevance, then prompts with every word.
+fn ranked_feed(
+    conn: &Connection,
+    text: &str,
+    project: Option<&String>,
+    limit: i64,
+    offset: i64,
+) -> Result<Value> {
+    let vq = crate::embed::shared().map(|e| e.query(text));
+    let (filter, args): (&str, &dyn Fn() -> Vec<Box<dyn ToSql>>) = match project {
+        Some(p) => ("m.project = ?", &move || vec![Box::new(p.clone())]),
+        None => ("1", &Vec::new),
+    };
+    let ranked = crate::search::rank_memories(conn, text, vq.as_ref(), filter, args)?;
+    let total = ranked.len() as i64;
+    let mut row = conn.prepare(&format!(
+        "SELECT {MEMORY_COLS} FROM memories m WHERE m.id = ?1"
+    ))?;
+    let mut items = Vec::new();
+    for r in ranked.iter().skip(offset as usize).take(limit as usize) {
+        let mut rows = row.query([r.id])?;
+        if let Some(x) = rows.next()? {
+            let mut v = memory_item(x)?.1;
+            v["match"] = json!(r.how());
+            items.push(v);
+        }
+    }
+    let room = limit - items.len() as i64;
+    if room > 0 {
+        let skip = (offset - total).max(0);
+        for (_, mut v) in prompt_items(
+            conn,
+            Some(&fts_query(text)),
+            project,
+            None,
+            None,
+            "DESC",
+            room,
+            skip,
+        )? {
+            v["match"] = json!("words");
+            items.push(v);
+        }
+    }
+    let next_offset = (items.len() as i64 == limit).then_some(offset + limit);
+    Ok(json!({ "items": items, "next_before": null, "next_offset": next_offset }))
+}
+
+/// Human prompts from transcripts (and imported history).
+#[allow(clippy::too_many_arguments)]
+fn prompt_items(
+    conn: &Connection,
+    fq: Option<&str>,
+    project: Option<&String>,
+    before: Option<i64>,
+    after: Option<i64>,
+    order: &str,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<(i64, Value)>> {
     let mut sql = String::from(
         "SELECT e.id, e.text, s.project, s.agent, coalesce(e.ts, 0)
          FROM events e JOIN sessions s ON s.id = e.session_id",
     );
     let mut args: Vec<Box<dyn ToSql>> = Vec::new();
     let mut wh: Vec<&str> = vec!["e.kind = 'prompt'", "e.label IS NULL", "e.thread IS NULL"];
-    if let Some(fq) = &query {
+    if let Some(fq) = fq {
         sql.push_str(" JOIN events_fts ON events_fts.rowid = e.id");
         wh.push("events_fts MATCH ?");
-        args.push(Box::new(fq.clone()));
+        args.push(Box::new(fq.to_string()));
     }
     if let Some(p) = project {
         wh.push("s.project = ?");
@@ -508,12 +522,14 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
         args.push(Box::new(a));
     }
     sql.push_str(&format!(
-        " WHERE {} ORDER BY e.ts {order} LIMIT ?",
+        " WHERE {} ORDER BY e.ts {order} LIMIT ? OFFSET ?",
         wh.join(" AND ")
     ));
     args.push(Box::new(limit));
+    args.push(Box::new(offset));
     let mut st = conn.prepare(&sql)?;
     let mut rows = st.query(params_from_iter(args.iter().map(|b| b.as_ref())))?;
+    let mut items = Vec::new();
     while let Some(r) = rows.next()? {
         let at: i64 = r.get(4)?;
         items.push((
@@ -528,24 +544,7 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
             }),
         ));
     }
-
-    items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-    items.truncate(limit as usize);
-    let next_before = (after.is_none() && items.len() as i64 == limit)
-        .then(|| items.last().map(|(t, _)| *t))
-        .flatten();
-    // The first page of a search also carries the best matches by relevance.
-    let best = match (&query, before, after) {
-        (Some(fq), None, None) => {
-            best_matches(conn, q.get("q").map_or("", |s| s.as_str()), fq, project)?
-        }
-        _ => vec![],
-    };
-    Ok(json!({
-        "items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
-        "best": best,
-        "next_before": next_before,
-    }))
+    Ok(items)
 }
 
 fn projects(conn: &Connection) -> Result<Value> {
@@ -588,7 +587,7 @@ fn stats(conn: &Connection) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, parse_query, summary_fields};
+    use super::{HashMap, Value, decode, parse_query, summary_fields};
 
     #[test]
     fn decodes_queries() {
@@ -609,5 +608,60 @@ mod tests {
         assert_eq!(m["request"], "Fix login");
         assert_eq!(m["investigated"], "logs");
         assert_eq!(m["next_steps"], "ship it");
+    }
+
+    #[test]
+    fn search_feed_pages_by_rank_then_prompts() {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        // Partial matches only: no memory holds every word of the question.
+        for id in 1..=5 {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'mnem', ?1, ?1)",
+                rusqlite::params![id, format!("watcher restart note {id}")],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:s', 'pi', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO events(session_id, record_key, ts, kind, text) VALUES ('pi:s', 'k', 9, 'prompt', 'why does the watcher keep restarting')",
+            [],
+        )
+        .unwrap();
+        let page = |offset: i64| {
+            let q: HashMap<String, String> = [
+                ("q", "why does the watcher keep restarting"),
+                ("limit", "3"),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .chain([("offset".to_string(), offset.to_string())])
+            .collect();
+            super::feed(&c, &q).unwrap()
+        };
+        let (a, b) = (page(0), page(3));
+        let keys = |v: &Value| -> Vec<String> {
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|i| format!("{}{}", i["itemType"].as_str().unwrap(), i["id"]))
+                .collect()
+        };
+        assert_eq!(keys(&a).len(), 3);
+        assert_eq!(a["next_offset"], 3);
+        let mut all = keys(&a);
+        all.extend(keys(&b));
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert_eq!(all.last().unwrap(), "prompt1");
+        assert!(a["items"][0]["match"] == "words");
     }
 }

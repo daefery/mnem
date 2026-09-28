@@ -149,18 +149,20 @@ pub fn rank(
 /// Reciprocal rank fusion of a keyword ranking and a vector ranking, best first. With
 /// a weight below 1 the vector list mostly reorders keyword hits and fills in after them.
 pub fn fuse(keyword: &[i64], vector: &[i64], vector_weight: f64) -> Vec<i64> {
-    let mut fused: Vec<(f64, i64)> = Vec::new();
+    let mut score: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    let mut order: Vec<i64> = Vec::new();
     for (list, weight) in [(keyword, 1.0), (vector, vector_weight)] {
         for (r, id) in list.iter().enumerate() {
-            let score = weight / (RRF_K + r as f64 + 1.0);
-            match fused.iter_mut().find(|(_, x)| x == id) {
-                Some((s, _)) => *s += score,
-                None => fused.push((score, *id)),
-            }
+            let s = score.entry(*id).or_insert_with(|| {
+                order.push(*id);
+                0.0
+            });
+            *s += weight / (RRF_K + r as f64 + 1.0);
         }
     }
-    fused.sort_by(|a, b| b.0.total_cmp(&a.0));
-    fused.into_iter().map(|(_, id)| id).collect()
+    // Stable: ties keep first-seen order.
+    order.sort_by(|a, b| score[b].total_cmp(&score[a]));
+    order
 }
 
 /// Vector hits above `min_cos`, with the fields recall shows.

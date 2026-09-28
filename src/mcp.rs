@@ -320,6 +320,9 @@ struct Filters {
     end: Option<i64>,
 }
 
+const BEYOND_POOL: &str =
+    "Relevance order covers the best 1000 memories; page further with orderBy date_desc.";
+
 fn search(conn: &Connection, a: &Value) -> Result<String> {
     let raw = str_arg(a, "query").unwrap_or_default().trim();
     let q = fts_query(raw);
@@ -348,12 +351,21 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
         obs_types.push(k.clone());
         kind = Some("observations".into());
     }
-    let mut out = Vec::new();
     let want_mem = matches!(
         kind.as_deref(),
         None | Some("observations") | Some("sessions")
     );
     let want_ev = matches!(kind.as_deref(), None | Some("prompts") | Some("events"));
+    let relevance = order == "relevance" && !raw.is_empty();
+    // Both tables: take the first offset+limit of each, merge, then cut one page.
+    let both = want_mem && want_ev;
+    let (window, skip) = if both {
+        (offset + limit, 0)
+    } else {
+        (limit, offset)
+    };
+    let mut notes = Vec::new();
+    let mut mem: Vec<(i64, String)> = Vec::new();
     if want_mem {
         let mem_kind = match kind.as_deref() {
             Some("sessions") => Some("summary"),
@@ -362,10 +374,10 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
         };
         // Relevance order also asks the watch service for a query vector, so memories
         // that mean the same thing in other words rank too (keyword search otherwise).
-        let vq = (order == "relevance" && !raw.is_empty() && crate::recall::semantic_enabled())
+        let vq = (relevance && crate::recall::semantic_enabled())
             .then(|| crate::embed::query_from_service(conn, raw))
             .flatten();
-        out.extend(search_memories(
+        let (rows, meaning) = search_memories(
             conn,
             raw,
             vq.as_ref(),
@@ -373,10 +385,20 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
             mem_kind,
             &obs_types,
             order,
-            limit,
-            offset,
-        )?);
+            window,
+            skip,
+        )?;
+        if meaning {
+            notes.push(
+                "Memories ranked by words and meaning; \"(by meaning)\" marks ones with none of the words.",
+            );
+        }
+        if relevance && (offset + limit) as usize > crate::search::POOL {
+            notes.push(BEYOND_POOL);
+        }
+        mem = rows;
     }
+    let mut ev: Vec<(i64, String)> = Vec::new();
     if want_ev {
         let kinds: &[&str] = if kind.as_deref() == Some("prompts") {
             &["prompt"]
@@ -391,17 +413,50 @@ fn search(conn: &Connection, a: &Value) -> Result<String> {
                 "compaction",
             ]
         };
-        out.extend(search_events(conn, &q, &f, kinds, order, limit, offset)?);
+        ev = search_events(conn, &q, &f, kinds, order, window, skip)?;
+    }
+    let mut out: Vec<(i64, String)> = if both && !relevance {
+        let mut all: Vec<(i64, String)> = mem.into_iter().chain(ev).collect();
+        if order == "date_asc" {
+            all.sort_by_key(|r| r.0);
+        } else {
+            all.sort_by_key(|r| std::cmp::Reverse(r.0));
+        }
+        all
+    } else {
+        mem.into_iter().chain(ev).collect()
+    };
+    if both {
+        out = out
+            .into_iter()
+            .skip(offset as usize)
+            .take(limit as usize)
+            .collect();
     }
     if out.is_empty() {
-        return Ok("No results.".into());
+        return Ok(if notes.contains(&BEYOND_POOL) {
+            BEYOND_POOL.to_string()
+        } else {
+            "No results.".into()
+        });
+    }
+    let mut text: Vec<String> = notes.iter().map(|n| n.to_string()).collect();
+    let mut divided = false;
+    for (_, line) in out {
+        // Relevance lists memories first; mark where transcript events begin.
+        if relevance && both && !divided && line.starts_with('E') {
+            text.push("Transcript events:".into());
+            divided = true;
+        }
+        text.push(line);
     }
     Ok(format!(
         "{}\n\nNext: timeline(anchor) or get_observations([ids]).",
-        out.join("\n")
+        text.join("\n")
     ))
 }
 
+/// One page of memories as (created_at, index line), and whether meaning took part.
 #[allow(clippy::too_many_arguments)]
 fn search_memories(
     conn: &Connection,
@@ -413,9 +468,9 @@ fn search_memories(
     order: &str,
     limit: i64,
     offset: i64,
-) -> Result<Vec<String>> {
-    let q = fts_query(raw);
-    // Filters shared by the keyword and the vector ranking.
+) -> Result<(Vec<(i64, String)>, bool)> {
+    // Filters shared by the keyword and the vector ranking. Sensitive memories (personal
+    // details) are left out unless asked for by type.
     let filters = || {
         let mut wh: Vec<String> = Vec::new();
         let mut args: Vec<Box<dyn ToSql>> = Vec::new();
@@ -431,108 +486,91 @@ fn search_memories(
             wh.push("m.kind = ?".into());
             args.push(Box::new(k.to_string()));
         }
-        if !types.is_empty() {
+        if types.is_empty() {
+            wh.push("coalesce(m.type, '') != 'sensitive'".into());
+        } else {
             wh.push(format!("m.type IN ({})", vec!["?"; types.len()].join(",")));
             for t in types {
                 args.push(Box::new(t.clone()));
             }
         }
-        (wh, args)
+        (wh.join(" AND "), args)
     };
-    let keyword = |fq: &str, lim: i64, off: i64| -> Result<Vec<i64>> {
-        let (mut wh, mut args) = filters();
-        let mut sql = String::from("SELECT m.id FROM memories m");
-        if !fq.is_empty() {
-            sql.push_str(" JOIN memories_fts ON memories_fts.rowid = m.id");
-            wh.insert(0, "memories_fts MATCH ?".into());
-            args.insert(0, Box::new(fq.to_string()));
-        }
-        if !wh.is_empty() {
-            sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
-        }
-        sql.push_str(match (order, fq.is_empty()) {
-            ("date_asc", _) => " ORDER BY m.created_at ASC",
-            ("date_desc", _) | (_, true) => " ORDER BY m.created_at DESC",
-            _ => {
-                " ORDER BY bm25(memories_fts) + (strftime('%s','now') * 1000 - m.created_at) / 2.592e9"
-            }
-        });
-        sql.push_str(" LIMIT ? OFFSET ?");
-        args.push(Box::new(lim));
-        args.push(Box::new(off));
-        let mut st = conn.prepare(&sql)?;
-        let ids = st
-            .query_map(params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
-                r.get(0)
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(ids)
-    };
-    if order != "relevance" || q.is_empty() {
-        let ids = keyword(&q, limit, offset)?;
-        return memory_lines(conn, ids);
-    }
-    // Relevance: memories with every word first, then ones with some of the words (a
-    // question in plain language rarely matches every word), fused with the meaning-based
-    // ranking when a query vector is available; the page is cut from that order.
-    let pool = ((offset + limit).max(50) * 2).min(1000);
-    let mut ids = keyword(&q, pool, 0)?;
-    if (ids.len() as i64) < pool
-        && let Some(any) = crate::recall::any_terms_query(raw)
-    {
-        for id in keyword(&any, pool, 0)? {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-    }
-    if let Some(vq) = vq {
-        let (wh, args) = filters();
-        let filter = if wh.is_empty() {
-            "1".to_string()
-        } else {
-            wh.join(" AND ")
-        };
-        let vector: Vec<i64> = crate::embed::search_where(conn, vq, &filter, args, pool as usize)?
+    let (filter, _) = filters();
+    if order == "relevance" && !raw.is_empty() {
+        let ranked = crate::search::rank_memories(conn, raw, vq, &filter, &|| filters().1)?;
+        let meaning = ranked.iter().any(|r| r.by_meaning);
+        let page: Vec<_> = ranked
             .into_iter()
-            .take_while(|(_, cos)| *cos >= crate::recall::MIN_COSINE)
-            .map(|(id, _)| id)
+            .skip(offset as usize)
+            .take(limit as usize)
             .collect();
-        ids = crate::recall::fuse(&ids, &vector, crate::recall::SEARCH_VECTOR_WEIGHT);
+        let mut out = Vec::new();
+        for r in page {
+            let (at, mut line) = memory_line(conn, r.id)?;
+            if !r.by_words {
+                line.push_str(" (by meaning)");
+            }
+            out.push((at, line));
+        }
+        return Ok((out, meaning));
     }
-    let page = ids
-        .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
-        .collect();
-    memory_lines(conn, page)
+    // Date order (or no query): every word must match, newest or oldest first.
+    let q = fts_query(raw);
+    let (filter, mut args) = filters();
+    let mut sql = String::from("SELECT m.id FROM memories m");
+    let mut wh = vec![filter];
+    if !q.is_empty() {
+        sql.push_str(" JOIN memories_fts ON memories_fts.rowid = m.id");
+        wh.insert(0, "memories_fts MATCH ?".into());
+        args.insert(0, Box::new(q));
+    }
+    sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
+    sql.push_str(if order == "date_asc" {
+        " ORDER BY m.created_at ASC"
+    } else {
+        " ORDER BY m.created_at DESC"
+    });
+    sql.push_str(" LIMIT ? OFFSET ?");
+    args.push(Box::new(limit));
+    args.push(Box::new(offset));
+    let mut st = conn.prepare(&sql)?;
+    let ids: Vec<i64> = st
+        .query_map(params_from_iter(args.iter().map(|b| b.as_ref())), |r| {
+            r.get(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for id in ids {
+        out.push(memory_line(conn, id)?);
+    }
+    Ok((out, false))
 }
 
-/// Index lines for memory ids, in order.
-fn memory_lines(conn: &Connection, ids: Vec<i64>) -> Result<Vec<String>> {
-    let mut line = conn.prepare_cached(
+/// (created_at, index line) for a memory.
+fn memory_line(conn: &Connection, id: i64) -> Result<(i64, String)> {
+    let mut st = conn.prepare_cached(
         "SELECT m.kind, coalesce(m.type, ''), coalesce(m.title, ''), coalesce(m.created_at, 0), coalesce(m.project, '')
          FROM memories m WHERE m.id = ?1",
     )?;
-    let mut out = Vec::new();
-    for id in ids {
-        let (kind, ty, title, at, project): (String, String, String, i64, String) = line
-            .query_row([id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
-            })?;
-        let label = if kind == "summary" {
-            "summary".to_string()
-        } else {
-            ty
-        };
-        out.push(format!(
+    let (kind, ty, title, at, project): (String, String, String, i64, String) = st
+        .query_row([id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?;
+    let label = if kind == "summary" {
+        "summary".to_string()
+    } else {
+        ty
+    };
+    Ok((
+        at,
+        format!(
             "#{id} [{label}] {} · {} · {}",
             day(at),
             short(&project),
             text::head(&title, 140)
-        ));
-    }
-    Ok(out)
+        ),
+    ))
 }
 
 fn search_events(
@@ -543,7 +581,7 @@ fn search_events(
     order: &str,
     limit: i64,
     offset: i64,
-) -> Result<Vec<String>> {
+) -> Result<Vec<(i64, String)>> {
     let mut sql = String::from(
         "SELECT e.id, e.kind, coalesce(e.ts, 0), s.agent, coalesce(s.project, ''), coalesce(e.path, ''), coalesce(e.text, '')
          FROM events e JOIN sessions s ON s.id = e.session_id",
@@ -592,11 +630,14 @@ fn search_events(
             r.get(6)?,
         );
         let body = if t.is_empty() { path } else { squash(&t) };
-        Ok(format!(
-            "E{id} [{kind}] {} · {agent} · {} · {}",
-            day(ts),
-            short(&project),
-            text::head(&body, 140)
+        Ok((
+            ts,
+            format!(
+                "E{id} [{kind}] {} · {agent} · {} · {}",
+                day(ts),
+                short(&project),
+                text::head(&body, 140)
+            ),
         ))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -668,9 +709,11 @@ fn timeline(conn: &Connection, a: &Value) -> Result<String> {
                 0,
             )?;
             let first = hit
+                .0
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("no match for {q:?}"))?;
             let id: i64 = first
+                .1
                 .trim_start_matches('#')
                 .split(' ')
                 .next()
@@ -1028,6 +1071,71 @@ mod tests {
         assert!(r.starts_with("#1 "), "{r}");
         assert!(!r.contains("#2 "), "{r}");
         assert!(ask("webhook 3003").starts_with("#1 "));
+    }
+
+    fn memory_db() -> rusqlite::Connection {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        for id in 1..=6 {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, 'p', 'observation', ?2, ?3, 'mnem', ?1, ?1)",
+                rusqlite::params![
+                    id,
+                    if id == 6 { "sensitive" } else { "bugfix" },
+                    format!("cache eviction bug number {id}")
+                ],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO sessions(id, agent, native_id, project) VALUES ('claude:s', 'claude', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO events(session_id, record_key, ts, kind, text) VALUES ('claude:s', 'k', 9, 'prompt', 'cache eviction again')",
+            [],
+        )
+        .unwrap();
+        c
+    }
+
+    fn ids(r: &str) -> Vec<String> {
+        r.lines()
+            .filter(|l| l.starts_with('#') || l.starts_with('E'))
+            .map(|l| l.split(' ').next().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn search_pages_are_stable_and_global() {
+        let c = memory_db();
+        let ask = |v: serde_json::Value| ids(&super::call(&c, "search", &v).unwrap());
+        let q = "cache eviction";
+        let whole = ask(serde_json::json!({ "query": q, "limit": 4, "type": "observations" }));
+        let mut paged = ask(serde_json::json!({ "query": q, "limit": 2, "type": "observations" }));
+        paged.extend(ask(
+            serde_json::json!({ "query": q, "limit": 2, "offset": 2, "type": "observations" }),
+        ));
+        assert_eq!(whole, paged);
+        // Without a type, one page spans memories and events and holds `limit` rows.
+        assert_eq!(ask(serde_json::json!({ "query": q, "limit": 1 })).len(), 1);
+        let all = ask(serde_json::json!({ "query": q, "limit": 20 }));
+        assert_eq!(all.len(), 6, "{all:?}");
+        assert_eq!(all.last().unwrap(), "E1");
+        // Sensitive memories only when asked for by type.
+        assert!(!all.contains(&"#6".to_string()));
+        assert_eq!(
+            ask(serde_json::json!({ "query": q, "type": "observations", "obs_type": "sensitive" })),
+            vec!["#6"]
+        );
+        // Date order interleaves both tables by time.
+        let dated = ask(serde_json::json!({ "query": q, "orderBy": "date_desc", "limit": 2 }));
+        assert_eq!(dated, vec!["E1", "#5"]);
     }
 
     #[test]

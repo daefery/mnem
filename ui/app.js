@@ -12,6 +12,7 @@
     items: [],
     keys: new Set(),
     before: null,
+    offset: 0,
     newest: 0,
     loading: false,
     hasMore: true,
@@ -164,8 +165,18 @@
       el("div", { class: "card-meta" }, el("span", { class: "meta-date" }, `E${p.id} • ${fmtDate(p.created_at_epoch)}`)));
   }
 
-  const cardFor = (it) =>
-    it.itemType === "observation" ? observationCard(it) : it.itemType === "summary" ? summaryCard(it) : promptCard(it);
+  // In search results, say what matched: the words, the meaning, or both.
+  const MATCH = { words: "words", meaning: "meaning", both: "words + meaning" };
+
+  function cardFor(it) {
+    const card =
+      it.itemType === "observation" ? observationCard(it) : it.itemType === "summary" ? summaryCard(it) : promptCard(it);
+    if (it.match) {
+      card.querySelector(".card-header-left, .summary-badge-row")?.append(
+        el("span", { class: `mnem-match match-${it.match}`, title: "What matched your search" }, MATCH[it.match] || it.match));
+    }
+    return card;
+  }
   const keyOf = (it) => `${it.itemType}-${it.id}`;
 
   // ---------- data ----------
@@ -204,20 +215,12 @@
     state.loading = true;
     renderFooter();
     try {
-      const extra = state.before !== null ? { before: state.before } : {};
+      // Searches page by rank (offset); the plain feed pages by time (before).
+      const extra = state.query
+        ? { offset: state.offset }
+        : state.before !== null ? { before: state.before } : {};
       const data = await getJSON(`/api/feed?${params(extra)}`);
       if (gen !== state.generation) return;
-      // First page of a search: the most relevant memories (keywords and meaning), then
-      // the remaining matches newest first.
-      if (data.best && data.best.length) {
-        feedContent.insertBefore(el("div", { class: "mnem-section" }, "Best matches"), sentinel);
-        for (const it of data.best) {
-          state.keys.add(keyOf(it));
-          state.items.push(it);
-          feedContent.insertBefore(cardFor(it), sentinel);
-        }
-        feedContent.insertBefore(el("div", { class: "mnem-section" }, "Other matches, newest first"), sentinel);
-      }
       for (const it of data.items) {
         const k = keyOf(it);
         if (state.keys.has(k)) continue;
@@ -226,8 +229,13 @@
         feedContent.insertBefore(cardFor(it), sentinel);
         state.newest = Math.max(state.newest, it.created_at_epoch);
       }
-      state.before = data.next_before;
-      state.hasMore = data.next_before !== null && data.items.length > 0;
+      if (state.query) {
+        state.offset = data.next_offset ?? state.offset;
+        state.hasMore = data.next_offset != null && data.items.length > 0;
+      } else {
+        state.before = data.next_before;
+        state.hasMore = data.next_before !== null && data.items.length > 0;
+      }
     } catch (e) {
       console.error(e);
       state.hasMore = false;
@@ -244,6 +252,7 @@
     state.items = [];
     state.keys = new Set();
     state.before = null;
+    state.offset = 0;
     state.newest = 0;
     state.hasMore = true;
     state.loading = false;
