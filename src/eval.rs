@@ -815,21 +815,35 @@ pub fn run(
             // file as context; a prompt case judges what prompt recall showed.
             let (top, question): (Vec<i64>, String) = match &c.file {
                 Some(f) => {
-                    let ids: Vec<i64> =
-                        crate::files::about_in(conn, &c.project, f, &scope, FILE_TOP)?
-                            .iter()
-                            .map(|a| a.id)
-                            .collect();
+                    let ids: Vec<i64> = crate::files::about_in(
+                        conn,
+                        &crate::files::Place {
+                            rel: f,
+                            root: None,
+                            project: &c.project,
+                        },
+                        &scope,
+                        FILE_TOP,
+                    )?
+                    .iter()
+                    .map(|a| a.id)
+                    .collect();
                     judged.overlap += ids
                         .iter()
                         .filter(|id| ranked.iter().take(5).any(|r| r.0 == **id))
                         .count();
                     (
                         ids,
-                        format!(
-                            "{}\n\n(The agent is now working on the file {f}.)",
-                            c.question
-                        ),
+                        // MNEM_EVAL_NO_FILE_HINT: judge without naming the file, a control
+                        // for how much the hint alone makes memories look relevant.
+                        if std::env::var_os("MNEM_EVAL_NO_FILE_HINT").is_some() {
+                            c.question.clone()
+                        } else {
+                            format!(
+                                "{}\n\n(The agent is now working on the file {f}.)",
+                                c.question
+                            )
+                        },
                     )
                 }
                 None => (

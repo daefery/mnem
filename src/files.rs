@@ -2,43 +2,114 @@
 //! each memory was written.
 //!
 //! Memories list the files they read or modified (`memory_files`, kept by triggers).
-//! Paths come in every shape (repo-relative, absolute on this or another machine,
-//! relative to a package directory), so a memory's path matches the file when one path
-//! ends with the other at a directory boundary: `src/embed.rs` matches
-//! `/Users/x/code/mnem/src/embed.rs`. A lone file name (`README.md`) must match the
-//! file's repo-relative path exactly. Only memories of the same project count.
+//! Paths come in every shape, so a recorded path is placed before it is compared:
+//! - relative, and the memory's session ran inside this repository: resolved against
+//!   that session's directory (a monorepo package), then compared exactly;
+//! - absolute inside this repository: compared exactly;
+//! - otherwise (another machine, another checkout): the two paths must end alike at a
+//!   directory boundary, and for an absolute path the repository's name must appear
+//!   before that ending (`/Users/x/code/mnem/src/embed.rs` is mnem's `src/embed.rs`;
+//!   `.../node_modules/pkg/extensions/index.ts` is not firstmate's). A lone file name
+//!   only matches on its own.
 //!
-//! Staleness comes from git: the commits that touched the file after the memory's
-//! session ended, and uncommitted edits. A memory about a file that changed since may
-//! describe code that is no longer there.
+//! Only memories of the same project count. Staleness comes from git: the commits that
+//! touched the file after the memory's session ended, uncommitted edits, and the size of
+//! the change. A memory about a file that changed since may describe code that is gone.
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-/// Path components, without `.`/`~` prefixes or empty parts.
+/// Path components with `.`, `~` and empty parts dropped and `..` applied.
 fn parts(p: &str) -> Vec<&str> {
-    p.split(['/', '\\'])
-        .filter(|c| !c.is_empty() && *c != "." && *c != "~")
-        .collect()
+    let mut out: Vec<&str> = Vec::new();
+    for c in p.split(['/', '\\']) {
+        match c {
+            "" | "." | "~" => {}
+            ".." => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
-/// Does a path recorded in a memory name the file at `rel` (repo-relative)?
-pub fn matches(recorded: &str, rel: &str) -> bool {
-    let (a, b) = (parts(recorded), parts(rel));
-    if a.is_empty() || b.is_empty() {
+fn is_absolute(p: &str) -> bool {
+    let b = p.as_bytes();
+    p.starts_with('/')
+        || p.starts_with('\\')
+        || (b.len() > 2 && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\'))
+}
+
+/// Where a file is being looked up: its repo-relative path, the repository on this
+/// machine when known, and names the repository goes by (its directory, its project).
+pub struct Place<'a> {
+    pub rel: &'a str,
+    pub root: Option<&'a Path>,
+    pub project: &'a str,
+}
+
+impl Place<'_> {
+    fn names(&self) -> Vec<String> {
+        let mut n = Vec::new();
+        if let Some(r) = self.root.and_then(|r| r.file_name()) {
+            n.push(r.to_string_lossy().to_lowercase());
+        }
+        // github.com/owner/repo#checkout: the repo and the checkout directory.
+        let (repo, checkout) = self.project.split_once('#').unwrap_or((self.project, ""));
+        if let Some(last) = repo.rsplit('/').next() {
+            n.push(last.trim_end_matches(".git").to_lowercase());
+        }
+        if !checkout.is_empty() {
+            n.push(checkout.to_lowercase());
+        }
+        n
+    }
+}
+
+/// Does a path recorded in a memory (whose session ran in `cwd`) name the file at
+/// `place`?
+pub fn names_file(recorded: &str, cwd: Option<&str>, place: &Place) -> bool {
+    let want = parts(place.rel);
+    let got = parts(recorded);
+    if want.is_empty() || got.is_empty() {
         return false;
     }
-    let (short, long) = if a.len() <= b.len() {
-        (&a, &b)
-    } else {
-        (&b, &a)
+    let root = place.root.map(|r| r.to_string_lossy().replace('\\', "/"));
+    let under_root = |p: &str| -> Option<Vec<String>> {
+        let r = root.as_deref()?;
+        let p = p.replace('\\', "/");
+        p.strip_prefix(r)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+            .map(|rest| parts(rest).iter().map(|s| s.to_string()).collect())
     };
-    // A bare file name only counts when it is the whole repo-relative path.
-    if short.len() == 1 {
-        return a == b;
+    if is_absolute(recorded) {
+        if let Some(inside) = under_root(recorded) {
+            return inside == want;
+        }
+        // Another machine or checkout: same ending, and the repository named before it.
+        if got.len() < want.len() || !got.ends_with(&want) {
+            return false;
+        }
+        let names = place.names();
+        return got[..got.len() - want.len()]
+            .iter()
+            .any(|c| names.contains(&c.to_lowercase()));
     }
-    long.ends_with(short)
+    // Relative to the session's directory, when that is inside this repository.
+    if let Some(sub) = cwd.and_then(under_root) {
+        let joined = format!("{}/{}", sub.join("/"), recorded);
+        return parts(&joined) == want;
+    }
+    // Otherwise a relative path may be relative to a package directory, so it can be
+    // shorter than the repo-relative path and end the same way; a longer one names a
+    // deeper, different file. A lone name only matches itself.
+    if got.len() == 1 || want.len() == 1 {
+        return got == want;
+    }
+    got.len() <= want.len() && want.ends_with(&got)
 }
 
 /// A memory about a file.
@@ -61,22 +132,31 @@ fn base(project: &str) -> &str {
 /// Memories of `project` (any checkout of it) that read or modified the file at `rel`,
 /// those that modified it first, newest first; personal-detail memories are left out.
 pub fn about(conn: &Connection, project: &str, rel: &str, limit: usize) -> Result<Vec<About>> {
-    about_in(conn, project, rel, &crate::recall::Scope::default(), limit)
+    let place = Place {
+        rel,
+        root: None,
+        project,
+    };
+    about_in(conn, &place, &crate::recall::Scope::default(), limit)
 }
 
 /// `about` within a recall scope: the asking session's own memories, memories already
 /// offered to it, and memories created after `scope.before` are left out.
 pub fn about_in(
     conn: &Connection,
-    project: &str,
-    rel: &str,
+    place: &Place,
     scope: &crate::recall::Scope,
     limit: usize,
 ) -> Result<Vec<About>> {
-    let name = parts(rel).last().copied().unwrap_or_default().to_string();
+    let name = parts(place.rel)
+        .last()
+        .copied()
+        .unwrap_or_default()
+        .to_string();
     let mut st = conn.prepare_cached(
         "SELECT f.memory_id, f.modified, f.path, coalesce(m.type, m.kind), coalesce(m.title, ''),
-                coalesce(m.created_at, 0), coalesce(min(s.last_event_at, m.created_at), m.created_at, 0)
+                coalesce(m.created_at, 0), coalesce(min(s.last_event_at, m.created_at), m.created_at, 0),
+                s.cwd
            FROM memory_files f
            JOIN memories m ON m.id = f.memory_id
            LEFT JOIN sessions s ON s.id = m.session_id
@@ -90,7 +170,7 @@ pub fn about_in(
     let rows = st.query_map(
         params![
             name,
-            base(project),
+            base(place.project),
             scope.session.unwrap_or(""),
             scope.before.unwrap_or(i64::MAX),
             scope.offered_to.unwrap_or("")
@@ -104,12 +184,13 @@ pub fn about_in(
                 r.get::<_, String>(4)?,
                 r.get::<_, i64>(5)?,
                 r.get::<_, i64>(6)?,
+                r.get::<_, Option<String>>(7)?,
             ))
         },
     )?;
     for row in rows {
-        let (id, modified, path, kind, title, created_at, as_of) = row?;
-        if !matches(&path, rel) {
+        let (id, modified, path, kind, title, created_at, as_of, cwd) = row?;
+        if !names_file(&path, cwd.as_deref(), place) {
             continue;
         }
         match out.iter_mut().find(|a| a.id == id) {
@@ -143,16 +224,37 @@ pub struct History {
     pub exists: bool,
 }
 
+/// Longest any one git call may take; a stalled repository is treated as unknown.
+const GIT_TIMEOUT: Duration = Duration::from_millis(1500);
+
+/// Run git in `root` with file names taken literally (never as patterns), bounded by
+/// GIT_TIMEOUT. None on failure or timeout.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("git")
+    use std::io::Read;
+    let mut child = std::process::Command::new("git")
+        .arg("--literal-pathspecs")
         .arg("-C")
         .arg(root)
         .args(args)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
         .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    let status = loop {
+        match child.try_wait().ok()? {
+            Some(s) => break s,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            None => std::thread::sleep(Duration::from_millis(5)),
+        }
+    };
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    status.success().then_some(out)
 }
 
 /// The repository containing `path` (a file or directory).
@@ -185,9 +287,17 @@ pub fn history(root: &Path, rel: &str) -> History {
     }
 }
 
+/// Size of the change to a file since a memory.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Lines {
+    Counted(u64, u64),
+    /// Git cannot count lines (a binary file).
+    Binary,
+}
+
 /// Lines added and removed in the file since `as_of` (committed and not), from the
-/// last commit before then to the working tree.
-pub fn lines_since(root: &Path, rel: &str, as_of: i64) -> Option<(u64, u64)> {
+/// last commit before then to the working tree. None when there is no such commit.
+pub fn lines_since(root: &Path, rel: &str, as_of: i64) -> Option<Lines> {
     let base = git(
         root,
         &[
@@ -205,10 +315,16 @@ pub fn lines_since(root: &Path, rel: &str, as_of: i64) -> Option<(u64, u64)> {
     let (mut added, mut removed) = (0, 0);
     for l in stat.lines() {
         let mut f = l.split_whitespace();
-        added += f.next()?.parse::<u64>().unwrap_or(0);
-        removed += f.next()?.parse::<u64>().unwrap_or(0);
+        match (f.next(), f.next()) {
+            (Some("-"), _) | (_, Some("-")) => return Some(Lines::Binary),
+            (Some(a), Some(r)) => {
+                added += a.parse::<u64>().ok()?;
+                removed += r.parse::<u64>().ok()?;
+            }
+            _ => return None,
+        }
     }
-    Some((added, removed))
+    Some(Lines::Counted(added, removed))
 }
 
 /// Whether anything happened to the file after `as_of`.
@@ -216,14 +332,8 @@ fn changed(h: &History, as_of: i64) -> bool {
     h.commits.iter().any(|t| *t > as_of) || h.uncommitted || !h.exists
 }
 
-/// How the file changed after `as_of`, in words; None when it did not. `lines` is the
-/// size of the change when known.
-pub fn change_since(
-    h: &History,
-    as_of: i64,
-    now: i64,
-    lines: Option<(u64, u64)>,
-) -> Option<String> {
+/// How the file changed after `as_of`, in words; None when it did not.
+pub fn change_since(h: &History, as_of: i64, now: i64, lines: Option<Lines>) -> Option<String> {
     let after: Vec<i64> = h.commits.iter().copied().filter(|t| *t > as_of).collect();
     let mut parts = Vec::new();
     if !h.exists {
@@ -243,10 +353,13 @@ pub fn change_since(
     if parts.is_empty() {
         return None;
     }
-    match lines {
-        Some((0, 0)) if h.exists => parts.push("no net change in content".into()),
-        Some((a, r)) => parts.push(format!("+{a} −{r} lines")),
-        None => {}
+    if h.exists {
+        match lines {
+            Some(Lines::Counted(0, 0)) => parts.push("no net change in content".into()),
+            Some(Lines::Counted(a, r)) => parts.push(format!("+{a} −{r} lines")),
+            Some(Lines::Binary) => parts.push("binary content changed".into()),
+            None => {}
+        }
     }
     Some(parts.join(", "))
 }
@@ -257,6 +370,16 @@ pub struct Target {
     pub root: PathBuf,
     pub rel: String,
     pub project: String,
+}
+
+impl Target {
+    pub fn place(&self) -> Place<'_> {
+        Place {
+            rel: &self.rel,
+            root: Some(&self.root),
+            project: &self.project,
+        }
+    }
 }
 
 pub fn resolve(path: &str, cwd: &Path) -> Option<Target> {
@@ -293,62 +416,94 @@ fn canonical(p: &Path) -> PathBuf {
 }
 
 /// What an agent is told when it first touches a file in a session: up to `limit`
-/// memories about it (not its own session's, none offered before), each with how the
-/// file changed since. The memories are marked offered. None when there are none.
+/// memories about it (not its own session's, none offered before) and how the file
+/// changed since them. Nothing is marked offered until the text is ready, so an
+/// interrupted hook leaves the next touch to try again. None when there are none.
 pub fn on_touch(
     conn: &Connection,
     session: &str,
     t: &Target,
     limit: usize,
 ) -> Result<Option<String>> {
-    let first = conn.execute(
-        "INSERT OR IGNORE INTO file_seen(session_id, path) VALUES (?1, ?2)",
-        params![session, format!("{}:{}", t.project, t.rel)],
-    )? > 0;
-    if !first {
+    let key = format!("{}:{}", t.project, t.rel);
+    let seen = conn
+        .query_row(
+            "SELECT 1 FROM file_seen WHERE session_id = ?1 AND path = ?2",
+            params![session, key],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if seen {
         return Ok(None);
     }
     let found = about_in(
         conn,
-        &t.project,
-        &t.rel,
+        &t.place(),
         &crate::recall::Scope::session(session),
         limit,
     )?;
-    if found.is_empty() {
-        return Ok(None);
+    let text = (!found.is_empty()).then(|| touch_text(t, &found));
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "INSERT OR IGNORE INTO file_seen(session_id, path) VALUES (?1, ?2)",
+        params![session, key],
+    )?;
+    for a in &found {
+        tx.execute(
+            "INSERT OR IGNORE INTO recall_seen(session_id, memory_id) VALUES (?1, ?2)",
+            params![session, a.id],
+        )?;
     }
+    tx.commit()?;
+    Ok(text)
+}
+
+/// Compact: one line per memory with the size of the change since it, and one line
+/// saying how the file moved on since the newest of them.
+fn touch_text(t: &Target, found: &[About]) -> String {
     let h = history(&t.root, &t.rel);
     let now = crate::db::now_ms();
     let mut w = format!(
         "mnem: past memories about {} (full text: get_observations([ids]))\n",
         t.rel
     );
-    for a in &found {
+    let mut stale = 0;
+    for a in found {
+        let note = if changed(&h, a.as_of) {
+            stale += 1;
+            match (h.exists, lines_since(&t.root, &t.rel, a.as_of)) {
+                (false, _) => " (file gone since)".to_string(),
+                (true, Some(Lines::Counted(0, 0))) => " (no net change since)".to_string(),
+                (true, Some(Lines::Counted(x, y))) => format!(" (file since: +{x} −{y} lines)"),
+                (true, Some(Lines::Binary)) => " (binary content changed since)".to_string(),
+                (true, None) => " (file changed since)".to_string(),
+            }
+        } else {
+            " (file unchanged since)".to_string()
+        };
         w.push_str(&format!(
-            "#{} {} · {} · {}\n",
+            "#{} {} · {} · {}{note}\n",
             a.id,
             a.kind,
             crate::context::ago(now - a.created_at),
             crate::text::head(&a.title, 110)
         ));
-        let lines = changed(&h, a.as_of)
-            .then(|| lines_since(&t.root, &t.rel, a.as_of))
-            .flatten();
-        if let Some(c) = change_since(&h, a.as_of, now, lines) {
-            w.push_str(&format!("   file changed since: {c}\n"));
-        }
-        conn.execute(
-            "INSERT OR IGNORE INTO recall_seen(session_id, memory_id) VALUES (?1, ?2)",
-            params![session, a.id],
-        )?;
     }
-    Ok(Some(w))
+    if stale > 0 {
+        let newest = found.iter().map(|a| a.as_of).max().unwrap_or(0);
+        let summary = change_since(&h, newest, now, None)
+            .unwrap_or_else(|| "it changed since some of them".into());
+        w.push_str(&format!(
+            "{stale} of {} predate changes to the file ({summary}); check the code before relying on them.\n",
+            found.len()
+        ));
+    }
+    w
 }
 
 /// Memories about a file with how it changed since each, as text for an agent.
 pub fn report(conn: &Connection, t: &Target, limit: usize) -> Result<String> {
-    let found = about(conn, &t.project, &t.rel, limit)?;
+    let found = about_in(conn, &t.place(), &crate::recall::Scope::default(), limit)?;
     if found.is_empty() {
         return Ok(format!("No memories about {} in {}.", t.rel, t.project));
     }
@@ -436,8 +591,7 @@ pub fn staleness_lines(conn: &Connection, memory_id: i64, max: usize) -> Result<
     Ok(out)
 }
 
-/// A recorded path as a repo-relative path under `root`, if that file exists here (or
-/// existed in git).
+/// A recorded path as a repo-relative path under `root`, if that file exists here.
 fn local_rel(root: &Path, recorded: &str) -> Option<String> {
     let comps = parts(recorded);
     // The longest tail of the recorded path that names a file here.
@@ -454,22 +608,56 @@ fn local_rel(root: &Path, recorded: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn at<'a>(rel: &'a str, root: Option<&'a Path>, project: &'a str) -> Place<'a> {
+        Place { rel, root, project }
+    }
+
     #[test]
-    fn paths_match_at_directory_boundaries() {
-        assert!(matches("src/embed.rs", "src/embed.rs"));
-        assert!(matches("/Users/x/code/mnem/src/embed.rs", "src/embed.rs"));
-        assert!(matches("./src/embed.rs", "src/embed.rs"));
-        // Recorded relative to a package directory.
-        assert!(matches(
-            "src/feedback.ts",
-            "packages/contracts/src/feedback.ts"
+    fn recorded_paths_are_placed_before_they_are_compared() {
+        let root = Path::new("/home/me/code/mnem");
+        let p = at("src/embed.rs", Some(root), "github.com/daefery/mnem");
+        assert!(names_file("src/embed.rs", None, &p));
+        assert!(names_file("./src/embed.rs", None, &p));
+        assert!(names_file("/home/me/code/mnem/src/embed.rs", None, &p));
+        assert!(names_file("src\\embed.rs", None, &p));
+        // Another machine: the repository's name is in the path.
+        assert!(names_file("/Users/x/code/mnem/src/embed.rs", None, &p));
+        // Another project's file with the same ending is not this one.
+        assert!(!names_file(
+            "/home/me/.pi/node_modules/pkg/src/embed.rs",
+            None,
+            &p
         ));
-        assert!(!matches("src/embed.rs", "src/embedder.rs"));
-        assert!(!matches("xsrc/embed.rs", "src/embed.rs"));
-        // A bare name only matches the same bare repo path.
-        assert!(matches("README.md", "README.md"));
-        assert!(!matches("README.md", "docs/README.md"));
-        assert!(!matches("/a/b/README.md", "README.md"));
+        assert!(!names_file("src/embedder.rs", None, &p));
+        assert!(!names_file("/home/me/code/mnem/lib/src/embed.rs", None, &p));
+        // A lone name matches only itself.
+        let readme = at("README.md", Some(root), "github.com/daefery/mnem");
+        assert!(names_file("README.md", None, &readme));
+        assert!(!names_file("docs/README.md", None, &readme));
+        assert!(names_file("/Users/x/code/mnem/README.md", None, &readme));
+        assert!(!names_file("/Users/x/other/README.md", None, &readme));
+        // `..` is applied, not matched literally.
+        assert!(names_file("docs/../src/embed.rs", None, &p));
+    }
+
+    #[test]
+    fn package_relative_paths_resolve_through_the_sessions_directory() {
+        let root = Path::new("/r");
+        let a = at("packages/a/src/shared.rs", Some(root), "github.com/o/r");
+        let b = at("packages/b/src/shared.rs", Some(root), "github.com/o/r");
+        assert!(names_file("src/shared.rs", Some("/r/packages/a"), &a));
+        assert!(!names_file("src/shared.rs", Some("/r/packages/a"), &b));
+        // A session at the root recorded repo-relative paths.
+        assert!(names_file("packages/b/src/shared.rs", Some("/r"), &b));
+        // Session directory unknown here: fall back to the shared ending.
+        assert!(names_file("src/shared.rs", None, &b));
+        // A longer relative path is a deeper, different file.
+        let short = at("extensions/index.ts", Some(root), "github.com/o/r");
+        assert!(!names_file(
+            "extensions/@scope/pkg/extensions/index.ts",
+            None,
+            &short
+        ));
     }
 
     #[test]
@@ -481,23 +669,27 @@ mod tests {
         };
         assert_eq!(change_since(&h, 3_000, 10_000, None), None);
         assert_eq!(
-            change_since(&h, 1_500, 10_000, Some((12, 3))).unwrap(),
+            change_since(&h, 1_500, 10_000, Some(Lines::Counted(12, 3))).unwrap(),
             "2 commits (latest 7s ago), +12 −3 lines"
+        );
+        assert!(
+            change_since(&h, 1_500, 10_000, Some(Lines::Binary))
+                .unwrap()
+                .ends_with("binary content changed")
         );
         let gone = History {
             exists: false,
             ..Default::default()
         };
         assert_eq!(
-            change_since(&gone, 0, 0, None).unwrap(),
+            change_since(&gone, 0, 0, Some(Lines::Counted(0, 0))).unwrap(),
             "the file no longer exists"
         );
     }
 
     #[test]
     fn about_finds_memories_of_the_project_only() {
-        let c =
-            crate::db::open_with(Path::new(":memory:"), std::time::Duration::from_secs(1)).unwrap();
+        let c = crate::db::open_with(Path::new(":memory:"), Duration::from_secs(1)).unwrap();
         let add = |id: i64, project: &str, files: &str, created: i64| {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
@@ -510,6 +702,7 @@ mod tests {
         add(2, "github.com/a/r#wt", r#"["src/embed.rs"]"#, 20);
         add(3, "github.com/b/other", r#"["src/embed.rs"]"#, 30);
         add(4, "github.com/a/r", r#"["src/embedder.rs"]"#, 40);
+        add(6, "github.com/a/r", r#"["C:\\work\\r\\src\\embed.rs"]"#, 60);
         c.execute(
             "INSERT INTO memories(id, project, kind, type, title, files_read, origin, origin_id, created_at)
              VALUES (5, 'github.com/a/r', 'observation', 'discovery', 'r', '[\"src/embed.rs\"]', 'mnem', 5, 50)",
@@ -521,11 +714,15 @@ mod tests {
             .iter()
             .map(|a| (a.id, a.modified))
             .collect();
-        // Modifiers first, newest first; the other project and the other file are out.
-        assert_eq!(found, vec![(2, true), (1, true), (5, false)]);
+        // Modifiers first, newest first; the other project and the other file are out;
+        // a Windows path is indexed like any other.
+        assert_eq!(found, vec![(6, true), (2, true), (1, true), (5, false)]);
         // The index follows edits and deletes.
-        c.execute("UPDATE memories SET files_modified = '[]' WHERE id = 2", [])
-            .unwrap();
+        c.execute(
+            "UPDATE memories SET files_modified = '[]' WHERE id IN (2, 6)",
+            [],
+        )
+        .unwrap();
         c.execute("DELETE FROM memories WHERE id = 1", []).unwrap();
         let ids: Vec<i64> = about(&c, "github.com/a/r", "src/embed.rs", 10)
             .unwrap()
@@ -533,6 +730,39 @@ mod tests {
             .map(|a| a.id)
             .collect();
         assert_eq!(ids, vec![5]);
+    }
+
+    #[test]
+    fn git_treats_file_names_literally() {
+        let dir = std::env::temp_dir().join(format!("mnem-files-lit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sh = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+        };
+        sh(&["init", "-q"]);
+        std::fs::write(dir.join("a.txt"), "x\n").unwrap();
+        std::fs::write(dir.join("[a].txt"), "x\n").unwrap();
+        sh(&["add", "."]);
+        sh(&["commit", "-qm", "one"]);
+        std::fs::write(dir.join("a.txt"), "y\n").unwrap();
+        // `[a].txt` is a pattern that matches a.txt unless names are literal.
+        assert!(!history(&dir, "[a].txt").uncommitted);
+        assert!(history(&dir, "a.txt").uncommitted);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -572,8 +802,7 @@ mod tests {
         sh_at(&["commit", "-qm", "one"], Some(&old));
         let t = resolve("src/a.rs", &dir).expect("in a repository");
         assert_eq!(t.rel, "src/a.rs");
-        let c =
-            crate::db::open_with(Path::new(":memory:"), std::time::Duration::from_secs(1)).unwrap();
+        let c = crate::db::open_with(Path::new(":memory:"), Duration::from_secs(1)).unwrap();
         let add = |id: i64, created: i64| {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
@@ -582,7 +811,6 @@ mod tests {
             )
             .unwrap();
         };
-        // Written two minutes before the next commit (git time has second precision).
         add(1, crate::db::now_ms() - 120_000);
         std::fs::write(dir.join("src/a.rs"), "fn a() { b() }\nfn b() {}\n").unwrap();
         sh(&["commit", "-qam", "two"]);
@@ -596,6 +824,17 @@ mod tests {
         std::fs::write(dir.join("src/a.rs"), "fn a() {}\nfn c() {}\n").unwrap();
         let r = report(&c, &t, 10).unwrap();
         assert!(r.contains("+1 −0 lines"), "{r}");
+        // The touch text summarises once instead of repeating on every line.
+        let touch = on_touch(&c, "claude:s", &t, 3).unwrap().unwrap();
+        assert!(touch.contains("(file since: +1 −0 lines)"), "{touch}");
+        assert!(
+            touch.contains("1 of 1 predate changes to the file"),
+            "{touch}"
+        );
+        assert!(
+            on_touch(&c, "claude:s", &t, 3).unwrap().is_none(),
+            "once per file"
+        );
         // A memory written after every change: unchanged.
         sh(&["commit", "-qam", "three"]);
         add(2, crate::db::now_ms() + 60_000);

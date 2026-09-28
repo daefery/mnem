@@ -108,14 +108,21 @@ lines added and removed, or that the file is gone. It takes about 40 ms, once pe
 per session. Any agent can ask with the MCP tool `recall_file(path)`, and people with
 `mnem file <path>`; `get_observations` also says when a memory's files changed since.
 
-Paths are matched by suffix within the project (memories record repo-relative,
-absolute and package-relative paths alike); a bare file name must match exactly.
+Recorded paths are placed before they are compared: a relative path is resolved
+against the memory's session directory when that was inside the repository (monorepo
+packages stay apart); an absolute path inside the repository is compared exactly, and
+one from another machine must end the same way with the repository's name before that
+ending (so a same-named file in `node_modules` is not this one). Git runs with literal
+path names and a 1.5 s limit per call; nothing is marked offered until the text is
+ready.
 
 Measured before it was switched on: on 172 real file edits replayed as of the edit
 (split by session), 44% had memories about the file, and of the memories offered
 71% (tuning half) and 79% (held-out half) were judged helpful by gpt-5.6-luna, 58% and
-55% by claude-haiku-4-5, against 66% and 52% for prompt recall; only 4 of 198 repeated
-what prompt recall had shown. The recall gate checks it on every change. Codex edits
+55% by claude-haiku-4-5; only 4 of 198 repeated what prompt recall had shown. Told
+which file the agent is working on (as it is when these arrive), the judge rates them
+higher: with the file name hidden, 51% were judged helpful on the tuning half. So they
+are about as useful as prompt recall, and they add what prompt recall does not find. The recall gate checks it on every change. Codex edits
 through apply_patch and asks to re-trust changed hooks, so it uses `recall_file`.
 
 ## Changing recall: the release gate

@@ -186,22 +186,22 @@ CREATE INDEX IF NOT EXISTS memory_files_name ON memory_files(name);
 CREATE INDEX IF NOT EXISTS memory_files_memory ON memory_files(memory_id);
 CREATE TRIGGER IF NOT EXISTS memories_files_ai AFTER INSERT ON memories BEGIN
   INSERT INTO memory_files(memory_id, modified, path, name)
-    SELECT new.id, 1, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+    SELECT new.id, 1, value, replace(replace(value, char(92), '/'), rtrim(replace(value, char(92), '/'), replace(replace(value, char(92), '/'), '/', '')), '')
       FROM json_each(CASE WHEN json_valid(new.files_modified) THEN new.files_modified ELSE '[]' END)
      WHERE json_each.type = 'text' AND value != ''
     UNION ALL
-    SELECT new.id, 0, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+    SELECT new.id, 0, value, replace(replace(value, char(92), '/'), rtrim(replace(value, char(92), '/'), replace(replace(value, char(92), '/'), '/', '')), '')
       FROM json_each(CASE WHEN json_valid(new.files_read) THEN new.files_read ELSE '[]' END)
      WHERE json_each.type = 'text' AND value != '';
 END;
 CREATE TRIGGER IF NOT EXISTS memories_files_au AFTER UPDATE OF files_read, files_modified ON memories BEGIN
   DELETE FROM memory_files WHERE memory_id = old.id;
   INSERT INTO memory_files(memory_id, modified, path, name)
-    SELECT new.id, 1, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+    SELECT new.id, 1, value, replace(replace(value, char(92), '/'), rtrim(replace(value, char(92), '/'), replace(replace(value, char(92), '/'), '/', '')), '')
       FROM json_each(CASE WHEN json_valid(new.files_modified) THEN new.files_modified ELSE '[]' END)
      WHERE json_each.type = 'text' AND value != ''
     UNION ALL
-    SELECT new.id, 0, value, replace(value, rtrim(value, replace(value, '/', '')), '')
+    SELECT new.id, 0, value, replace(replace(value, char(92), '/'), rtrim(replace(value, char(92), '/'), replace(replace(value, char(92), '/'), '/', '')), '')
       FROM json_each(CASE WHEN json_valid(new.files_read) THEN new.files_read ELSE '[]' END)
      WHERE json_each.type = 'text' AND value != '';
 END;
@@ -254,7 +254,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 16;
+pub const SCHEMA_VERSION: i64 = 17;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -377,18 +377,35 @@ fn migrate(conn: &Connection) -> Result<()> {
                scale REAL NOT NULL, vec BLOB NOT NULL, text_hash TEXT, PRIMARY KEY(memory_id, model));",
         )?;
     }
-    // memory_files arrived after most memories: fill it once from their file lists.
-    let indexed: i64 = conn.query_row("SELECT count(*) FROM memory_files", [], |r| r.get(0))?;
-    if indexed == 0 {
+    // memory_files arrived after most memories: fill it from their file lists, and
+    // again whenever how names are taken changes (v2: Windows separators too). The
+    // triggers are recreated with it.
+    let version: Option<String> = conn
+        .query_row("SELECT v FROM meta WHERE k = 'memory_files.v'", [], |r| {
+            r.get(0)
+        })
+        .ok();
+    if version.as_deref() != Some("2") {
+        conn.execute_batch(
+            "DROP TRIGGER IF EXISTS memories_files_ai;
+             DROP TRIGGER IF EXISTS memories_files_au;
+             DROP TRIGGER IF EXISTS memories_files_ad;
+             DELETE FROM memory_files;",
+        )?;
+        conn.execute_batch(SCHEMA)?;
         conn.execute_batch(
             "INSERT INTO memory_files(memory_id, modified, path, name)
-               SELECT m.id, 1, j.value, replace(j.value, rtrim(j.value, replace(j.value, '/', '')), '')
+               SELECT m.id, 1, j.value, replace(replace(j.value, char(92), '/'), rtrim(replace(j.value, char(92), '/'), replace(replace(j.value, char(92), '/'), '/', '')), '')
                  FROM memories m, json_each(CASE WHEN json_valid(m.files_modified) THEN m.files_modified ELSE '[]' END) j
                 WHERE j.type = 'text' AND j.value != ''
                UNION ALL
-               SELECT m.id, 0, j.value, replace(j.value, rtrim(j.value, replace(j.value, '/', '')), '')
+               SELECT m.id, 0, j.value, replace(replace(j.value, char(92), '/'), rtrim(replace(j.value, char(92), '/'), replace(replace(j.value, char(92), '/'), '/', '')), '')
                  FROM memories m, json_each(CASE WHEN json_valid(m.files_read) THEN m.files_read ELSE '[]' END) j
                 WHERE j.type = 'text' AND j.value != '';",
+        )?;
+        conn.execute(
+            "INSERT INTO meta(k, v) VALUES ('memory_files.v', '2') ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+            [],
         )?;
     }
     Ok(())
