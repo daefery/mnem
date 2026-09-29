@@ -1,29 +1,22 @@
-// mnem viewer: filters, a list of memories and prompts, and the selected memory in
-// full, including what only mnem knows about it: whether the code it describes is
-// still there, and whether agents it was offered to opened it. Reading a memory here
-// is never recorded as an agent using it.
+// mnem viewer: live feed of observations, session summaries and prompts across
+// Claude Code, Codex and pi. Markup mirrors the claude-mem viewer so its stylesheet
+// applies unchanged.
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const PAGE = 50;
+  const PAGE = 40;
   const state = {
     project: "",
     query: "",
-    types: new Set(),
-    agent: "",
-    view: "",
     items: [],
     keys: new Set(),
     before: null,
     offset: 0,
-    newest: null,
-    error: null,
+    newest: 0,
     loading: false,
     hasMore: true,
     generation: 0,
-    selected: null,
-    detailGen: 0,
   };
 
   // ---------- helpers ----------
@@ -33,8 +26,6 @@
     for (const [k, v] of Object.entries(attrs)) {
       if (v === undefined || v === null || v === false) continue;
       if (k === "class") e.className = v;
-      // setProperty, not assignment: custom properties (--x) are ignored when assigned.
-      else if (k === "style" && typeof v === "object") for (const [p, x] of Object.entries(v)) e.style.setProperty(p.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`), x);
       else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
       else e.setAttribute(k, v);
     }
@@ -52,21 +43,9 @@
   }
 
   const fmtDate = (ms) => new Date(ms).toLocaleString();
-  const fmtTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  const dayKey = (ms) => new Date(ms).toDateString();
-  function dayLabel(ms) {
-    const d = new Date(ms);
-    const today = new Date();
-    const y = new Date(today);
-    y.setDate(today.getDate() - 1);
-    const base = d.toLocaleDateString([], { day: "numeric", month: "short", year: d.getFullYear() === today.getFullYear() ? undefined : "numeric" });
-    if (d.toDateString() === today.toDateString()) return `Today · ${base}`;
-    if (d.toDateString() === y.toDateString()) return `Yesterday · ${base}`;
-    return d.toLocaleDateString([], { weekday: "short" }) + ` · ${base}`;
-  }
 
   function shortProject(p) {
-    if (!p) return "(no project)";
+    if (!p) return "";
     if (p.startsWith("/")) return p.split("/").filter(Boolean).slice(-1)[0] || p;
     const [repo, checkout] = p.split("#");
     const name = repo.split("/").slice(-1)[0];
@@ -74,7 +53,7 @@
   }
 
   function stripRoot(path) {
-    for (const m of ["/src/", "/crates/", "/packages/", "/apps/", "/docs/", "/tests/", "/ui/"]) {
+    for (const m of ["/src/", "/crates/", "/packages/", "/apps/", "/docs/", "/tests/"]) {
       const i = path.indexOf(m);
       if (i !== -1) return path.slice(i + 1);
     }
@@ -84,128 +63,128 @@
 
   const list = (v) => (Array.isArray(v) ? v : []);
 
-  // ---------- types and agents ----------
+  // ---------- cards (same classes as claude-mem's React components) ----------
 
-  const TYPES = [
-    ["decision", "decisions"],
-    ["change", "changes"],
-    ["feature", "features"],
-    ["bugfix", "bugfixes"],
-    ["discovery", "discoveries"],
-    ["refactor", "refactors"],
-    ["security_note,security_alert", "security"],
-    ["summary", "summaries"],
-    ["prompt", "prompts"],
-  ];
-  const AGENTS = ["claude", "codex", "pi"];
-
-  function typeColor(t) {
-    if (!t) return "var(--t-other)";
-    if (t.startsWith("security")) return "var(--t-security)";
-    const known = ["decision", "change", "feature", "bugfix", "discovery", "refactor", "summary", "prompt", "pinned"];
-    return known.includes(t) ? `var(--t-${t})` : "var(--t-other)";
-  }
-  const typeLabel = (t) => (t || "observation").replace("_", " ");
-  const itemType = (it) => (it.pinned ? "pinned" : it.itemType === "observation" ? it.type : it.itemType);
-  // Pinned facts are the user's, not any agent's.
-  const agentOf = (it) => (it.pinned ? null : it.platform_source);
-  // A pinned fact's text is its narrative; its title is the same text, cut.
-  const firstLine = (s, n = 140) => {
-    const t = (s || "").trim().split("\n")[0];
-    return t.length > n ? `${t.slice(0, n - 1)}…` : t;
-  };
-
-  function typeMark(t) {
-    return el("span", { class: "type", style: { "--tc": typeColor(t) } }, typeLabel(t));
-  }
-  const agentBadge = (a) => el("span", { class: `agent ${a || ""}` }, a || "?");
-
-  // ---------- views ----------
-
-  const ICON = {
-    all: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><circle cx="4" cy="6" r="1"></circle><circle cx="4" cy="12" r="1"></circle><circle cx="4" cy="18" r="1"></circle></svg>',
-    pinned: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg>',
-    unopened: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9.88 9.88a3 3 0 1 0 4.24 4.24"></path><path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68"></path><path d="M6.61 6.61A13.53 13.53 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61"></path><line x1="2" y1="2" x2="22" y2="22"></line></svg>',
-    edited: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>',
-  };
-  const VIEWS = [
-    ["", "Everything", ICON.all, ""],
-    ["pinned", "Pinned facts", ICON.pinned, "Facts every agent sees at session start."],
-    ["unopened", "Never opened", ICON.unopened, "Offered to agents, never fetched in full."],
-    ["edited", "Changed code", ICON.edited, "Their session edited files: open one to see if the code is still there."],
-  ];
-
-  // ---------- list ----------
-
-  const listEl = $("list");
-  const detailEl = $("detail");
-  const sentinel = el("div", { style: { height: "1px" } });
-  const foot = el("div", { class: "list-foot" });
-  const keyOf = (it) => `${it.itemType}-${it.id}`;
-  let lastDay = null;
-
-  const MATCH = { words: "words", meaning: "meaning", both: "words + meaning" };
-
-  function row(it) {
-    const t = itemType(it);
-    let title, sub;
-    if (it.itemType === "prompt") {
-      title = `“${(it.prompt_text || "").trim()}”`;
-    } else if (it.itemType === "summary") {
-      title = it.request || "Session summary";
-      sub = it.completed || it.learned;
-    } else if (it.pinned) {
-      title = firstLine(it.narrative || it.title);
-    } else {
-      title = it.title || "Untitled";
-      sub = it.subtitle;
-    }
-    const meta = el("div", { class: "item-meta" },
-      typeMark(t),
-      agentOf(it) ? agentBadge(agentOf(it)) : null,
-      state.project ? null : el("span", { class: "proj", title: it.project || "" }, shortProject(it.project)),
-      it.match ? el("span", { class: "match", title: "What matched your search" }, MATCH[it.match] || it.match) : null,
-      el("span", { class: "when", title: fmtDate(it.created_at_epoch) }, fmtTime(it.created_at_epoch)));
-    const b = el("button", {
-      class: `item ${it.itemType}`,
-      role: "option",
-      tabindex: "-1",
-      "data-key": keyOf(it),
-      id: `opt-${keyOf(it)}`,
-      onclick: () => select(it),
-    }, meta, el("div", { class: "item-title" }, title), sub ? el("div", { class: "item-sub" }, sub) : null);
-    b._item = it;
-    return b;
+  function sourceBadge(src) {
+    return el("span", { class: `card-source source-${src || "claude"}` }, src || "claude");
   }
 
-  // Add an item at the end of the list, under a day header in time order (search
-  // results are in relevance order and get none).
-  function append(it) {
-    if (!state.query) {
-      const k = dayKey(it.created_at_epoch);
-      if (k !== lastDay) {
-        lastDay = k;
-        listEl.insertBefore(dayHeader(it.created_at_epoch), sentinel);
+  function observationCard(o) {
+    let mode = "subtitle";
+    const facts = list(o.facts);
+    const concepts = list(o.concepts);
+    const read = list(o.files_read).map(stripRoot);
+    const modified = list(o.files_modified).map(stripRoot);
+    const hasFacts = facts.length || concepts.length || read.length || modified.length;
+
+    const content = el("div", { class: "view-mode-content" });
+    const meta = el("div", { class: "card-meta" });
+    const factsBtn = hasFacts
+      ? el("button", { class: "view-mode-toggle", onclick: () => toggle("facts") },
+          svg('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"></polyline><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path></svg>'),
+          el("span", {}, "facts"))
+      : null;
+    const narrBtn = o.narrative
+      ? el("button", { class: "view-mode-toggle", onclick: () => toggle("narrative") },
+          svg('<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>'),
+          el("span", {}, "narrative"))
+      : null;
+
+    function render() {
+      content.replaceChildren();
+      meta.replaceChildren(el("span", { class: "meta-date" }, `#${o.id} • ${fmtDate(o.created_at_epoch)}`));
+      factsBtn?.classList.toggle("active", mode === "facts");
+      narrBtn?.classList.toggle("active", mode === "narrative");
+      if (mode === "subtitle" && o.subtitle) content.append(el("div", { class: "card-subtitle" }, o.subtitle));
+      if (mode === "facts" && facts.length) content.append(el("ul", { class: "facts-list" }, facts.map((f) => el("li", {}, f))));
+      if (mode === "narrative") content.append(el("div", { class: "narrative" }, o.narrative));
+      if (mode === "facts" && (concepts.length || read.length || modified.length)) {
+        meta.append(el("div", { style: "display:flex;flex-wrap:wrap;gap:8px;align-items:center" },
+          concepts.map((c) => el("span", {
+            style: "padding:2px 8px;background:var(--color-type-badge-bg);color:var(--color-type-badge-text);border-radius:3px;font-weight:500;font-size:10px",
+          }, c)),
+          read.length ? el("span", { class: "meta-files" }, el("span", { class: "file-label" }, "read:"), " " + read.join(", ")) : null,
+          modified.length ? el("span", { class: "meta-files" }, el("span", { class: "file-label" }, "modified:"), " " + modified.join(", ")) : null));
       }
     }
-    listEl.insertBefore(row(it), sentinel);
+    function toggle(m) {
+      mode = mode === m ? "subtitle" : m;
+      render();
+    }
+    render();
+
+    return el("div", { class: "card" },
+      el("div", { class: "card-header" },
+        el("div", { class: "card-header-left" },
+          el("span", { class: `card-type type-${o.type}` }, o.type || "observation"),
+          sourceBadge(o.platform_source),
+          el("span", { class: "card-project", title: o.project }, shortProject(o.project))),
+        el("div", { class: "view-mode-toggles" }, factsBtn, narrBtn)),
+      el("div", { class: "card-title" }, o.title || "Untitled"),
+      content,
+      meta);
   }
 
-  function renderFoot() {
-    foot.replaceChildren();
-    if (state.loading) foot.append(el("span", { class: "spinner" }), "Loading…");
-    else if (state.error) foot.append(`Could not load more (${state.error}). `, el("button", { class: "btn", onclick: () => reset() }, "Retry"));
-    else if (!state.items.length) foot.append(state.query ? "No matches." : state.view === "unopened" ? "Nothing here: every offered memory was opened, or none were offered yet." : "Nothing here yet.");
-    else if (!state.hasMore) foot.append(`${state.items.length.toLocaleString()} shown · that is all`);
+  const SECTIONS = [
+    ["investigated", "Investigated"],
+    ["learned", "Learned"],
+    ["completed", "Completed"],
+    ["next_steps", "Next Steps"],
+  ];
+
+  function summaryCard(s) {
+    const sections = SECTIONS.filter(([k]) => s[k]);
+    return el("article", { class: "card summary-card" },
+      el("header", { class: "summary-card-header" },
+        el("div", { class: "summary-badge-row" },
+          el("span", { class: "card-type summary-badge" }, "Session Summary"),
+          sourceBadge(s.platform_source),
+          el("span", { class: "summary-project-badge", title: s.project }, shortProject(s.project))),
+        s.request ? el("h2", { class: "summary-title" }, s.request) : null),
+      el("div", { class: "summary-sections" },
+        sections.map(([k, label], i) =>
+          el("section", { class: "summary-section", style: `animation-delay:${i * 50}ms` },
+            el("div", { class: "summary-section-header" },
+              el("img", { src: `/icons/icon-thick-${k.replace("_", "-")}.svg`, alt: label, class: `summary-section-icon summary-section-icon--${k}` }),
+              el("h3", { class: "summary-section-label" }, label)),
+            el("div", { class: "summary-section-content" }, s[k])))),
+      el("footer", { class: "summary-card-footer" },
+        el("span", { class: "summary-meta-id" }, `Session #${s.id}`),
+        el("span", { class: "summary-meta-divider" }, "•"),
+        el("time", { class: "summary-meta-date" }, fmtDate(s.created_at_epoch))));
   }
+
+  function promptCard(p) {
+    return el("div", { class: "card prompt-card" },
+      el("div", { class: "card-header" },
+        el("div", { class: "card-header-left" },
+          el("span", { class: "card-type" }, "Prompt"),
+          sourceBadge(p.platform_source),
+          el("span", { class: "card-project", title: p.project }, shortProject(p.project)))),
+      el("div", { class: "card-content" }, p.prompt_text),
+      el("div", { class: "card-meta" }, el("span", { class: "meta-date" }, `E${p.id} • ${fmtDate(p.created_at_epoch)}`)));
+  }
+
+  // In search results, say what matched: the words, the meaning, or both.
+  const MATCH = { words: "words", meaning: "meaning", both: "words + meaning" };
+
+  function cardFor(it) {
+    const card =
+      it.itemType === "observation" ? observationCard(it) : it.itemType === "summary" ? summaryCard(it) : promptCard(it);
+    if (it.match) {
+      card.querySelector(".card-header-left, .summary-badge-row")?.append(
+        el("span", { class: `mnem-match match-${it.match}`, title: "What matched your search" }, MATCH[it.match] || it.match));
+    }
+    return card;
+  }
+  const keyOf = (it) => `${it.itemType}-${it.id}`;
+
+  // ---------- data ----------
 
   function params(extra) {
     const q = new URLSearchParams({ limit: PAGE, ...extra });
     if (state.project) q.set("project", state.project);
     if (state.query) q.set("q", state.query);
-    if (state.types.size) q.set("type", [...state.types].join(","));
-    if (state.agent) q.set("agent", state.agent);
-    if (state.view) q.set("view", state.view);
     return q;
   }
 
@@ -215,14 +194,31 @@
     return r.json();
   }
 
+  const feedContent = $("feed-content");
+  const sentinel = el("div", { style: "height:20px;margin:10px 0" });
+  const footer = el("div", { class: "mnem-empty" });
+
+  function renderFooter() {
+    footer.replaceChildren();
+    if (state.loading) {
+      footer.append(el("div", { class: "spinner", style: "display:inline-block;margin-right:10px" }), "Loading more...");
+    } else if (!state.items.length) {
+      footer.append(state.query ? "No matches" : "No items to display");
+    } else if (!state.hasMore) {
+      footer.append("No more items to load");
+    }
+  }
+
   async function loadMore() {
     if (state.loading || !state.hasMore) return;
     const gen = state.generation;
     state.loading = true;
-    renderFoot();
+    renderFooter();
     try {
       // Searches page by rank (offset); the plain feed pages by time (before).
-      const extra = state.query ? { offset: state.offset } : state.before !== null ? { before: state.before } : {};
+      const extra = state.query
+        ? { offset: state.offset }
+        : state.before !== null ? { before: state.before } : {};
       const data = await getJSON(`/api/feed?${params(extra)}`);
       if (gen !== state.generation) return;
       for (const it of data.items) {
@@ -230,11 +226,9 @@
         if (state.keys.has(k)) continue;
         state.keys.add(k);
         state.items.push(it);
-        append(it);
+        feedContent.insertBefore(cardFor(it), sentinel);
+        state.newest = Math.max(state.newest, it.created_at_epoch);
       }
-      // Live updates continue after the newest item of the first page.
-      // An empty feed polls from before every place, time 0 included.
-      if (state.newest === null && !state.query) state.newest = data.newest ?? "0.-1.0";
       if (state.query) {
         state.offset = data.next_offset ?? state.offset;
         state.hasMore = data.next_offset != null && data.items.length > 0;
@@ -242,444 +236,80 @@
         state.before = data.next_before;
         state.hasMore = data.next_before !== null && data.items.length > 0;
       }
-      if (!state.selected) {
-        // A #id link is a request to read that memory (on a phone too); otherwise the
-        // newest one is shown beside the list without taking the phone's screen.
-        const want = /^\d+$/.test(location.hash.slice(1)) ? location.hash.slice(1) : "";
-        const target = want && state.items.find((it) => it.itemType !== "prompt" && `${it.id}` === want);
-        if (target) select(target, { focus: false });
-        else if (want) showById(Number(want));
-        else {
-          const first = state.items.find((it) => it.itemType !== "prompt") || state.items[0];
-          if (first) select(first, { focus: false, read: false });
-        }
-      }
     } catch (e) {
       console.error(e);
-      if (gen !== state.generation) return;
       state.hasMore = false;
-      state.error = e.message;
     } finally {
       if (gen === state.generation) {
         state.loading = false;
-        renderFoot();
-        // Keep filling while the sentinel is still on screen.
-        requestAnimationFrame(() => {
-          if (state.hasMore && sentinel.getBoundingClientRect().top < listEl.getBoundingClientRect().bottom + 400) loadMore();
-        });
+        renderFooter();
       }
     }
   }
 
   function reset() {
     state.generation++;
-    // A detail still loading from before belongs to the old list.
-    state.detailGen++;
-    document.body.classList.remove("reading");
-    detailEl.replaceChildren(el("div", { class: "empty" }, "Select a memory to read it."));
     state.items = [];
     state.keys = new Set();
     state.before = null;
     state.offset = 0;
-    state.newest = null;
-    state.error = null;
+    state.newest = 0;
     state.hasMore = true;
     state.loading = false;
-    state.selected = null;
-    lastDay = null;
-    listEl.replaceChildren(sentinel, foot);
-    listEl.scrollTop = 0;
+    feedContent.replaceChildren(sentinel, footer);
     loadMore();
   }
 
   // New items arrive by polling; the logomark spins while they land.
-  // Items are newest first under day headers; a new one goes under its own day's
-  // header, which is added when the top of the list is an older day.
-  let polling = false;
   async function poll() {
-    if (polling || state.loading || state.query || state.newest === null || document.hidden) return;
-    const gen = state.generation;
-    polling = true;
+    if (state.query || !state.newest) return;
     try {
       const data = await getJSON(`/api/feed?${params({ after: state.newest })}`);
-      // The list was reset while this was in flight: these belong to the old filters.
-      if (gen !== state.generation) return;
-      // The page is newest first; oldest first here, so each lands on top of the last.
-      const fresh = data.items.filter((it) => !state.keys.has(keyOf(it))).reverse();
-      for (const it of fresh) {
+      const fresh = data.items.filter((it) => !state.keys.has(keyOf(it)));
+      if (!fresh.length) return;
+      const logo = $("logomark");
+      logo.classList.add("spinning");
+      setTimeout(() => logo.classList.remove("spinning"), 1200);
+      for (const it of fresh.sort((a, b) => a.created_at_epoch - b.created_at_epoch)) {
         state.keys.add(keyOf(it));
         state.items.unshift(it);
-        prependRow(it);
+        feedContent.prepend(cardFor(it));
+        state.newest = Math.max(state.newest, it.created_at_epoch);
       }
-      state.newest = data.newest ?? state.newest;
-      if (fresh.length) {
-        const logo = $("logomark");
-        logo.classList.remove("spinning");
-        void logo.offsetWidth;
-        logo.classList.add("spinning");
-      }
-      // A full page means more are waiting.
-      if (data.more) setTimeout(poll, 0);
     } catch (e) {
       console.error(e);
-    } finally {
-      polling = false;
     }
-  }
-
-  function prependRow(it) {
-    const r = row(it);
-    const top = listEl.firstElementChild;
-    const k = dayKey(it.created_at_epoch);
-    if (top && top.classList.contains("day") && top.dataset.day === k) {
-      top.after(r);
-    } else {
-      // The older day's header stays above its own rows.
-      listEl.prepend(dayHeader(it.created_at_epoch), r);
-    }
-    if (lastDay === null) lastDay = k;
-  }
-
-  function dayHeader(ms) {
-    return el("div", { class: "day", role: "presentation", "data-day": dayKey(ms) }, dayLabel(ms));
-  }
-
-  // ---------- selection and keyboard ----------
-
-  function rows() {
-    return [...listEl.querySelectorAll(".item")];
-  }
-
-  function unselect() {
-    for (const r of listEl.querySelectorAll(".item.on")) {
-      r.classList.remove("on");
-      r.removeAttribute("aria-selected");
-    }
-    listEl.removeAttribute("aria-activedescendant");
-  }
-
-  function select(it, { focus = true, read = true } = {}) {
-    state.selected = keyOf(it);
-    unselect();
-    const r = listEl.querySelector(`[data-key="${state.selected}"]`);
-    if (r) {
-      r.classList.add("on");
-      r.setAttribute("aria-selected", "true");
-      listEl.setAttribute("aria-activedescendant", r.id);
-      r.scrollIntoView({ block: "nearest" });
-      if (focus) listEl.focus({ preventScroll: true });
-    }
-    // Only what the user chose goes in the address; the one shown by default does not.
-    if (read) history.replaceState(null, "", `${location.pathname}${location.search}${it.itemType !== "prompt" ? `#${it.id}` : ""}`);
-    // On a phone the detail replaces the list; only a chosen item opens it.
-    if (read) document.body.classList.add("reading");
-    openDetail(it);
-  }
-
-  // A memory by id that is not in the loaded list (an older one, or another filter's).
-  function showById(id) {
-    unselect();
-    state.selected = `id-${id}`;
-    document.body.classList.add("reading");
-    openDetail({ itemType: "observation", id });
-  }
-
-  function move(step) {
-    const all = rows();
-    if (!all.length) return;
-    const i = all.findIndex((r) => r.dataset.key === state.selected);
-    const next = all[Math.min(all.length - 1, Math.max(0, i + step))];
-    if (next) select(next._item);
-    if (i + step >= all.length - 5) loadMore();
-  }
-
-  // ---------- detail ----------
-
-
-  function sec(label, ...body) {
-    const content = body.flat().filter(Boolean);
-    return content.length ? el("section", { class: "d-sec" }, el("h4", {}, label), ...content) : null;
-  }
-
-  function header(it, extra) {
-    return el("div", { class: "d-meta" },
-      el("button", { class: "btn back", onclick: () => document.body.classList.remove("reading") }, "← List"),
-      typeMark(itemType(it)),
-      agentOf(it) ? agentBadge(agentOf(it)) : null,
-      el("span", { title: it.project || "" }, shortProject(it.project)),
-      el("span", {}, "·"),
-      el("span", {}, fmtDate(it.created_at_epoch)),
-      el("span", {}, "·"),
-      el("span", { class: "id" }, it.itemType === "prompt" ? `E${it.id}` : `#${it.id}`),
-      extra);
-  }
-
-  function fileRow(f) {
-    let cls = "same", mark = "●", stateText = "unchanged since";
-    if (f.kept) {
-      cls = f.kept.intact ? "kept" : f.kept.kept * 5 >= f.kept.of ? "partly" : "gone";
-      mark = f.kept.intact ? "●" : cls === "partly" ? "◐" : "○";
-      stateText = f.kept.intact ? "edits still there" : cls === "partly" ? `${f.kept.kept} of ${f.kept.of} lines kept` : "edits gone";
-    } else if (f.change) {
-      cls = f.change.includes("no longer exists") ? "gone" : "changed";
-      mark = cls === "gone" ? "○" : "◌";
-      stateText = f.change;
-    }
-    return el("div", { class: `file ${cls}`, title: f.change ? `File: ${f.change}` : "" },
-      el("span", { class: "mark" }, mark),
-      el("span", { class: "path" }, f.path, f.modified ? "" : el("span", { class: "state" }, "  (read)")),
-      el("span", { class: "state" }, stateText));
-  }
-
-  function filesSection(d) {
-    const now = list(d.files_now);
-    const recorded = [...new Set([...list(d.files_modified), ...list(d.files_read)])];
-    if (now.length || d.files_unchecked) {
-      return sec("Files · is the code still there?",
-        now.length ? el("div", { class: "files" }, now.map(fileRow)) : null,
-        d.files_unchecked ? el("div", { class: "file-note" }, `${d.files_unchecked}${now.length ? " more" : ""} not checked (too many files, or git was slow).`) : null,
-        recorded.length > now.length + (d.files_unchecked || 0) ? el("div", { class: "file-note" }, `${recorded.length - now.length - (d.files_unchecked || 0)} more not found on this machine.`) : null);
-    }
-    if (!recorded.length) return null;
-    const mod = list(d.files_modified).map(stripRoot);
-    const read = list(d.files_read).map(stripRoot);
-    return sec("Files",
-      mod.length ? el("div", { class: "plain-files" }, `modified: ${mod.join(", ")}`) : null,
-      read.length ? el("div", { class: "plain-files" }, `read: ${read.join(", ")}`) : null,
-      el("div", { class: "file-note" }, "Not found in a repository on this machine, so whether the code survives is unknown."));
-  }
-
-  function uptakeStrip(d) {
-    // Not loaded yet: say so rather than flash "not offered".
-    if (!d.uptake) return el("div", { class: "d-strip" }, el("span", { class: "note" }, "Checking uptake and files…"));
-    const u = d.uptake;
-    const origin = d.origin === "mnem" ? "distilled by mnem" : `imported from ${d.origin}`;
-    if (!u.offered) {
-      return el("div", { class: "d-strip" },
-        el("span", {}, "Not offered to an agent yet"),
-        el("span", { class: "note" }, origin));
-    }
-    return el("div", { class: "d-strip" },
-      el("span", {}, "offered ", el("b", {}, `${u.offered}×`), ` in ${u.sessions} session${u.sessions === 1 ? "" : "s"}`),
-      el("span", {}, "opened ", el("b", {}, `${u.fetched}×`)),
-      u.last_offered_ago ? el("span", {}, `last offered ${u.last_offered_ago} ago`) : null,
-      el("span", { class: "note" }, origin));
-  }
-
-  const SUMMARY_SECTIONS = [
-    ["investigated", "Investigated"],
-    ["learned", "Learned"],
-    ["completed", "Completed"],
-    ["next_steps", "Next steps"],
-  ];
-
-  function renderDetail(d) {
-    const actions = el("div", { class: "d-actions" },
-      d.itemType !== "prompt" ? el("button", { class: "btn", onclick: (e) => copy(e.target, `#${d.id}`) }, "Copy id") : null,
-      d.itemType !== "prompt" ? el("button", { class: "btn", onclick: (e) => copy(e.target, `${location.origin}/#${d.id}`) }, "Copy link") : null,
-      d.project ? el("button", { class: "btn", onclick: () => setProject(d.project) }, `Only ${shortProject(d.project)}`) : null);
-
-    if (d.itemType === "prompt") {
-      return [header(d), el("h2", { class: "d-title", style: { fontWeight: 400 } }, d.prompt_text), actions];
-    }
-    if (d.itemType === "summary") {
-      return [
-        header(d),
-        el("h2", { class: "d-title" }, d.request || "Session summary"),
-        uptakeStrip(d),
-        el("div", { class: "summary-grid", style: { marginTop: "16px" } },
-          SUMMARY_SECTIONS.filter(([k]) => d[k]).map(([k, label]) => sec(label, el("p", { class: "prose" }, d[k])))),
-        actions,
-      ];
-    }
-    if (d.pinned) {
-      return [
-        header(d),
-        el("h2", { class: "d-title" }, "Pinned fact"),
-        el("p", { class: "d-sub" }, `Every agent sees this at session start in ${d.project === "*" ? "every project" : shortProject(d.project)}. Forget it with `, el("code", {}, `mnem forget ${d.id}`), "."),
-        sec("Fact", el("p", { class: "prose" }, d.narrative || d.title)),
-        actions,
-      ];
-    }
-    const facts = list(d.facts);
-    const concepts = list(d.concepts);
-    return [
-      header(d),
-      el("h2", { class: "d-title" }, d.title || "Untitled"),
-      d.subtitle ? el("p", { class: "d-sub" }, d.subtitle) : null,
-      uptakeStrip(d),
-      facts.length ? sec("Facts", el("ul", {}, facts.map((f) => el("li", {}, f)))) : null,
-      d.narrative && d.narrative !== d.title ? sec("Narrative", el("p", { class: "prose" }, d.narrative)) : null,
-      filesSection(d),
-      concepts.length ? sec("Concepts", el("div", { class: "concepts" }, concepts.map((c) => el("span", { class: "concept" }, c)))) : null,
-      actions,
-    ];
-  }
-
-  async function openDetail(it) {
-    const gen = ++state.detailGen;
-    if (it.itemType === "prompt") {
-      detailEl.replaceChildren(...renderDetail(it).filter(Boolean));
-      return;
-    }
-    // Show what the list already has, then fill in files and uptake.
-    if (it.title || it.request || it.narrative) detailEl.replaceChildren(...renderDetail({ ...it, uptake: null }).filter(Boolean));
-    try {
-      const d = await getJSON(`/api/memory/${it.id}`);
-      if (gen !== state.detailGen) return;
-      detailEl.replaceChildren(...renderDetail(d).filter(Boolean));
-      detailEl.scrollTop = 0;
-    } catch (e) {
-      if (gen !== state.detailGen) return;
-      detailEl.replaceChildren(el("div", { class: "empty" }, `Memory #${it.id} could not be read (${e.message}).`));
-    }
-  }
-
-  async function copy(button, text) {
-    try {
-      await navigator.clipboard.writeText(text);
-      const was = button.textContent;
-      button.textContent = "Copied";
-      setTimeout(() => (button.textContent = was), 1200);
-    } catch {
-      prompt("Copy:", text);
-    }
-  }
-
-  // ---------- filters ----------
-
-  function renderViews() {
-    $("views").replaceChildren(...VIEWS.map(([v, label, icon, hint]) =>
-      el("button", { class: `nav-item${state.view === v ? " on" : ""}`, "aria-current": state.view === v ? "true" : null, title: hint, onclick: () => setView(v) },
-        svg(icon), el("span", { class: "name" }, label))));
-  }
-
-  // Project names as shown: the short name, or its last two parts where two projects
-  // share one (two checkouts called `code`).
-  let projectList = [];
-  const projectName = new Map();
-  function nameProjects(projects) {
-    const seen = new Map();
-    for (const p of projects) seen.set(shortProject(p), (seen.get(shortProject(p)) || 0) + 1);
-    for (const p of projects) {
-      const s = shortProject(p);
-      const parts = p.split("#")[0].split("/").filter(Boolean);
-      projectName.set(p, seen.get(s) > 1 && parts.length > 1 ? `${parts.slice(-2).join("/")}${p.includes("#") ? `#${p.split("#")[1]}` : ""}` : s);
-    }
-  }
-  const nameOf = (p) => projectName.get(p) || shortProject(p);
-
-  function renderProjects() {
-    const all = el("button", { class: `nav-item${state.project ? "" : " on"}`, "aria-current": state.project ? null : "true", onclick: () => setProject("") },
-      el("span", { class: "name" }, "All projects"));
-    $("projects").replaceChildren(all, ...projectList.map((p) =>
-      el("button", { class: `nav-item${state.project === p.project ? " on" : ""}`, "aria-current": state.project === p.project ? "true" : null, title: p.project, onclick: () => setProject(p.project) },
-        el("span", { class: "name" }, nameOf(p.project)),
-        el("span", { class: "count", title: "sessions" }, p.count))));
-  }
-
-  function renderChips() {
-    $("type-chips").replaceChildren(...TYPES.map(([v, label]) => {
-      const on = v.split(",").every((t) => state.types.has(t));
-      const colorOf = v.split(",")[0];
-      return el("button", { class: `chip${on ? " on" : ""}`, "aria-pressed": on ? "true" : "false", onclick: () => toggleType(v) },
-        el("span", { class: "sw", style: { background: typeColor(colorOf) } }), label);
-    }));
-    $("agent-chips").replaceChildren(
-      ...AGENTS.map((a) => el("button", {
-        class: `chip${state.agent === a ? " on" : ""}`,
-        "aria-pressed": state.agent === a ? "true" : "false",
-        onclick: () => setAgent(state.agent === a ? "" : a),
-      }, a)));
-  }
-
-  function toggleType(v) {
-    const parts = v.split(",");
-    const on = parts.every((t) => state.types.has(t));
-    for (const t of parts) on ? state.types.delete(t) : state.types.add(t);
-    refilter();
-  }
-  function setAgent(a) {
-    state.agent = a;
-    refilter();
-  }
-  function setView(v) {
-    state.view = v;
-    refilter();
-  }
-  function setProject(p) {
-    state.project = p;
-    setNav(false);
-    refilter();
-  }
-
-  function setNav(open) {
-    document.body.classList.toggle("nav-open", open);
-    $("nav-toggle").setAttribute("aria-expanded", open ? "true" : "false");
-  }
-
-  function refilter() {
-    syncUrl();
-    renderViews();
-    renderProjects();
-    renderChips();
-    reset();
-  }
-
-  // Filters and search in the address; a new list drops the #id of the old selection.
-  function syncUrl() {
-    const u = new URL(location.href);
-    u.hash = "";
-    const set = (k, v) => (v ? u.searchParams.set(k, v) : u.searchParams.delete(k));
-    set("project", state.project);
-    set("q", state.query);
-    set("type", [...state.types].join(","));
-    set("agent", state.agent);
-    set("view", state.view);
-    history.replaceState(null, "", u);
   }
 
   async function loadProjects() {
     const data = await getJSON("/api/projects");
-    // A session without a project cannot be filtered to (empty means every project).
-    projectList = data.projects.filter((p) => p.project);
-    nameProjects(projectList.map((p) => p.project));
-    renderProjects();
+    const sel = $("project");
     const ctx = $("context-project");
-    for (const p of projectList) ctx.append(el("option", { value: p.project }, nameOf(p.project)));
+    for (const p of data.projects) {
+      sel.append(el("option", { value: p.project }, `${shortProject(p.project)} (${p.count})`));
+      ctx.append(el("option", { value: p.project }, shortProject(p.project)));
+    }
+    sel.value = state.project;
   }
 
-  // ---------- health strip ----------
-
-  let lastHealth = "";
   async function loadHealth() {
     try {
       const s = await getJSON("/api/stats");
+      const h = $("health");
       const alerts = s.alerts || [];
-      const parts = [];
-      const behind = s.files_behind > 0;
-      parts.push(el("span", { class: behind ? "warn" : "", title: `${s.events.toLocaleString()} events · ${s.sessions.toLocaleString()} sessions · ${s.memories.toLocaleString()} memories` },
-        el("span", { class: "dot" }),
-        behind ? `${s.files_behind} transcript${s.files_behind > 1 ? "s" : ""} behind` : `capture ${s.newest_event_ago} ago`));
-      const distillWarn = s.last_distill_error || s.pending_distill > 10;
-      parts.push(el("span", { class: `extra ${distillWarn ? "warn" : ""}`, title: s.last_distill_error ? `Last error: ${s.last_distill_error}` : "Sessions waiting to become memories" },
-        el("span", { class: "dot" }),
-        s.pending_distill ? `${s.pending_distill} to distill` : "distilled"));
-      parts.push(el("span", { class: `extra ${s.backup_stale ? "warn" : ""}`, title: "Newest verified backup" },
-        el("span", { class: "dot" }),
-        s.backup_ago ? `backup ${s.backup_ago} ago` : "no backup"));
-      if (alerts.length) {
-        parts.push(el("span", { class: "bad", title: alerts.map((a) => `⚠ ${a}`).join("\n") },
-          el("span", { class: "dot" }), `${alerts.length} alert${alerts.length > 1 ? "s" : ""}`));
-      }
-      // Replaced only when it says something new, so it is not re-announced every poll.
-      const text = parts.map((p) => `${p.className}|${p.textContent}|${p.title}`).join("/");
-      if (text !== lastHealth) {
-        lastHealth = text;
-        $("health").replaceChildren(...parts);
-      }
+      const behind = s.files_behind > 0 || alerts.length > 0;
+      h.classList.toggle("behind", behind);
+      $("health-label").textContent = alerts.length
+        ? `${alerts.length} alert${alerts.length > 1 ? "s" : ""}`
+        : s.files_behind > 0
+          ? `${s.files_behind} behind`
+          : `${s.memories.toLocaleString()} memories · ${s.sessions.toLocaleString()} sessions`;
+      h.title =
+        (alerts.length ? alerts.map((a) => `⚠ ${a}`).join("\n") + "\n" : "") +
+        `Capture ${s.files_behind > 0 ? "behind" : "caught up"} · newest event ${s.newest_event_ago} ago · ` +
+        `${s.events.toLocaleString()} events · ${s.pending_distill} session(s) awaiting distillation`;
     } catch (e) {
-      $("health").replaceChildren(el("span", { class: "bad" }, el("span", { class: "dot" }), "mnem not answering"));
+      console.error(e);
     }
   }
 
@@ -707,7 +337,7 @@
   // ---------- context preview ----------
 
   async function showContext(project) {
-    $("context-modal").hidden = false;
+    $("context-modal").style.display = "flex";
     const sel = $("context-project");
     const target = project || sel.value || (sel.options[0] && sel.options[0].value) || "";
     sel.value = target;
@@ -719,6 +349,8 @@
       $("context-text").textContent = String(e);
     }
   }
+
+  // ---------- wiring ----------
 
   // ---------- backup & move ----------
 
@@ -741,7 +373,7 @@
   }
 
   async function showMove() {
-    $("move-modal").hidden = false;
+    $("move-modal").style.display = "flex";
     try {
       const data = await getJSON("/api/backups");
       const c = data.current;
@@ -925,24 +557,13 @@
     result.textContent = "mnem has not come back yet; check `systemctl --user status mnem-watch`.";
   }
 
-  // ---------- wiring ----------
-
-  function closeModals() {
-    $("context-modal").hidden = true;
-    $("move-modal").hidden = true;
-  }
-
   function init() {
     const url = new URL(location.href);
     state.project = url.searchParams.get("project") || "";
     state.query = url.searchParams.get("q") || "";
-    state.agent = url.searchParams.get("agent") || "";
-    state.view = url.searchParams.get("view") || "";
-    for (const t of (url.searchParams.get("type") || "").split(",")) if (t) state.types.add(t);
     $("search").value = state.query;
 
-    let pref = store.get("mnem-theme");
-    if (!THEME_ICONS[pref]) pref = "system";
+    let pref = store.get("mnem-theme") || "system";
     applyTheme(pref);
     $("theme").addEventListener("click", () => {
       const cycle = ["system", "light", "dark"];
@@ -950,6 +571,17 @@
       applyTheme(pref);
     });
 
+    const syncUrl = () => {
+      const u = new URL(location.href);
+      state.project ? u.searchParams.set("project", state.project) : u.searchParams.delete("project");
+      state.query ? u.searchParams.set("q", state.query) : u.searchParams.delete("q");
+      history.replaceState(null, "", u);
+    };
+    $("project").addEventListener("change", (e) => {
+      state.project = e.target.value;
+      syncUrl();
+      reset();
+    });
     let t;
     $("search").addEventListener("input", (e) => {
       clearTimeout(t);
@@ -959,69 +591,40 @@
         reset();
       }, 250);
     });
-    $("search").addEventListener("keydown", (e) => {
-      if (e.key === "ArrowDown" || e.key === "Enter") {
-        e.preventDefault();
-        const first = rows()[0];
-        if (first) select(first._item);
-      }
-    });
 
-    $("nav-toggle").addEventListener("click", () => setNav(!document.body.classList.contains("nav-open")));
     $("context-btn").addEventListener("click", () => showContext(state.project));
-    $("context-close").addEventListener("click", closeModals);
+    $("context-close").addEventListener("click", () => ($("context-modal").style.display = "none"));
+    $("context-modal").addEventListener("click", (e) => {
+      if (e.target.id === "context-modal") e.target.style.display = "none";
+    });
     $("context-project").addEventListener("change", (e) => showContext(e.target.value));
     $("move-btn").addEventListener("click", showMove);
-    $("move-close").addEventListener("click", closeModals);
-    for (const id of ["context-modal", "move-modal"]) {
-      $(id).addEventListener("click", (e) => {
-        if (e.target.id === id) closeModals();
-      });
-    }
+    $("move-close").addEventListener("click", () => ($("move-modal").style.display = "none"));
+    $("move-modal").addEventListener("click", (e) => {
+      if (e.target.id === "move-modal") e.target.style.display = "none";
+    });
     $("move-create").addEventListener("click", createBackup);
     $("move-file").addEventListener("change", (e) => chooseFile(e.target.files[0]));
-
     document.addEventListener("keydown", (e) => {
-      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName);
-      const modal = !$("context-modal").hidden || !$("move-modal").hidden;
       if (e.key === "Escape") {
-        if (modal) return closeModals();
-        if (typing) return document.activeElement.blur();
-        if (document.body.classList.contains("nav-open")) return setNav(false);
-        if (document.body.classList.contains("reading")) return document.body.classList.remove("reading");
+        $("context-modal").style.display = "none";
+        $("move-modal").style.display = "none";
       }
-      if (typing || modal || e.metaKey || e.ctrlKey || e.altKey) return;
-      // Arrows move the list only from the list itself (elsewhere they scroll); j/k anywhere.
-      const inList = document.activeElement === document.body || listEl.contains(document.activeElement);
-      if (e.key === "/") {
+      if (e.key === "/" && document.activeElement !== $("search")) {
         e.preventDefault();
         $("search").focus();
-        $("search").select();
-      } else if (e.key === "j" || (e.key === "ArrowDown" && inList)) {
-        e.preventDefault();
-        move(1);
-      } else if (e.key === "k" || (e.key === "ArrowUp" && inList)) {
-        e.preventDefault();
-        move(-1);
       }
     });
+
+    const feed = $("feed");
+    const toTop = $("to-top");
+    feed.addEventListener("scroll", () => (toTop.style.display = feed.scrollTop > 600 ? "flex" : "none"));
+    toTop.addEventListener("click", () => feed.scrollTo({ top: 0, behavior: "smooth" }));
 
     new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) loadMore();
-    }, { root: listEl, rootMargin: "400px" }).observe(sentinel);
+    }, { root: feed, rootMargin: "400px" }).observe(sentinel);
 
-    // A #id link opened in this tab: show that memory (in the list if it is loaded).
-    window.addEventListener("hashchange", () => {
-      const id = location.hash.slice(1);
-      if (!/^\d+$/.test(id)) return;
-      const it = state.items.find((x) => x.itemType !== "prompt" && `${x.id}` === id);
-      if (it) select(it);
-      else showById(Number(id));
-    });
-
-    renderViews();
-    renderProjects();
-    renderChips();
     loadProjects().catch(console.error);
     loadHealth();
     reset();

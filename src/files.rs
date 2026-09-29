@@ -645,7 +645,22 @@ pub fn report(conn: &Connection, t: &Target, limit: usize) -> Result<String> {
 /// For `get_observations`: how the files a memory touched changed since, for those
 /// that can be found on this machine (at most `max` files).
 pub fn staleness_lines(conn: &Connection, memory_id: i64, max: usize) -> Result<Vec<String>> {
-    let Some((root, as_of)) = locate(conn, memory_id)? else {
+    let (project, as_of): (String, i64) = conn.query_row(
+        "SELECT coalesce(m.project, ''), coalesce(min(s.last_event_at, m.created_at), m.created_at, 0)
+           FROM memories m LEFT JOIN sessions s ON s.id = m.session_id WHERE m.id = ?1",
+        [memory_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    // Where this project lives on this machine: the newest session's working directory.
+    let cwd: Option<String> = conn
+        .query_row(
+            "SELECT cwd FROM sessions WHERE (project = ?1 OR project LIKE ?2 || '#%') AND cwd IS NOT NULL
+             ORDER BY last_event_at DESC LIMIT 1",
+            params![project, base(&project)],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(root) = cwd.and_then(|c| repo_root(Path::new(&c))) else {
         return Ok(vec![]);
     };
     let mut st = conn.prepare_cached(
@@ -660,11 +675,14 @@ pub fn staleness_lines(conn: &Connection, memory_id: i64, max: usize) -> Result<
         let Some(rel) = local_rel(&root, &p) else {
             continue;
         };
-        let f = file_now(conn, memory_id, &root, as_of, now, rel, true)?;
-        if let Some(c) = f.change {
-            match f.kept {
-                Some(k) => out.push(format!("{}: {} (file: {c})", f.rel, k.phrase())),
-                None => out.push(format!("{}: {c}", f.rel)),
+        let h = history(&root, &rel);
+        let lines = changed(&h, as_of)
+            .then(|| lines_since(&root, &rel, as_of))
+            .flatten();
+        if let Some(c) = change_since(&h, as_of, now, lines) {
+            match edits_kept(conn, memory_id, &root, &rel)?.filter(|_| h.exists) {
+                Some(k) => out.push(format!("{rel}: {} (file: {c})", k.phrase())),
+                None => out.push(format!("{rel}: {c}")),
             }
         }
         if out.len() >= max {
@@ -672,121 +690,6 @@ pub fn staleness_lines(conn: &Connection, memory_id: i64, max: usize) -> Result<
         }
     }
     Ok(out)
-}
-
-/// Where memory `memory_id`'s project lives on this machine (the repository of its
-/// newest session's working directory) and the time its files are compared from.
-fn locate(conn: &Connection, memory_id: i64) -> Result<Option<(PathBuf, i64)>> {
-    let (project, as_of): (String, i64) = conn.query_row(
-        "SELECT coalesce(m.project, ''), coalesce(min(s.last_event_at, m.created_at), m.created_at, 0)
-           FROM memories m LEFT JOIN sessions s ON s.id = m.session_id WHERE m.id = ?1",
-        [memory_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let cwd: Option<String> = conn
-        .query_row(
-            "SELECT cwd FROM sessions WHERE (project = ?1 OR project LIKE ?2 || '#%') AND cwd IS NOT NULL
-             ORDER BY last_event_at DESC LIMIT 1",
-            params![project, base(&project)],
-            |r| r.get(0),
-        )
-        .ok();
-    Ok(cwd
-        .and_then(|c| repo_root(Path::new(&c)))
-        .map(|root| (root, as_of)))
-}
-
-/// One file (`rel`, under `root`) as it is now compared with `as_of`.
-fn file_now(
-    conn: &Connection,
-    memory_id: i64,
-    root: &Path,
-    as_of: i64,
-    now: i64,
-    rel: String,
-    modified: bool,
-) -> Result<FileNow> {
-    let h = history(root, &rel);
-    let lines = changed(&h, as_of)
-        .then(|| lines_since(root, &rel, as_of))
-        .flatten();
-    let change = change_since(&h, as_of, now, lines);
-    let kept = match change {
-        Some(_) if h.exists => edits_kept(conn, memory_id, root, &rel)?,
-        _ => None,
-    };
-    Ok(FileNow {
-        rel,
-        modified,
-        change,
-        kept,
-    })
-}
-
-/// A file a memory touched, as it is on this machine now.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FileNow {
-    /// Repo-relative path.
-    pub rel: String,
-    /// The memory's session modified it (else only read it).
-    pub modified: bool,
-    /// How the file changed since the memory, in words; None when it did not.
-    pub change: Option<String>,
-    /// How much of the session's own edits survive, when the file changed and that
-    /// can be told.
-    pub kept: Option<Kept>,
-}
-
-/// The files memory `memory_id` touched that can be found on this machine (modified
-/// ones first, each once, at most `max` looked up), with how each changed since, and
-/// how many were left unchecked because `budget` ran out (git can be slow). Takes at
-/// most `budget` plus 6 s (one file's four git calls at GIT_TIMEOUT each).
-pub fn files_now(
-    conn: &Connection,
-    memory_id: i64,
-    max: usize,
-    budget: Duration,
-) -> Result<(Vec<FileNow>, usize)> {
-    // The repository lookup is a git call too: the budget covers it.
-    let deadline = std::time::Instant::now() + budget;
-    let Some((root, as_of)) = locate(conn, memory_id)? else {
-        return Ok((vec![], 0));
-    };
-    let mut st = conn.prepare_cached(
-        "SELECT path, max(modified) FROM memory_files WHERE memory_id = ?1
-          GROUP BY path ORDER BY max(modified) DESC, min(rowid) LIMIT ?2",
-    )?;
-    let paths: Vec<(String, bool)> = st
-        .query_map(params![memory_id, max as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    // Files past `max` are not looked at: unchecked, not missing.
-    let recorded: i64 = conn.query_row(
-        "SELECT count(DISTINCT path) FROM memory_files WHERE memory_id = ?1",
-        [memory_id],
-        |r| r.get(0),
-    )?;
-    let past_cap = (recorded as usize).saturating_sub(paths.len());
-    let now = crate::db::now_ms();
-    let mut out: Vec<FileNow> = Vec::new();
-    let mut unchecked = 0;
-    for (p, modified) in paths {
-        let Some(rel) = local_rel(&root, &p) else {
-            continue;
-        };
-        if out.iter().any(|f| f.rel == rel) {
-            continue;
-        }
-        // A file is started only while time remains, so the worst case is the budget
-        // plus one file's git calls (at most four, each cut off at GIT_TIMEOUT).
-        if std::time::Instant::now() >= deadline {
-            unchecked += 1;
-            continue;
-        }
-        out.push(file_now(conn, memory_id, &root, as_of, now, rel, modified)?);
-    }
-    Ok((out, unchecked + past_cap))
 }
 
 /// How much of what a memory's session left in a file is still in it: lines kept and
@@ -1296,52 +1199,6 @@ mod tests {
         let r = report(&c, &t, 10).unwrap();
         let after = r.split("#2 ").nth(1).unwrap();
         assert!(after.lines().nth(1).unwrap().contains("unchanged"), "{r}");
-
-        // get_observations and the viewer read the same files differently: staleness
-        // lists each recorded path (a file both modified and read, twice) and stops at
-        // `max`; the viewer lists each file once, changed or not, within a time budget.
-        std::fs::write(dir.join("src/b.rs"), "fn b() {}\n").unwrap();
-        sh(&["add", "."]);
-        sh(&["commit", "-qm", "four"]);
-        c.execute(
-            "INSERT INTO sessions(id, agent, native_id, project, cwd, last_event_at)
-             VALUES ('claude:s3', 'claude', 's3', ?1, ?2, ?3)",
-            params![
-                t.project,
-                dir.to_string_lossy(),
-                crate::db::now_ms() - 900_000
-            ],
-        )
-        .unwrap();
-        c.execute(
-            "INSERT INTO memories(id, session_id, project, kind, type, title, files_modified, files_read, origin, origin_id, created_at)
-             VALUES (3, 'claude:s3', ?1, 'observation', 'change', 'three', '[\"src/a.rs\"]', '[\"src/a.rs\", \"src/b.rs\"]', 'mnem', 3, ?2)",
-            params![t.project, crate::db::now_ms() - 900_000],
-        )
-        .unwrap();
-        let lines = staleness_lines(&c, 3, 2).unwrap();
-        assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(
-            lines.iter().all(|l| l.starts_with("src/a.rs: ")),
-            "{lines:?}"
-        );
-        let (files, unchecked) = files_now(&c, 3, 12, Duration::from_secs(5)).unwrap();
-        let names: Vec<(&str, bool)> = files.iter().map(|f| (f.rel.as_str(), f.modified)).collect();
-        assert_eq!(names, [("src/a.rs", true), ("src/b.rs", false)]);
-        assert!(
-            files[0].change.is_some() && files[1].change.is_some(),
-            "{files:?}"
-        );
-        assert_eq!(unchecked, 0);
-        let (none, unchecked) = files_now(&c, 3, 12, Duration::ZERO).unwrap();
-        assert!(none.is_empty());
-        assert_eq!(unchecked, 2, "out of time: counted, not checked");
-        let (one, unchecked) = files_now(&c, 3, 1, Duration::from_secs(5)).unwrap();
-        assert_eq!(
-            (one.len(), unchecked),
-            (1, 1),
-            "past the cap: unchecked, not missing"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
