@@ -60,6 +60,10 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE INDEX IF NOT EXISTS events_session ON events(session_id, id);
 
 CREATE INDEX IF NOT EXISTS events_path ON events(path) WHERE path IS NOT NULL;
+-- The viewer's feed of human prompts, newest first (without it every page sorts all
+-- events).
+CREATE INDEX IF NOT EXISTS events_prompts ON events(ts)
+  WHERE kind = 'prompt' AND label IS NULL AND thread IS NULL;
 
 CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
   text, path, content='events', content_rowid='id', tokenize='porter unicode61'
@@ -101,6 +105,8 @@ CREATE TABLE IF NOT EXISTS memories(
 );
 CREATE INDEX IF NOT EXISTS memories_project ON memories(project, created_at);
 CREATE INDEX IF NOT EXISTS memories_session ON memories(session_id);
+-- Memories newest first (the viewer's feed, recent-memory lists).
+CREATE INDEX IF NOT EXISTS memories_time ON memories(created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
   title, subtitle, narrative, facts, concepts,
@@ -305,7 +311,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 22;
+pub const SCHEMA_VERSION: i64 = 23;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -462,4 +468,69 @@ fn migrate(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The time indexes (schema 23) only make queries faster: every date-ordered list
+    /// returns the same rows in the same order as without them, ties in time included.
+    #[test]
+    fn time_indexes_change_no_answer() {
+        let c = open_with(Path::new(":memory:"), Duration::from_secs(1)).unwrap();
+        c.execute(
+            "INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:s', 'pi', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        // Many memories and prompts sharing milliseconds, inserted out of time order.
+        for i in 0..60i64 {
+            let at = 1000 + (i * 7) % 13;
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, ?2, ?3, 'change', 't', 'mnem', ?1, ?4)",
+                rusqlite::params![
+                    100 - i,
+                    if i % 3 == 0 { "q" } else { "p" },
+                    if i % 5 == 0 { "summary" } else { "observation" },
+                    at
+                ],
+            )
+            .unwrap();
+            c.execute(
+                "INSERT INTO events(session_id, record_key, ts, kind, text) VALUES ('pi:s', ?1, ?2, 'prompt', 'x')",
+                rusqlite::params![format!("k{i}"), at],
+            )
+            .unwrap();
+        }
+        let lists = [
+            "SELECT m.id FROM memories m WHERE 1 ORDER BY m.created_at DESC, m.id ASC LIMIT 50",
+            "SELECT m.id FROM memories m WHERE m.created_at <= 1008 ORDER BY m.created_at DESC, m.id ASC LIMIT 50",
+            "SELECT m.id FROM memories m WHERE m.created_at > 1003 ORDER BY m.created_at ASC, m.id ASC LIMIT 50",
+            "SELECT m.id FROM memories m WHERE m.project = 'p' ORDER BY m.created_at DESC, m.id DESC LIMIT 50",
+            "SELECT m.id FROM memories m WHERE coalesce(m.type, '') != 'sensitive' ORDER BY m.created_at DESC, m.id ASC LIMIT 50",
+            "SELECT id FROM memories m WHERE project = 'p' AND kind = 'observation' ORDER BY created_at DESC LIMIT 30",
+            "SELECT e.id FROM events e JOIN sessions s ON s.id = e.session_id
+              WHERE e.kind = 'prompt' AND e.label IS NULL AND e.thread IS NULL
+              ORDER BY e.ts DESC, e.id ASC LIMIT 50",
+        ];
+        let run = |c: &Connection| -> Vec<Vec<i64>> {
+            lists
+                .iter()
+                .map(|q| {
+                    c.prepare(q)
+                        .unwrap()
+                        .query_map([], |r| r.get(0))
+                        .unwrap()
+                        .map(|r| r.unwrap())
+                        .collect()
+                })
+                .collect()
+        };
+        let with = run(&c);
+        c.execute_batch("DROP INDEX memories_time; DROP INDEX events_prompts;")
+            .unwrap();
+        assert_eq!(with, run(&c));
+    }
 }

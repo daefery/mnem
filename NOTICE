@@ -7,7 +7,5 @@ This product includes third-party material:
   (ui/icons/icon-thick-*.svg) are derived from Claude-Mem
   (https://github.com/thedotmack/claude-mem), Copyright 2026 Alex Newman,
   licensed under the Apache License, Version 2.0. The stylesheet was modified
-  for mnem (font paths, pi source badge, search box, health pill).
-
-- ui/fonts/monaspace-radon-var.woff2 is Monaspace Radon by GitHub Next,
-  licensed under the SIL Open Font License, Version 1.1.
+  for mnem (pi source badge, search box, health pill; trimmed to the rules the
+  viewer uses, without the web font, blur or entrance animations).

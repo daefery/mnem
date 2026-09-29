@@ -578,10 +578,11 @@ fn search_memories(
         args.insert(0, Box::new(q));
     }
     sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
+    // Ties in time oldest id first, as the plan without the time index returned them.
     sql.push_str(if order == "date_asc" {
-        " ORDER BY m.created_at ASC"
+        " ORDER BY m.created_at ASC, m.id ASC"
     } else {
-        " ORDER BY m.created_at DESC"
+        " ORDER BY m.created_at DESC, m.id ASC"
     });
     sql.push_str(" LIMIT ? OFFSET ?");
     args.push(Box::new(limit));

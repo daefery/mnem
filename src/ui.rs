@@ -29,7 +29,6 @@ const MAX_EMBED_CHARS: usize = 2000;
 const APP: &str = include_str!("../ui/app.js");
 const STYLE: &str = include_str!("../ui/style.css");
 const LOGO: &str = include_str!("../ui/logo.svg");
-const FONT: &[u8] = include_bytes!("../ui/fonts/monaspace-radon-var.woff2");
 const ICONS: &[(&str, &str)] = &[
     (
         "icon-thick-investigated.svg",
@@ -122,6 +121,8 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
         return send(
             &mut stream,
             Response::text("414 URI Too Long", "text/plain", "request too large\n"),
+            false,
+            None,
         );
     }
     let mut headers: HashMap<String, String> = HashMap::new();
@@ -178,11 +179,68 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
     } else {
         Response::text("405 Method Not Allowed", "text/plain", "GET or POST only\n")
     };
-    send(&mut stream, resp)
+    let gzip = headers
+        .get("accept-encoding")
+        .is_some_and(|v| accepts_gzip(v));
+    send(
+        &mut stream,
+        resp,
+        gzip,
+        headers.get("if-none-match").map(String::as_str),
+    )
+}
+
+/// Whether an Accept-Encoding value allows gzip (not refused with q=0).
+fn accepts_gzip(v: &str) -> bool {
+    v.split(',').any(|e| {
+        let mut p = e.split(';').map(str::trim);
+        p.next().is_some_and(|n| n.eq_ignore_ascii_case("gzip"))
+            && !p.any(|q| q.replace(' ', "").eq_ignore_ascii_case("q=0"))
+    })
+}
+
+/// Bodies smaller than this are sent as they are (compressing them saves nothing).
+const GZIP_MIN: usize = 1024;
+
+/// A strong validator for a body: its hash, quoted.
+fn etag(body: &[u8]) -> String {
+    format!("\"{:016x}\"", xxhash_rust::xxh3::xxh3_64(body))
 }
 
 /// Write a response; a file body is streamed, never loaded whole.
-fn send(stream: &mut TcpStream, resp: Response) -> Result<()> {
+/// Write a response; a file body is streamed, never loaded whole. Text bodies are
+/// gzipped when the browser accepts it, and successful ones carry an ETag so a reload
+/// that already has them gets `304 Not Modified` and no body.
+fn send(
+    stream: &mut TcpStream,
+    mut resp: Response,
+    gzip: bool,
+    if_none_match: Option<&str>,
+) -> Result<()> {
+    let mut extra = String::new();
+    let mut status = resp.status;
+    if resp.file.is_none() && resp.status == "200 OK" {
+        let tag = etag(&resp.body);
+        if if_none_match.is_some_and(|v| v.split(',').any(|t| t.trim() == tag)) {
+            status = "304 Not Modified";
+            resp.body.clear();
+        }
+        extra.push_str(&format!("ETag: {tag}\r\n"));
+    }
+    let compressible = resp.content_type.starts_with("text/")
+        || resp.content_type.starts_with("application/json")
+        || resp.content_type.starts_with("image/svg");
+    if resp.file.is_none() && compressible {
+        // Caches keep the plain and the gzipped body apart.
+        extra.push_str("Vary: Accept-Encoding\r\n");
+        if gzip && resp.body.len() >= GZIP_MIN {
+            use flate2::{Compression, write::GzEncoder};
+            let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+            enc.write_all(&resp.body)?;
+            resp.body = enc.finish()?;
+            extra.push_str("Content-Encoding: gzip\r\n");
+        }
+    }
     let (length, disposition) = match &resp.file {
         Some(f) => (
             f.metadata()?.len(),
@@ -194,8 +252,7 @@ fn send(stream: &mut TcpStream, resp: Response) -> Result<()> {
         None => (resp.body.len() as u64, String::new()),
     };
     let head = format!(
-        "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{disposition}Cache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
-        resp.status,
+        "HTTP/1.1 {status}\r\nContent-Type: {}\r\nContent-Length: {}\r\n{disposition}{extra}Cache-Control: {}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n",
         resp.content_type,
         length,
         if resp.cache {
@@ -315,13 +372,6 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
         "/app.js" => Response::text("200 OK", "text/javascript; charset=utf-8", APP),
         "/style.css" => Response::text("200 OK", "text/css; charset=utf-8", STYLE),
         "/logo.svg" => Response::text("200 OK", "image/svg+xml", LOGO),
-        "/fonts/monaspace-radon-var.woff2" => Response {
-            status: "200 OK",
-            content_type: "font/woff2",
-            body: FONT.to_vec(),
-            cache: true,
-            file: None,
-        },
         p if p.starts_with("/icons/") => match ICONS.iter().find(|(n, _)| p.ends_with(n)) {
             Some((_, svg)) => Response {
                 status: "200 OK",
@@ -838,7 +888,13 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     if !wh.is_empty() {
         sql.push_str(&format!(" WHERE {}", wh.join(" AND ")));
     }
-    sql.push_str(&format!(" ORDER BY m.created_at {order} LIMIT ?"));
+    // Ties in time: the order SQLite used before the time index existed, which the
+    // viewer showed until then (for one project, by its project index: newest id first;
+    // across projects, by a sort in table order: oldest id first).
+    let tie = if project.is_some() { "DESC" } else { "ASC" };
+    sql.push_str(&format!(
+        " ORDER BY m.created_at {order}, m.id {tie} LIMIT ?"
+    ));
     args.push(Box::new(limit));
     let mut st = conn.prepare(&sql)?;
     let mut rows = st.query(params_from_iter(args.iter().map(|b| b.as_ref())))?;
@@ -849,14 +905,25 @@ fn feed(conn: &Connection, q: &HashMap<String, String>) -> Result<Value> {
     items.extend(prompt_items(
         conn, None, project, before, after, order, limit, 0,
     )?);
-    items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
-    items.truncate(limit as usize);
-    let next_before = (after.is_none() && items.len() as i64 == limit)
+    // Newer than `after`: the oldest `limit` of them (shown newest first), so a viewer
+    // catching up after a while pages forward without skipping any; `more` says
+    // another page is waiting. Otherwise the newest `limit`.
+    if after.is_some() {
+        items.sort_by_key(|(t, _)| *t);
+        items.truncate(limit as usize);
+        items.reverse();
+    } else {
+        items.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+        items.truncate(limit as usize);
+    }
+    let full = items.len() as i64 == limit;
+    let next_before = (after.is_none() && full)
         .then(|| items.last().map(|(t, _)| *t))
         .flatten();
     Ok(json!({
         "items": items.into_iter().map(|(_, v)| v).collect::<Vec<_>>(),
         "next_before": next_before,
+        "more": after.is_some() && full,
     }))
 }
 
@@ -943,8 +1010,11 @@ fn prompt_items(
         wh.push("e.ts > ?");
         args.push(Box::new(a));
     }
+    // Prompts at the same millisecond (different sessions) are rare; the one project
+    // plan leaves them in its own order, which no tiebreak can reproduce, so the new
+    // index's order is kept there (the all-projects feed is unchanged: oldest id first).
     sql.push_str(&format!(
-        " WHERE {} ORDER BY e.ts {order} LIMIT ? OFFSET ?",
+        " WHERE {} ORDER BY e.ts {order}, e.id ASC LIMIT ? OFFSET ?",
         wh.join(" AND ")
     ));
     args.push(Box::new(limit));
@@ -1068,6 +1138,105 @@ mod tests {
         assert_eq!(m["request"], "Fix login");
         assert_eq!(m["investigated"], "logs");
         assert_eq!(m["next_steps"], "ship it");
+    }
+
+    #[test]
+    fn gzip_is_offered_only_when_accepted() {
+        assert!(super::accepts_gzip("gzip, deflate, br"));
+        assert!(super::accepts_gzip("br;q=1.0, GZIP;q=0.8"));
+        assert!(!super::accepts_gzip("gzip;q=0, deflate"));
+        assert!(!super::accepts_gzip("deflate, br"));
+        assert!(!super::accepts_gzip("x-gzip-not"));
+    }
+
+    /// The feed's two lists come from indexes, not a sort of every row.
+    #[test]
+    fn feed_queries_use_their_indexes() {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let plan = |sql: &str| -> String {
+            let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            st.query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .join(" / ")
+        };
+        let m = plan(
+            "SELECT m.id FROM memories m WHERE m.created_at <= 5 ORDER BY m.created_at DESC LIMIT 40",
+        );
+        assert!(
+            m.contains("memories_time") && !m.contains("TEMP B-TREE"),
+            "{m}"
+        );
+        let p = plan(
+            "SELECT e.id FROM events e JOIN sessions s ON s.id = e.session_id
+              WHERE e.kind = 'prompt' AND e.label IS NULL AND e.thread IS NULL
+              ORDER BY e.ts DESC LIMIT 40 OFFSET 0",
+        );
+        assert!(
+            p.contains("events_prompts") && !p.contains("TEMP B-TREE"),
+            "{p}"
+        );
+    }
+
+    /// Catching up after a while: the oldest new items first, then the next page.
+    #[test]
+    fn live_updates_page_forward_without_skipping() {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:s', 'pi', 's', 'p')",
+            [],
+        )
+        .unwrap();
+        for (id, t) in [(1, 201), (2, 202), (3, 203)] {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, 'p', 'observation', 'change', 't', 'mnem', ?1, ?2)",
+                [id, t],
+            )
+            .unwrap();
+        }
+        for t in [301, 302, 303] {
+            c.execute(
+                "INSERT INTO events(session_id, record_key, ts, kind, text) VALUES ('pi:s', ?1, ?2, 'prompt', 'x')",
+                rusqlite::params![format!("k{t}"), t],
+            )
+            .unwrap();
+        }
+        let q = |after: &str| -> Value {
+            let q: HashMap<String, String> = [("limit", "3"), ("after", after)]
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            super::feed(&c, &q).unwrap()
+        };
+        let first = q("100");
+        let ids: Vec<i64> = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, [3, 2, 1], "the three oldest new ones, newest first");
+        assert_eq!(first["more"], true);
+        let second = q("203");
+        assert_eq!(second["items"].as_array().unwrap().len(), 3);
+        assert!(
+            second["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["itemType"] == "prompt")
+        );
+        assert_eq!(q("303")["more"], false);
     }
 
     #[test]

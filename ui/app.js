@@ -142,8 +142,8 @@
           el("span", { class: "summary-project-badge", title: s.project }, shortProject(s.project))),
         s.request ? el("h2", { class: "summary-title" }, s.request) : null),
       el("div", { class: "summary-sections" },
-        sections.map(([k, label], i) =>
-          el("section", { class: "summary-section", style: `animation-delay:${i * 50}ms` },
+        sections.map(([k, label]) =>
+          el("section", { class: "summary-section" },
             el("div", { class: "summary-section-header" },
               el("img", { src: `/icons/icon-thick-${k.replace("_", "-")}.svg`, alt: label, class: `summary-section-icon summary-section-icon--${k}` }),
               el("h3", { class: "summary-section-label" }, label)),
@@ -260,24 +260,37 @@
     loadMore();
   }
 
-  // New items arrive by polling; the logomark spins while they land.
+  // New items arrive by polling; the logomark spins while they land. Polling stops
+  // while the tab is hidden (no work on a device nobody is looking at) and catches up
+  // when it is shown again, a page at a time, oldest first, so nothing is skipped.
+  let polling = false;
   async function poll() {
-    if (state.query || !state.newest) return;
+    if (polling || document.hidden || state.query || !state.newest) return;
+    const gen = state.generation;
+    polling = true;
     try {
-      const data = await getJSON(`/api/feed?${params({ after: state.newest })}`);
-      const fresh = data.items.filter((it) => !state.keys.has(keyOf(it)));
-      if (!fresh.length) return;
-      const logo = $("logomark");
-      logo.classList.add("spinning");
-      setTimeout(() => logo.classList.remove("spinning"), 1200);
-      for (const it of fresh.sort((a, b) => a.created_at_epoch - b.created_at_epoch)) {
-        state.keys.add(keyOf(it));
-        state.items.unshift(it);
-        feedContent.prepend(cardFor(it));
-        state.newest = Math.max(state.newest, it.created_at_epoch);
+      for (let page = 0; page < 50; page++) {
+        const data = await getJSON(`/api/feed?${params({ after: state.newest })}`);
+        // The feed was reset (project or search changed) while this was in flight.
+        if (gen !== state.generation) return;
+        const fresh = data.items.filter((it) => !state.keys.has(keyOf(it)));
+        if (fresh.length) {
+          const logo = $("logomark");
+          logo.classList.add("spinning");
+          setTimeout(() => logo.classList.remove("spinning"), 1200);
+        }
+        for (const it of fresh.sort((a, b) => a.created_at_epoch - b.created_at_epoch)) {
+          state.keys.add(keyOf(it));
+          state.items.unshift(it);
+          feedContent.prepend(cardFor(it));
+        }
+        for (const it of data.items) state.newest = Math.max(state.newest, it.created_at_epoch);
+        if (!data.more) break;
       }
     } catch (e) {
       console.error(e);
+    } finally {
+      polling = false;
     }
   }
 
@@ -629,7 +642,12 @@
     loadHealth();
     reset();
     setInterval(poll, 4000);
-    setInterval(loadHealth, 15000);
+    setInterval(() => document.hidden || loadHealth(), 15000);
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      poll();
+      loadHealth();
+    });
   }
 
   init();

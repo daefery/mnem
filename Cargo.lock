@@ -1237,6 +1237,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fastembed",
+ "flate2",
  "libc",
  "model2vec-rs",
  "rayon",
