@@ -183,7 +183,7 @@ pub fn about_in(
         .copied()
         .unwrap_or_default()
         .to_string();
-    let mut st = conn.prepare_cached(
+    let mut st = conn.prepare_cached(&format!(
         "SELECT f.memory_id, f.modified, f.path, coalesce(m.type, m.kind), coalesce(m.title, ''),
                 coalesce(m.created_at, 0), coalesce(min(s.last_event_at, m.created_at), m.created_at, 0),
                 s.cwd
@@ -194,7 +194,10 @@ pub fn about_in(
             AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
             AND (?3 = '' OR coalesce(m.session_id, '') != ?3) AND coalesce(m.created_at, 0) < ?4
             AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?5 AND r.memory_id = m.id)
+            AND {}
           ORDER BY m.created_at DESC",
+        crate::scripted::MEMORY_NOT_SCRIPTED
+    )
     )?;
     let mut out: Vec<About> = Vec::new();
     // For matches by ending only: how many tracked files end that way (more than one
@@ -487,6 +490,9 @@ pub fn on_touch(
     t: &Target,
     limit: usize,
 ) -> Result<Option<String>> {
+    if crate::scripted::is_scripted(conn, session) {
+        return Ok(None);
+    }
     // Claim the file first: a parallel touch of it, or a retry after a run that timed
     // out, then shows nothing instead of the same memories again.
     if !claim(conn, session, t)? {
@@ -861,15 +867,27 @@ pub fn edit_at(record: &serde_json::Value, key: &str, path: &str) -> Option<Edit
                 out.push(t.to_string());
             }
         }
-        for e in input.get("edits").and_then(Value::as_array).into_iter().flatten() {
+        for e in input
+            .get("edits")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             texts(e, keys, out);
         }
     }
     let same = |a: &str| a.replace('\\', "/") == path.replace('\\', "/");
     let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
     // Claude Code (`uuid`) and pi (`id`): the tool call at that index of the message.
-    if str_at(record, "uuid").or_else(|| str_at(record, "id")).as_deref() == Some(id) {
-        let call = record.get("message")?.get("content")?.get(part.parse::<usize>().ok()?)?;
+    if str_at(record, "uuid")
+        .or_else(|| str_at(record, "id"))
+        .as_deref()
+        == Some(id)
+    {
+        let call = record
+            .get("message")?
+            .get("content")?
+            .get(part.parse::<usize>().ok()?)?;
         let input = match call.get("input").or_else(|| call.get("arguments"))? {
             Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
             v => v.clone(),
@@ -882,7 +900,11 @@ pub fn edit_at(record: &serde_json::Value, key: &str, path: &str) -> Option<Edit
         }
         let (mut old, mut new) = (Vec::new(), Vec::new());
         texts(&input, &["old_string", "oldText", "old_str"], &mut old);
-        texts(&input, &["new_string", "newText", "new_str", "content"], &mut new);
+        texts(
+            &input,
+            &["new_string", "newText", "new_str", "content"],
+            &mut new,
+        );
         let mut e = Edit::default();
         old.iter().for_each(|t| lines(t, &mut e.old));
         new.iter().for_each(|t| lines(t, &mut e.new));
@@ -1191,7 +1213,13 @@ mod tests {
             { "type": "tool_use", "input": { "file_path": "/r/src/a.rs", "old_string": "fn old_name_here() {}", "new_string": format!("{line}\n}}") } },
         ] } });
         let e = edit_at(&claude, "u1:1", "/r/src/a.rs").unwrap();
-        assert_eq!((e.old, e.new), (vec!["fn old_name_here() {}".to_string()], vec![line.to_string()]));
+        assert_eq!(
+            (e.old, e.new),
+            (
+                vec!["fn old_name_here() {}".to_string()],
+                vec![line.to_string()]
+            )
+        );
         // A rewritten transcript: another record at that offset is not this edit.
         assert!(edit_at(&claude, "u2:1", "/r/src/a.rs").is_none());
         // The event's path must be the tool call's path.
@@ -1200,12 +1228,21 @@ mod tests {
         let pi = json!({ "id": "p1", "message": { "content": [{ "type": "toolCall",
             "arguments": json!({ "path": "src/a.rs", "edits": [{ "oldText": other, "newText": line }] }).to_string() }] } });
         let e = edit_at(&pi, "p1:0", "src/a.rs").unwrap();
-        assert_eq!((e.old, e.new), (vec![other.to_string()], vec![line.to_string()]));
+        assert_eq!(
+            (e.old, e.new),
+            (vec![other.to_string()], vec![line.to_string()])
+        );
         // Codex: the item's id, its change to this path; a diff's added and removed lines.
         let codex = json!({ "payload": { "item": { "id": "c1", "changes": { "/r/src/a.rs": {
             "type": "update", "content": format!("@@ -1 +1 @@\n-fn old_name_here() {{}}\n+{line}\n") } } } } });
         let e = edit_at(&codex, "c1:abc", "/r/src/a.rs").unwrap();
-        assert_eq!((e.old, e.new), (vec!["fn old_name_here() {}".to_string()], vec![line.to_string()]));
+        assert_eq!(
+            (e.old, e.new),
+            (
+                vec!["fn old_name_here() {}".to_string()],
+                vec![line.to_string()]
+            )
+        );
         assert!(edit_at(&codex, "c2:abc", "/r/src/a.rs").is_none());
         // A path matches on whole components only.
         assert!(is_rel("/r/src/a.rs", "src/a.rs") && is_rel("src\\a.rs", "src/a.rs"));
@@ -1227,11 +1264,11 @@ mod tests {
         let mut body = String::new();
         let mut offsets = Vec::new();
         for (i, (old, new)) in [
-            ("", kept),        // event 10
-            ("", gone),        // event 11
-            ("", first),       // event 12: replaced by event 13 in the same chunk
-            (first, kept),     // event 13
-            ("", twice),       // event 14
+            ("", kept),    // event 10
+            ("", gone),    // event 11
+            ("", first),   // event 12: replaced by event 13 in the same chunk
+            (first, kept), // event 13
+            ("", twice),   // event 14
         ]
         .into_iter()
         .enumerate()

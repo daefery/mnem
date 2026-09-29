@@ -21,6 +21,7 @@ pub mod model;
 pub mod project;
 pub mod recall;
 pub mod rerank;
+pub mod scripted;
 pub mod search;
 pub mod text;
 pub mod ui;

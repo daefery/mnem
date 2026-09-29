@@ -231,6 +231,13 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
     }
     match event {
         "session-start" => {
+            // A resumed scripted session follows its brief; it gets no context.
+            if session
+                .as_deref()
+                .is_some_and(|s| crate::scripted::is_scripted(conn, s))
+            {
+                return Ok(());
+            }
             // Nothing in catch-up may keep the context from being emitted.
             let fresh = catch_up_recent(conn, Duration::from_millis(400)).unwrap_or_else(|e| {
                 log(&format!("catch-up: {e:#}"));
@@ -321,6 +328,15 @@ pub fn prompt_update(
     project: &str,
     prompt: Option<&str>,
 ) -> Option<String> {
+    // A session driven by another agent's brief gets nothing: it follows the brief.
+    if prompt.is_some_and(crate::scripted::matches)
+        && let Err(e) = crate::scripted::mark(conn, session)
+    {
+        log(&format!("scripted: {e:#}"));
+    }
+    if crate::scripted::is_scripted(conn, session) {
+        return None;
+    }
     let delta = cross_agent_delta(conn, session, project).unwrap_or_else(|e| {
         log(&format!("delta: {e:#}"));
         None
@@ -429,6 +445,7 @@ pub fn cross_agent_delta(
          LEFT JOIN delta_seen d ON d.viewer = ?3 AND d.other = s.id
          WHERE e.id > max(?1, coalesce(d.through, 0)) AND s.project = ?2 AND s.id != ?3
            AND e.thread IS NULL AND e.source_path IS NOT NULL AND e.ts > ?4
+           AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = s.id)
            AND (e.kind IN ('assistant', 'file_edit', 'error') OR (e.kind = 'prompt' AND e.label IS NULL))
          ORDER BY e.id",
     )?;

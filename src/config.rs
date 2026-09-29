@@ -18,6 +18,11 @@ pub struct Config {
     /// are labelled "harness": kept for context, excluded from "what the user asked".
     #[serde(default)]
     pub harness_prompts: Vec<String>,
+    /// Regexes for prompts another agent's brief sends (a review council, a test run). A
+    /// session with a matching prompt is scripted: not distilled, not offered memories,
+    /// and its memories stay out of recall and search (see `scripted`).
+    #[serde(default)]
+    pub scripted_sessions: Vec<String>,
     #[serde(default)]
     pub distill: DistillConfig,
     /// Projects never captured (substring of the project id, e.g. "github.com/me/secret").
@@ -27,6 +32,10 @@ pub struct Config {
     pub semantic: SemanticConfig,
     /// Port of the viewer and embedding service run by `mnem watch` (default 37777).
     pub ui_port: Option<u16>,
+    /// When this process read the settings (ms): a long-running process keeps what it
+    /// read at start.
+    #[serde(skip)]
+    pub loaded_at: i64,
 }
 
 /// Local semantic recall.
@@ -88,13 +97,15 @@ pub fn path() -> std::path::PathBuf {
 
 pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     let path = path();
-    match std::fs::read_to_string(&path) {
+    let mut c: Config = match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
             eprintln!("mnem: ignoring {}: {e}", path.display());
             Config::default()
         }),
         Err(_) => Config::default(),
-    }
+    };
+    c.loaded_at = db::now_ms();
+    c
 });
 
 pub static HARNESS: LazyLock<Vec<Regex>> = LazyLock::new(|| {

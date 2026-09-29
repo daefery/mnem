@@ -120,7 +120,8 @@ pub fn report(conn: &Connection, days: i64) -> Result<Report> {
         let mut st = conn.prepare(
             "SELECT o.session_id, o.memory_id, o.at, coalesce(s.project, '')
                FROM offers o LEFT JOIN sessions s ON s.id = o.session_id
-              WHERE o.source = ?1 AND o.at >= ?2",
+              WHERE o.source = ?1 AND o.at >= ?2
+                AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = o.session_id)",
         )?;
         let offers: Vec<(String, i64, i64, String)> = st
             .query_map(params![src, from], |r| {

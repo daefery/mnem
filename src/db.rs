@@ -254,6 +254,12 @@ CREATE TABLE IF NOT EXISTS distill_calls(
 );
 CREATE INDEX IF NOT EXISTS distill_calls_at ON distill_calls(at);
 
+-- Sessions driven by another agent's brief (settings: scripted_sessions).
+CREATE TABLE IF NOT EXISTS scripted_sessions(
+  session_id TEXT PRIMARY KEY,
+  at INTEGER NOT NULL
+);
+
 -- Files a session has already been offered memories about (once per file).
 CREATE TABLE IF NOT EXISTS file_seen(
   session_id TEXT NOT NULL,
@@ -299,7 +305,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 21;
+pub const SCHEMA_VERSION: i64 = 22;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

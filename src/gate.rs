@@ -617,7 +617,10 @@ pub struct Snapshot(pub std::path::PathBuf);
 
 impl Snapshot {
     pub fn take(live: &Path) -> Result<Snapshot> {
-        sweep_abandoned(&crate::db::data_dir(), std::time::Duration::from_secs(6 * 3600));
+        sweep_abandoned(
+            &crate::db::data_dir(),
+            std::time::Duration::from_secs(6 * 3600),
+        );
         let path = crate::db::data_dir().join(format!(".gate-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Connection::open_with_flags(live, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?

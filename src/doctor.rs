@@ -164,6 +164,17 @@ pub fn run(conn: &Connection) -> Result<bool> {
             "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
         );
     }
+    if let Err(e) = crate::scripted::refresh(conn) {
+        println!("scripted sessions: scan failed: {e:#}");
+    }
+    let scripted: i64 = conn
+        .query_row("SELECT count(*) FROM scripted_sessions", [], |r| r.get(0))
+        .unwrap_or(0);
+    if scripted > 0 || !crate::config::CONFIG.scripted_sessions.is_empty() {
+        println!(
+            "scripted sessions: {scripted} (not distilled or recalled; settings: scripted_sessions)"
+        );
+    }
     if let Ok(b) = crate::distill::backlog(conn) {
         let backfill = match b.since {
             _ if b.budget == 0 => "backfill off (distill.daily_calls = 0)".to_string(),

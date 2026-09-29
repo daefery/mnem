@@ -85,6 +85,7 @@ fn recent_sessions(conn: &Connection, o: &Options) -> Result<Vec<SessionView>> {
          FROM sessions
          WHERE project = ?1 AND id IS NOT ?2
            AND EXISTS (SELECT 1 FROM events e WHERE e.session_id = sessions.id AND e.kind = 'prompt')
+           AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = sessions.id)
          ORDER BY last_event_at DESC LIMIT ?3",
     )?;
     let candidates: Vec<Candidate> = s
@@ -199,11 +200,12 @@ struct Obs {
 }
 
 fn memories(conn: &Connection, project: &str, limit: usize) -> Result<(Vec<Obs>, Option<Summary>)> {
-    let mut s = conn.prepare(
-        "SELECT id, coalesce(type, kind), coalesce(title, ''), coalesce(created_at, 0) FROM memories
-         WHERE project = ?1 AND kind = 'observation' AND coalesce(type, '') != 'sensitive'
+    let mut s = conn.prepare(&format!(
+        "SELECT id, coalesce(type, kind), coalesce(title, ''), coalesce(created_at, 0) FROM memories m
+         WHERE project = ?1 AND kind = 'observation' AND coalesce(type, '') != 'sensitive' AND {}
          ORDER BY created_at DESC LIMIT ?2",
-    )?;
+        crate::scripted::MEMORY_NOT_SCRIPTED
+    ))?;
     let obs = s
         .query_map(params![project, limit as i64], |r| {
             Ok(Obs {
@@ -216,8 +218,12 @@ fn memories(conn: &Connection, project: &str, limit: usize) -> Result<(Vec<Obs>,
         .collect::<rusqlite::Result<_>>()?;
     let summary = conn
         .query_row(
-            "SELECT coalesce(title, ''), coalesce(narrative, '') FROM memories
-             WHERE project = ?1 AND kind = 'summary' ORDER BY created_at DESC LIMIT 1",
+            &format!(
+                "SELECT coalesce(title, ''), coalesce(narrative, '') FROM memories m
+                 WHERE project = ?1 AND kind = 'summary' AND {}
+                 ORDER BY created_at DESC LIMIT 1",
+                crate::scripted::MEMORY_NOT_SCRIPTED
+            ),
             params![project],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -359,7 +365,34 @@ pub fn ago(ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::excerpt;
+    use super::{excerpt, memories};
+
+    #[test]
+    fn a_scripted_sessions_memories_stay_out_of_the_start_context() {
+        let c = crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        for (id, session, kind, title, at) in [
+            (1, "claude:me", "summary", "Ship the retry fix", 100),
+            (2, "pi:council", "summary", "Review Round 41 for correctness", 200),
+            (3, "claude:me", "observation", "Retry loop backs off on 429", 100),
+            (4, "pi:council", "observation", "Round 41 findings written", 200),
+        ] {
+            c.execute(
+                "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, ?2, 'p', ?3, 'change', ?4, 'mnem', ?1, ?5)",
+                rusqlite::params![id, session, kind, title, at],
+            )
+            .unwrap();
+        }
+        crate::scripted::mark(&c, "pi:council").unwrap();
+        let (obs, summary) = memories(&c, "p", 10).unwrap();
+        // The newer summary and observation came from a brief: the older real ones show.
+        assert_eq!(summary.unwrap().0, "Ship the retry fix");
+        assert_eq!(obs.iter().map(|o| o.id).collect::<Vec<_>>(), [3]);
+    }
 
     #[test]
     fn excerpts_end_on_sentences() {

@@ -362,7 +362,7 @@ pub fn keyword_rank(
     if rare.is_empty() {
         return Ok(vec![]);
     }
-    let mut st = conn.prepare_cached(
+    let mut st = conn.prepare_cached(&format!(
         "SELECT m.id, coalesce(m.type, m.kind), coalesce(m.title, ''), coalesce(m.created_at, 0),
                 lower(coalesce(m.title, '') || ' ' || coalesce(m.subtitle, '') || ' ' ||
                       coalesce(m.narrative, '') || ' ' || coalesce(m.facts, ''))
@@ -372,9 +372,12 @@ pub fn keyword_rank(
            AND coalesce(m.type, '') != 'sensitive'
            AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)
            AND (?5 = '' OR coalesce(m.session_id, '') != ?5) AND coalesce(m.created_at, 0) < ?6
+           AND {not_scripted}
          -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `mnem eval`.
          ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
          LIMIT ?4",
+        not_scripted = crate::scripted::MEMORY_NOT_SCRIPTED
+    )
     )?;
     let rows = st
         .query_map(

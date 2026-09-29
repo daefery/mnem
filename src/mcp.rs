@@ -602,12 +602,20 @@ fn search_memories(
 /// (created_at, index line) for a memory.
 fn memory_line(conn: &Connection, id: i64) -> Result<(i64, String)> {
     let mut st = conn.prepare_cached(
-        "SELECT m.kind, coalesce(m.type, ''), coalesce(m.title, ''), coalesce(m.created_at, 0), coalesce(m.project, '')
+        "SELECT m.kind, coalesce(m.type, ''), coalesce(m.title, ''), coalesce(m.created_at, 0), coalesce(m.project, ''),
+                EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = m.session_id)
          FROM memories m WHERE m.id = ?1",
     )?;
-    let (kind, ty, title, at, project): (String, String, String, i64, String) = st
+    let (kind, ty, title, at, project, scripted): (String, String, String, i64, String, bool) = st
         .query_row([id], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?;
     let label = if kind == "summary" {
         "summary".to_string()
@@ -617,10 +625,11 @@ fn memory_line(conn: &Connection, id: i64) -> Result<(i64, String)> {
     Ok((
         at,
         format!(
-            "#{id} [{label}] {} · {} · {}",
+            "#{id} [{label}] {} · {} · {}{}",
             day(at),
             short(&project),
-            text::head(&title, 140)
+            text::head(&title, 140),
+            if scripted { " · scripted" } else { "" }
         ),
     ))
 }
@@ -795,9 +804,11 @@ fn timeline(conn: &Connection, a: &Value) -> Result<String> {
                     text::head(&title, 140)
                 ))
             };
-            let sel = "SELECT id, kind, coalesce(type, ''), coalesce(title, ''), coalesce(created_at, 0) FROM memories WHERE project IS ?1";
+            let sel = "SELECT id, kind, coalesce(type, ''), coalesce(title, ''), coalesce(created_at, 0) FROM memories m WHERE project IS ?1";
+            // Neighbours leave out scripted sessions' memories; an anchor asked for by id stays.
+            let near = format!("{sel} AND {}", crate::scripted::MEMORY_NOT_SCRIPTED);
             let mut prev: Vec<String> = conn
-                .prepare(&format!("{sel} AND (created_at, id) < (?2, ?3) ORDER BY created_at DESC, id DESC LIMIT ?4"))?
+                .prepare(&format!("{near} AND (created_at, id) < (?2, ?3) ORDER BY created_at DESC, id DESC LIMIT ?4"))?
                 .query_map(rusqlite::params![project, at, id, before], row)?
                 .collect::<rusqlite::Result<_>>()?;
             prev.reverse();
@@ -807,7 +818,7 @@ fn timeline(conn: &Connection, a: &Value) -> Result<String> {
                 .collect::<rusqlite::Result<_>>()?;
             let next: Vec<String> = conn
                 .prepare(&format!(
-                    "{sel} AND (created_at, id) > (?2, ?3) ORDER BY created_at, id LIMIT ?4"
+                    "{near} AND (created_at, id) > (?2, ?3) ORDER BY created_at, id LIMIT ?4"
                 ))?
                 .query_map(rusqlite::params![project, at, id, after], row)?
                 .collect::<rusqlite::Result<_>>()?;

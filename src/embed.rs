@@ -566,9 +566,13 @@ pub fn search(
     search_where(
         conn,
         q,
-        "m.project = ? AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
-         AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ? AND r.memory_id = m.id)
-         AND (? = '' OR coalesce(m.session_id, '') != ?) AND coalesce(m.created_at, 0) < ?",
+        &format!(
+            "m.project = ? AND m.kind != 'pinned' AND coalesce(m.type, '') != 'sensitive'
+             AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ? AND r.memory_id = m.id)
+             AND (? = '' OR coalesce(m.session_id, '') != ?) AND coalesce(m.created_at, 0) < ?
+             AND {}",
+            crate::scripted::MEMORY_NOT_SCRIPTED
+        ),
         vec![
             Box::new(project.to_string()),
             Box::new(scope.offered_to.unwrap_or("").to_string()),

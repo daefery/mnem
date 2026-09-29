@@ -31,8 +31,10 @@ const MIN_DIGEST_CHARS: usize = 300;
 
 /// A session `s` (joined to its `distill_state` as `d`) has events no memory was made
 /// from yet and that were not settled as too small.
+/// Scripted sessions (another agent's brief) are never distilled.
 const UNDISTILLED: &str = "EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
-    AND e.id > max(coalesce(d.through, 0), coalesce(d.settled, 0)) AND e.thread IS NULL)";
+    AND e.id > max(coalesce(d.through, 0), coalesce(d.settled, 0)) AND e.thread IS NULL)
+    AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = s.id)";
 
 pub(crate) const SYSTEM: &str = r#"You turn a digest of an AI coding session into durable memory for future sessions.
 Record durable technical signal only: what the system now does differently, what shipped, decisions
@@ -560,6 +562,13 @@ mod chain_tests {
         );
         // Nothing was distilled in the last hour, so backfill is not keeping up.
         assert!(b.falling_behind());
+        // A session another agent's brief drove is not pending and not distilled.
+        crate::scripted::mark(&conn, "pi:old-big").unwrap();
+        assert_eq!(backlog(&conn).unwrap().pending, b.pending - 1);
+        crate::scripted::mark(&conn, "pi:new-small").unwrap();
+        let st = run(&mut conn, &Options::new("manual", 2, 10)).unwrap();
+        assert_eq!(st.sessions, 1, "only old-small is left: {st:?}");
+        conn.execute("DELETE FROM scripted_sessions", []).unwrap();
 
         // A dry run stops where the real run would: old-big needs several digests.
         let all = run(
@@ -1093,6 +1102,9 @@ pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
             ..Default::default()
         });
     };
+    if let Err(e) = crate::scripted::refresh(conn) {
+        crate::hook::log(&format!("scripted sessions: {e:#}"));
+    }
     let now = db::now_ms();
     let idle_before = if o.include_active { now } else { now - 120_000 };
     let mut q = conn.prepare(

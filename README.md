@@ -103,6 +103,14 @@ something since, a short "meanwhile" update.
   `["antigravity"]` and `["gemini"]`.
 - `harness_prompts`: prompts matching these patterns are labelled as tooling-injected,
   not human asks.
+- `scripted_sessions`: patterns for prompts another agent's brief sends (a review
+  council, a test run), e.g. `["^Round \\d+\\. Read /tmp/"]`. A session with a matching
+  prompt is scripted: it is not distilled, not offered memories, left out of uptake, and
+  the memories already made from it stay out of recall, search and the session-start
+  context. Nothing is deleted; change the patterns and the next scan (every distillation
+  pass, or `mnem doctor`, which shows the count) re-marks every session. On this machine
+  24 of 2,482 sessions were scripted yet made 17% of a week's distilled memories, and
+  9% of the memories shown to real sessions came from them.
 - `distill`: any OpenAI-compatible endpoint (CLIProxyAPI by default). Models are tried
   in order; a model that hits quota or rate limits (HTTP 402/429) cools down for 30 min,
   an unavailable one (403/404) for 6 h, a failing one (5xx, timeout) for 5 min. With
