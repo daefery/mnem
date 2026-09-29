@@ -15,8 +15,8 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 |---|---|
 | `mnem backfill` | Ingest every transcript under `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions` (incremental, safe to re-run) |
 | `mnem import` | Import a claude-mem database (read-only snapshot; observation ids are kept) |
-| `mnem install [--dry-run]` | Register hooks + MCP for Claude Code and Codex, and a pi extension. Backs up every file it changes |
-| `mnem doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, claude-mem comparison |
+| `mnem install [--dry-run] [--only claude,codex,pi]` | Connect Claude Code, Codex and pi (hooks, MCP tools, pi extension), installed yet or not, then show each one's state. Backs up every file it changes |
+| `mnem doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, which agents are connected, claude-mem comparison |
 | `mnem context --cwd DIR` | The context injected at session start |
 | `mnem search <query>` | Full-text search over captured events |
 | `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
@@ -267,9 +267,25 @@ own origin, so another website open in the browser cannot trigger them.
 ## Build
 
 ```sh
-cargo install --path .
-mnem backfill && mnem import && mnem doctor
-mnem install --dry-run
+cargo install --path . --locked --features fastembed   # --features fastembed: semantic recall
+mnem install --dry-run   # what it would change
+mnem install --watch     # connect the agents, start the background service
+mnem doctor              # ends with "status: OK"
 ```
+
+### Agents installed before or after mnem
+
+The order does not matter. `mnem install` writes each agent's part whether the agent
+is installed yet or not (Claude Code's tools too, without its `claude` command), so an
+agent installed later gets memory from its first session. Two cases need a step:
+
+- **Codex** runs a hook only after you trust it: on its first start after `mnem
+  install` it says hooks need review; type `/hooks` and trust mnem's.
+- **An agent reinstalled or reset** can lose mnem's entries.
+
+`mnem doctor` lists every agent as connected, not installed, not connected (with what
+is missing), or waiting for Codex trust. The viewer (http://127.0.0.1:37777) shows the
+same above the feed when an installed agent is not connected, with a **Connect**
+button that does what `mnem install --only <agent>` does.
 
 Data lives in `~/.mnem/mnem.db` (override with `MNEM_HOME` or `--db`).

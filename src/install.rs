@@ -11,6 +11,46 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// What install reports: printed for the command line, collected for the viewer.
+thread_local! {
+    static LOG: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn say_raw(line: &str) {
+    let line = line.trim_end_matches('\n');
+    let collected = LOG.with(|l| {
+        if let Some(v) = l.borrow_mut().as_mut() {
+            v.extend(line.lines().map(str::to_string));
+            true
+        } else {
+            false
+        }
+    });
+    if !collected {
+        println!("{line}");
+    }
+}
+
+macro_rules! say {
+    ($($t:tt)*) => { say_raw(&format!($($t)*)) };
+}
+
+/// Run `f` with install's report collected instead of printed. The previous collector
+/// (if any) is restored afterwards, also when `f` panics.
+pub fn collecting<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+    struct Restore(Option<Vec<String>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let prev = self.0.take();
+            LOG.with(|l| *l.borrow_mut() = prev);
+        }
+    }
+    let _restore = Restore(LOG.with(|l| l.borrow_mut().replace(Vec::new())));
+    let out = f();
+    let lines = LOG.with(|l| l.borrow_mut().take().unwrap_or_default());
+    (out, lines)
+}
+
 pub struct Plan {
     pub bin: String,
     pub dry_run: bool,
@@ -34,14 +74,17 @@ pub fn run(p: &Plan) -> Result<()> {
         watch_service(p)?;
     }
     if p.dry_run {
-        println!("\n(dry run: nothing written)");
+        say!("\n(dry run: nothing written)");
+    } else {
+        say!("\nagents");
+        say_raw(&crate::agents::render(&crate::agents::status_all()));
     }
     Ok(())
 }
 
-type HookEntry = (&'static str, Option<&'static str>, String, u64);
+pub(crate) type HookEntry = (&'static str, Option<&'static str>, String, u64);
 
-fn hook_entries(bin: &str, agent: &str) -> Vec<HookEntry> {
+pub(crate) fn hook_entries(bin: &str, agent: &str) -> Vec<HookEntry> {
     vec![
         (
             "SessionStart",
@@ -106,6 +149,11 @@ fn strip_ours(doc: &mut Value) -> usize {
 /// Replace mnem's entries in a Claude-style `{"hooks": {Event: [group]}}` document.
 fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) -> Result<()> {
     anyhow::ensure!(doc.is_object(), "settings root is not a JSON object");
+    // Already exactly right: leave every hook where it is. Codex keys a hook's trust
+    // by its position, so moving an unchanged hook would ask the user to trust it again.
+    if ours_match(doc, entries, extra) {
+        return Ok(());
+    }
     strip_ours(doc);
     let hooks = doc
         .as_object_mut()
@@ -135,6 +183,52 @@ fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) -> Result<
     Ok(())
 }
 
+/// Whether mnem's hooks in `doc` are exactly `entries`: each entry found once (its own
+/// group, same event, matcher, command, timeout and extra keys) and no other mnem hook.
+fn ours_match(doc: &Value, entries: &[HookEntry], extra: &Value) -> bool {
+    let Some(hooks) = doc.get("hooks").and_then(Value::as_object) else {
+        return false;
+    };
+    let want = |command: &str, timeout: u64| {
+        let mut w = json!({ "type": "command", "command": command, "timeout": timeout });
+        if let (Some(o), Some(x)) = (w.as_object_mut(), extra.as_object()) {
+            for (k, v) in x {
+                o.insert(k.clone(), v.clone());
+            }
+        }
+        w
+    };
+    let mut seen = vec![0usize; entries.len()];
+    for (event, groups) in hooks {
+        for g in groups.as_array().into_iter().flatten() {
+            for h in g
+                .get("hooks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if !is_ours(h) {
+                    continue;
+                }
+                let alone = g
+                    .get("hooks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| a.len() == 1);
+                let Some(i) = entries.iter().position(|(e, matcher, command, timeout)| {
+                    e == event
+                        && g.get("matcher").and_then(Value::as_str) == *matcher
+                        && alone
+                        && *h == want(command, *timeout)
+                }) else {
+                    return false;
+                };
+                seen[i] += 1;
+            }
+        }
+    }
+    seen.iter().all(|n| *n == 1)
+}
+
 fn read_json(path: &Path) -> Result<Value> {
     match std::fs::read_to_string(path) {
         Ok(s) if !s.trim().is_empty() => {
@@ -144,19 +238,46 @@ fn read_json(path: &Path) -> Result<Value> {
     }
 }
 
+/// Copy `path` beside itself before changing it. Names never collide: two changes in the
+/// same millisecond (two viewer requests) get separate copies.
 fn backup(path: &Path) -> Result<()> {
-    if path.exists() {
-        let b = PathBuf::from(format!("{}.bak-mnem-{}", path.display(), db::now_ms()));
-        std::fs::copy(path, &b)?;
-        println!("  backup: {}", b.display());
+    if !path.exists() {
+        return Ok(());
     }
-    Ok(())
+    let ms = db::now_ms();
+    for n in 0..100 {
+        let name = if n == 0 {
+            format!("{}.bak-mnem-{ms}", path.display())
+        } else {
+            format!("{}.bak-mnem-{ms}-{n}", path.display())
+        };
+        let b = PathBuf::from(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&b)
+        {
+            Ok(mut f) => {
+                std::io::copy(&mut std::fs::File::open(path)?, &mut f)?;
+                say!("  backup: {}", b.display());
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("no free backup name beside {}", path.display())
 }
 
 fn write_json(p: &Plan, path: &Path, doc: &Value) -> Result<()> {
     let s = serde_json::to_string_pretty(doc)? + "\n";
+    // Unchanged: no backup, no write (and the agent sees no modified file).
+    if read_json(path).ok().as_ref() == Some(doc) && path.exists() {
+        say!("  unchanged: {}", path.display());
+        return Ok(());
+    }
     if p.dry_run {
-        println!("  would write {} ({} bytes)", path.display(), s.len());
+        say!("  would write {} ({} bytes)", path.display(), s.len());
         return Ok(());
     }
     backup(path)?;
@@ -164,30 +285,144 @@ fn write_json(p: &Plan, path: &Path, doc: &Value) -> Result<()> {
         std::fs::create_dir_all(d)?;
     }
     std::fs::write(path, s)?;
-    println!("  wrote {}", path.display());
+    say!("  wrote {}", path.display());
     Ok(())
 }
 
-fn claude(p: &Plan) -> Result<()> {
-    for dir in ingest::claude_config_dirs()
+/// Claude Code profiles to wire: every existing one, and the default one even before
+/// Claude Code is installed (it reads what is already there on its first start).
+fn claude_dirs() -> Vec<PathBuf> {
+    let default = db::home().join(".claude");
+    let mut dirs: Vec<PathBuf> = ingest::claude_config_dirs()
         .into_iter()
         .filter(|d| d.is_dir())
-    {
-        println!("Claude Code ({})", dir.display());
+        .collect();
+    if !dirs.contains(&default) {
+        dirs.insert(0, default);
+    }
+    dirs
+}
+
+fn claude(p: &Plan) -> Result<()> {
+    for dir in claude_dirs() {
+        say!("Claude Code ({})", dir.display());
         let path = dir.join("settings.json");
         let mut doc = read_json(&path)?;
         merge_hooks(&mut doc, &hook_entries(&p.bin, "claude"), &json!({}))?;
         for (event, _, cmd, _) in hook_entries(&p.bin, "claude") {
-            println!("  hook {event}: {cmd}");
+            say!("  hook {event}: {cmd}");
         }
         write_json(p, &path, &doc)?;
-        mcp_via_cli(
+        let registered = mcp_via_cli(
             p,
             "claude",
             &claude_env(&dir),
             &["mcp", "remove", "--scope", "user", "mnem"],
             &["mcp", "add", "--scope", "user", "mnem", "--", &p.bin, "mcp"],
         )?;
+        // Checked, not assumed: the command can succeed yet write somewhere else.
+        if !registered || (!p.dry_run && !claude_has_mcp(&dir)) {
+            claude_mcp_direct(p, &dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// A Claude Code state file holding nothing but what mnem writes before Claude Code is
+/// installed (`{"mcpServers": {"mnem": ...}}`).
+pub(crate) fn only_mnem_state(doc: &Value) -> bool {
+    doc.as_object().is_some_and(|o| o.len() == 1)
+        && doc
+            .get("mcpServers")
+            .and_then(Value::as_object)
+            .is_some_and(|m| m.len() == 1 && m.contains_key("mnem"))
+}
+
+/// Where a Claude Code profile keeps its user-scope MCP servers: `.claude.json` in the
+/// profile folder, or in the home folder for the default profile.
+pub(crate) fn claude_state(dir: &Path) -> PathBuf {
+    if dir == db::home().join(".claude") {
+        db::home().join(".claude.json")
+    } else {
+        dir.join(".claude.json")
+    }
+}
+
+/// The command mnem's tools are registered with in this profile (user scope), if any.
+pub(crate) fn claude_mcp_command(dir: &Path) -> Option<String> {
+    let v = read_json(&claude_state(dir)).ok()?;
+    let m = v.get("mcpServers")?.get("mnem")?;
+    let args_ok = m
+        .get("args")
+        .and_then(Value::as_array)
+        .is_some_and(|a| a.first().and_then(Value::as_str) == Some("mcp"));
+    args_ok
+        .then(|| m.get("command")?.as_str().map(str::to_string))
+        .flatten()
+}
+
+/// Whether the profile has mnem's tools registered at user scope.
+pub(crate) fn claude_has_mcp(dir: &Path) -> bool {
+    claude_mcp_command(dir).is_some()
+}
+
+/// Register mnem's tools before Claude Code exists: create the profile's `.claude.json`
+/// with just mnem's server, as `claude mcp add --scope user` would write it. Only when
+/// the file is absent (created exclusively, so a Claude Code that starts meanwhile wins):
+/// once Claude Code keeps its state there, only its own `claude mcp` edits it.
+fn claude_mcp_direct(p: &Plan, dir: &Path) -> Result<()> {
+    let path = claude_state(dir);
+    // Already registered (mnem created this file on an earlier run): nothing to do.
+    if claude_mcp_command(dir).as_deref() == Some(p.bin.as_str()) {
+        say!("  mcp: already registered in {}", path.display());
+        return Ok(());
+    }
+    if path.exists() {
+        say!(
+            "  mcp: NOT registered: {} belongs to Claude Code and its `claude` command is not found; run: {}claude mcp add --scope user mnem -- {} mcp",
+            path.display(),
+            claude_env(dir)
+                .iter()
+                .map(|(k, v)| format!("{k}={v} "))
+                .collect::<String>(),
+            p.bin
+        );
+        return Ok(());
+    }
+    let body = serde_json::to_string_pretty(&json!({ "mcpServers": { "mnem": {
+        "type": "stdio", "command": p.bin, "args": ["mcp"], "env": {}
+    } } }))?
+        + "\n";
+    if p.dry_run {
+        say!("  would create {} with mnem's tools", path.display());
+        return Ok(());
+    }
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts.open(&path) {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(body.as_bytes())?;
+            say!(
+                "  mcp: created {} with mnem's tools (Claude Code is not installed yet)",
+                path.display()
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            say!(
+                "  mcp: {} appeared meanwhile; left to Claude Code",
+                path.display()
+            );
+        }
+        Err(e) => return Err(e.into()),
     }
     Ok(())
 }
@@ -205,7 +440,7 @@ fn claude_env(dir: &Path) -> Vec<(String, String)> {
 }
 
 fn codex(p: &Plan) -> Result<()> {
-    println!("Codex");
+    say!("Codex");
     let path = db::home().join(".codex/hooks.json");
     let mut doc = read_json(&path)?;
     // Codex caps injected context per hook; mnem's session context is ~8 KB.
@@ -215,37 +450,39 @@ fn codex(p: &Plan) -> Result<()> {
         &json!({ "additionalContextLimit": 12000 }),
     )?;
     for (event, _, cmd, _) in hook_entries(&p.bin, "codex") {
-        println!("  hook {event}: {cmd}");
+        say!("  hook {event}: {cmd}");
     }
     write_json(p, &path, &doc)?;
-    // MCP server: append a [mcp_servers.mnem] table unless one exists.
+    // MCP server: `[mcp_servers.mnem]` running this binary. Added when missing; its
+    // `command` and `args` corrected in place when they differ (a moved binary), with any
+    // other keys the user put in the table kept.
     let cfg = db::home().join(".codex/config.toml");
     let cur = std::fs::read_to_string(&cfg).unwrap_or_default();
-    if cur.contains("[mcp_servers.mnem]") {
-        println!("  mcp: [mcp_servers.mnem] already in {}", cfg.display());
+    let next = set_mnem_server(&cur, &p.bin)
+        .with_context(|| format!("{} is not valid TOML; left unchanged", cfg.display()))?;
+    if next == cur {
+        say!("  mcp: [mcp_servers.mnem] already in {}", cfg.display());
+    } else if p.dry_run {
+        say!("  would set [mcp_servers.mnem] in {}", cfg.display());
     } else {
-        let block = format!(
-            "\n[mcp_servers.mnem]\ncommand = {:?}\nargs = [\"mcp\"]\n",
-            p.bin
-        );
-        if p.dry_run {
-            println!("  would append to {}:{block}", cfg.display());
-        } else {
-            backup(&cfg)?;
-            std::fs::write(&cfg, cur + &block)?;
-            println!("  mcp: added [mcp_servers.mnem] to {}", cfg.display());
+        backup(&cfg)?;
+        if let Some(d) = cfg.parent() {
+            std::fs::create_dir_all(d)?;
         }
+        std::fs::write(&cfg, next)?;
+        say!("  mcp: set [mcp_servers.mnem] in {}", cfg.display());
     }
     Ok(())
 }
 
+/// Run the agent's own command to register mnem's tools. True when it did.
 fn mcp_via_cli(
     p: &Plan,
     cli: &str,
     env: &[(String, String)],
     remove: &[&str],
     add: &[&str],
-) -> Result<()> {
+) -> Result<bool> {
     let shown = format!(
         "{}{cli} {}",
         env.iter()
@@ -253,12 +490,17 @@ fn mcp_via_cli(
             .collect::<String>(),
         add.join(" ")
     );
+    // Found even when not on PATH (the viewer runs under a service with a short PATH).
+    let Some(exe) = crate::agents::command_path(cli) else {
+        say!("  mcp: {cli} is not installed yet");
+        return Ok(false);
+    };
     if p.dry_run {
-        println!("  would run: {shown}");
-        return Ok(());
+        say!("  would run: {shown}");
+        return Ok(true);
     }
     let run = |args: &[&str]| {
-        let mut c = Command::new(cli);
+        let mut c = Command::new(&exe);
         c.args(args);
         for (k, v) in env {
             c.env(k, v);
@@ -266,31 +508,43 @@ fn mcp_via_cli(
         c.output()
     };
     let _ = run(remove);
-    match run(add) {
-        Ok(o) if o.status.success() => println!("  mcp: {shown}"),
-        Ok(o) => println!(
-            "  mcp: `{shown}` failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => println!("  mcp: {cli} not found ({e}); run manually: {shown}"),
-    }
-    Ok(())
+    Ok(match run(add) {
+        Ok(o) if o.status.success() => {
+            say!("  mcp: {shown}");
+            true
+        }
+        Ok(o) => {
+            say!(
+                "  mcp: `{shown}` failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            say!("  mcp: {cli} could not run ({e})");
+            false
+        }
+    })
 }
 
 fn pi(p: &Plan) -> Result<()> {
-    println!("pi");
+    say!("pi");
     let dir = db::home().join(".pi/agent/extensions/mnem");
     let path = dir.join("index.ts");
     // JSON string encoding is a valid TS string literal (escapes Windows backslashes).
     let src = PI_EXTENSION.replace("__MNEM_BIN__", &serde_json::to_string(&p.bin)?);
+    if std::fs::read_to_string(&path).is_ok_and(|cur| cur == src) {
+        say!("  unchanged: {}", path.display());
+        return Ok(());
+    }
     if p.dry_run {
-        println!("  would write {} ({} bytes)", path.display(), src.len());
+        say!("  would write {} ({} bytes)", path.display(), src.len());
         return Ok(());
     }
     std::fs::create_dir_all(&dir)?;
     backup(&path)?;
     std::fs::write(&path, src)?;
-    println!("  wrote {}", path.display());
+    say!("  wrote {}", path.display());
     Ok(())
 }
 
@@ -447,14 +701,14 @@ export default function (pi: ExtensionAPI) {
 "#;
 
 fn watch_service(p: &Plan) -> Result<()> {
-    println!("watch service");
+    say!("watch service");
     let unit = db::home().join(".config/systemd/user/mnem-watch.service");
     let body = format!(
         "[Unit]\nDescription=mnem transcript watcher\n\n[Service]\nExecStart={} watch\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n",
         p.bin
     );
     if p.dry_run {
-        println!("  would write {} and enable it", unit.display());
+        say!("  would write {} and enable it", unit.display());
         return Ok(());
     }
     std::fs::create_dir_all(unit.parent().expect("has parent"))?;
@@ -467,9 +721,9 @@ fn watch_service(p: &Plan) -> Result<()> {
     };
     if ok(&["--user", "daemon-reload"]) && ok(&["--user", "enable", "--now", "mnem-watch.service"])
     {
-        println!("  enabled and started mnem-watch.service");
+        say!("  enabled and started mnem-watch.service");
     } else {
-        println!(
+        say!(
             "  wrote {}; start it with: systemctl --user enable --now mnem-watch.service",
             unit.display()
         );
@@ -503,7 +757,7 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
         }
         let mut doc = read_json(&path)?;
         let n = strip_ours(&mut doc);
-        println!("{name}: {n} mnem hook(s) in {}", path.display());
+        say!("{name}: {n} mnem hook(s) in {}", path.display());
         if n > 0 {
             write_json(&p, &path, &doc)?;
         }
@@ -512,31 +766,51 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
         .into_iter()
         .filter(|d| d.is_dir())
     {
-        mcp_via_cli(
+        let removed = mcp_via_cli(
             &p,
             "claude",
             &claude_env(&dir),
             &["--version"],
             &["mcp", "remove", "--scope", "user", "mnem"],
         )?;
+        // Without the `claude` command: a state file holding only what mnem created before
+        // Claude Code was installed is mnem's to delete; anything else is Claude Code's.
+        let state = claude_state(&dir);
+        if !removed && let Ok(doc) = read_json(&state) {
+            if only_mnem_state(&doc) {
+                if dry_run {
+                    say!("  would remove {}", state.display());
+                } else {
+                    backup(&state)?;
+                    std::fs::remove_file(&state)?;
+                    say!("  removed {} (mnem had created it)", state.display());
+                }
+            } else if doc.get("mcpServers").and_then(|m| m.get("mnem")).is_some() {
+                say!(
+                    "  mcp: still registered in {}; run: claude mcp remove --scope user mnem",
+                    state.display()
+                );
+            }
+        }
     }
     let cfg = db::home().join(".codex/config.toml");
     if let Ok(cur) = std::fs::read_to_string(&cfg) {
-        let stripped = remove_toml_table(&cur, "mcp_servers.mnem");
+        let stripped = remove_mnem_server(&cur)
+            .with_context(|| format!("{} is not valid TOML; left unchanged", cfg.display()))?;
         if stripped != cur {
             if dry_run {
-                println!("  would remove [mcp_servers.mnem] from {}", cfg.display());
+                say!("  would remove [mcp_servers.mnem] from {}", cfg.display());
             } else {
                 backup(&cfg)?;
                 std::fs::write(&cfg, stripped)?;
-                println!("  removed [mcp_servers.mnem] from {}", cfg.display());
+                say!("  removed [mcp_servers.mnem] from {}", cfg.display());
             }
         }
     }
     let unit = db::home().join(".config/systemd/user/mnem-watch.service");
     if unit.exists() {
         if dry_run {
-            println!("  would stop and remove {}", unit.display());
+            say!("  would stop and remove {}", unit.display());
         } else {
             let _ = Command::new("systemctl")
                 .args(["--user", "disable", "--now", "mnem-watch.service"])
@@ -545,44 +819,92 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
             let _ = Command::new("systemctl")
                 .args(["--user", "daemon-reload"])
                 .output();
-            println!("  removed {}", unit.display());
+            say!("  removed {}", unit.display());
         }
     }
     let ext = db::home().join(".pi/agent/extensions/mnem");
     if ext.exists() {
         if dry_run {
-            println!("  would remove {}", ext.display());
+            say!("  would remove {}", ext.display());
         } else {
             std::fs::remove_dir_all(&ext)?;
-            println!("  removed {}", ext.display());
+            say!("  removed {}", ext.display());
         }
     }
-    println!(
+    say!(
         "Data is kept in {} (delete it yourself if you want).",
         db::data_dir().display()
     );
     Ok(())
 }
 
-/// Drop `[name]` and its keys (up to the next table header) from a TOML document.
-fn remove_toml_table(src: &str, name: &str) -> String {
-    let header = format!("[{name}]");
-    let mut out = Vec::new();
-    let mut skipping = false;
-    for line in src.lines() {
-        let t = line.trim();
-        if t.starts_with('[') {
-            skipping = t == header || t.starts_with(&format!("[{name}."));
+/// `config.toml` with `[mcp_servers.mnem]` running `bin` (`args = ["mcp"]`): added when
+/// missing, `command` and `args` corrected when they differ, every other key, comment and
+/// table kept as it was (format-preserving edit). Unchanged text when already right.
+fn set_mnem_server(src: &str, bin: &str) -> Result<String> {
+    use toml_edit::{Array, DocumentMut, Item, Table, value};
+    let mut doc: DocumentMut = src.parse()?;
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert_with(|| {
+            let mut t = Table::new();
+            t.set_implicit(true);
+            Item::Table(t)
+        })
+        .as_table_like_mut()
+        .context("mcp_servers is not a table")?;
+    let right = servers.get("mnem").is_some_and(|m| {
+        m.get("command").and_then(|c| c.as_str()) == Some(bin)
+            && m.get("args")
+                .and_then(|a| a.as_array())
+                .is_some_and(|a| a.len() == 1 && a.get(0).and_then(|v| v.as_str()) == Some("mcp"))
+    });
+    if right {
+        return Ok(src.to_string());
+    }
+    let mnem = servers
+        .entry("mnem")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .context("mcp_servers.mnem is not a table")?;
+    let mut args = Array::new();
+    args.push("mcp");
+    // Only the value that differs changes, keeping the comments around it.
+    set_keeping_decor(mnem, "command", value(bin));
+    set_keeping_decor(mnem, "args", value(args));
+    Ok(doc.to_string())
+}
+
+/// Set `key` to `new` unless it already equals it, keeping the old value's surrounding
+/// whitespace and comments (and the key's own formatting, which setting in place keeps).
+fn set_keeping_decor(t: &mut dyn toml_edit::TableLike, key: &str, mut new: toml_edit::Item) {
+    match t.get_mut(key) {
+        Some(old) if old.to_string().trim() == new.to_string().trim() => {}
+        Some(old) => {
+            if let (Some(o), Some(n)) = (old.as_value(), new.as_value_mut()) {
+                *n.decor_mut() = o.decor().clone();
+            }
+            *old = new;
         }
-        if !skipping {
-            out.push(line);
+        None => {
+            t.insert(key, new);
         }
     }
-    let mut s = out.join("\n");
-    if src.ends_with('\n') {
-        s.push('\n');
-    }
-    s
+}
+
+/// `config.toml` without `[mcp_servers.mnem]`; everything else as it was.
+fn remove_mnem_server(src: &str) -> Result<String> {
+    let mut doc: toml_edit::DocumentMut = src.parse()?;
+    let removed = doc
+        .get_mut("mcp_servers")
+        .and_then(|s| s.as_table_like_mut())
+        .and_then(|s| s.remove("mnem"))
+        .is_some();
+    Ok(if removed {
+        doc.to_string()
+    } else {
+        src.to_string()
+    })
 }
 
 pub fn default_bin() -> String {
@@ -626,13 +948,114 @@ mod tests {
         );
     }
 
+    /// Re-running install keeps mnem's hooks where they are (Codex trust is by position),
+    /// and moves them only when they need changing.
     #[test]
-    fn removes_toml_table_only() {
-        let src = "a = 1\n[mcp_servers.x]\ncommand = \"x\"\n[mcp_servers.mnem]\ncommand = \"m\"\nargs = [\"mcp\"]\n[z]\nk = 2\n";
+    fn a_repeat_install_moves_no_hook() {
+        let extra = json!({ "additionalContextLimit": 12000 });
+        let mut doc = json!({ "hooks": { "SessionStart": [
+            { "hooks": [{ "type": "command", "command": "gh-axi" }] }
+        ] } });
+        merge_hooks(&mut doc, &hook_entries("/x/mnem", "codex"), &extra).unwrap();
+        // The user adds a hook after mnem's.
+        doc["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "hooks": [{ "type": "command", "command": "later" }] }));
+        let before = doc.clone();
+        merge_hooks(&mut doc, &hook_entries("/x/mnem", "codex"), &extra).unwrap();
+        assert_eq!(doc, before, "nothing moved");
+        // A moved binary is a real change: mnem's hooks are replaced.
+        merge_hooks(&mut doc, &hook_entries("/y/mnem", "codex"), &extra).unwrap();
+        assert!(doc.to_string().contains("/y/mnem hook codex prompt"));
+        assert!(!doc.to_string().contains("/x/mnem"));
         assert_eq!(
-            remove_toml_table(src, "mcp_servers.mnem"),
-            "a = 1\n[mcp_servers.x]\ncommand = \"x\"\n[z]\nk = 2\n"
+            doc["hooks"]["SessionStart"][1]["hooks"][0]["command"],
+            "later"
         );
+    }
+
+    /// A duplicated hook does not stand in for a missing one: the set is repaired.
+    #[test]
+    fn duplicates_do_not_hide_a_missing_hook() {
+        let entries = hook_entries("/x/mnem", "claude");
+        let mut doc = json!({});
+        merge_hooks(&mut doc, &entries, &json!({})).unwrap();
+        assert!(ours_match(&doc, &entries, &json!({})));
+        // PostToolUse gone, Stop twice: the same count, not the same set.
+        let stop = doc["hooks"]["Stop"][0].clone();
+        doc["hooks"]["Stop"].as_array_mut().unwrap().push(stop);
+        doc["hooks"].as_object_mut().unwrap().remove("PostToolUse");
+        assert!(!ours_match(&doc, &entries, &json!({})));
+        merge_hooks(&mut doc, &entries, &json!({})).unwrap();
+        assert!(ours_match(&doc, &entries, &json!({})));
+        assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert!(doc["hooks"]["PostToolUse"].is_array());
+    }
+
+    #[test]
+    fn codex_server_is_edited_structurally() {
+        // Multi-line array, comments, a commented-out header and other keys all survive.
+        let src = "# top\nmodel = \"x\"\n\n# [mcp_servers.mnem] (old, commented)\n[mcp_servers.mnem]\ncommand = \"/old/mnem\" # moved\nargs = [\n  \"mcp\",\n  \"--old\",\n]\nenv = { X = \"1\" }\n\n[mcp_servers.other]\ncommand = \"o\"\n";
+        let out = set_mnem_server(src, "/new/mnem").unwrap();
+        let doc: toml_edit::DocumentMut = out.parse().expect("still valid TOML");
+        assert_eq!(
+            doc["mcp_servers"]["mnem"]["command"].as_str(),
+            Some("/new/mnem")
+        );
+        let args: Vec<&str> = doc["mcp_servers"]["mnem"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(args, ["mcp"]);
+        assert_eq!(doc["mcp_servers"]["mnem"]["env"]["X"].as_str(), Some("1"));
+        assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("o"));
+        assert!(out.starts_with("# top\nmodel = \"x\""), "{out}");
+        assert!(
+            out.contains("command = \"/new/mnem\" # moved"),
+            "comment kept: {out}"
+        );
+        assert!(
+            out.contains("# [mcp_servers.mnem] (old, commented)"),
+            "{out}"
+        );
+        assert_eq!(
+            out.matches("[mcp_servers.mnem]").count(),
+            2,
+            "one real, one comment: {out}"
+        );
+        // Already right: byte for byte the same.
+        assert_eq!(set_mnem_server(&out, "/new/mnem").unwrap(), out);
+        // Missing: added; a file without it keeps its text.
+        let added = set_mnem_server("model = \"x\"\n", "/m").unwrap();
+        assert!(added.starts_with("model = \"x\"\n"), "{added}");
+        let d: toml_edit::DocumentMut = added.parse().unwrap();
+        assert_eq!(d["mcp_servers"]["mnem"]["command"].as_str(), Some("/m"));
+        // Invalid TOML is refused, never rewritten.
+        assert!(set_mnem_server("[broken\n", "/m").is_err());
+        // Removal takes only mnem's table.
+        let gone = remove_mnem_server(&out).unwrap();
+        let d: toml_edit::DocumentMut = gone.parse().unwrap();
+        assert!(d["mcp_servers"].get("mnem").is_none());
+        assert_eq!(d["mcp_servers"]["other"]["command"].as_str(), Some("o"));
+        assert_eq!(remove_mnem_server("a = 1\n").unwrap(), "a = 1\n");
+    }
+
+    #[test]
+    fn collected_reports_survive_a_panic_and_nest() {
+        let (_, outer) = collecting(|| {
+            say!("outer one");
+            let (_, inner) = collecting(|| say!("inner"));
+            assert_eq!(inner, ["inner"]);
+            say!("outer two");
+        });
+        assert_eq!(outer, ["outer one", "outer two"]);
+        let caught = std::panic::catch_unwind(|| collecting(|| panic!("boom")));
+        assert!(caught.is_err());
+        // Nothing is left collecting on this thread: the next report is not swallowed.
+        assert!(LOG.with(|l| l.borrow().is_none()));
     }
 
     #[test]

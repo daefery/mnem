@@ -365,6 +365,81 @@
 
   // ---------- wiring ----------
 
+  // ---------- agents: which are not connected, and a button to connect them ----------
+
+  let agentsShown = "";
+  async function loadAgents() {
+    let data;
+    try {
+      data = await getJSON("/api/agents");
+    } catch (e) {
+      console.error(e);
+      return;
+    }
+    const need = data.agents.filter((a) => a.state === "needs_install" || a.state === "needs_trust");
+    const box = $("agents");
+    // Rebuilt only when something changed (a click in progress is not interrupted).
+    const key = JSON.stringify(need.map((a) => [a.agent, a.state, a.hooks, a.tools, a.stale_binary]));
+    if (key === agentsShown) return;
+    agentsShown = key;
+    if (!need.length) {
+      box.hidden = true;
+      box.replaceChildren();
+      return;
+    }
+    box.replaceChildren(
+      el("h3", {}, need.length === 1 ? "1 coding agent is not getting memory" : `${need.length} coding agents are not getting memory`),
+      ...need.map(agentRow));
+    box.hidden = false;
+  }
+
+  function agentRow(a) {
+    const missing = [];
+    if (!a.hooks) missing.push("memory at session start and on each prompt");
+    if (!a.tools) missing.push("memory tools");
+    if (a.stale_binary) missing.push("its mnem link points at a program that no longer exists");
+    const status = el("span", { class: "move-status", role: "status" });
+    if (a.state === "needs_trust") {
+      return el("div", { class: "mnem-agent" },
+        el("b", {}, a.name),
+        el("span", { class: "why" }, "Connected, but Codex has not been told to trust mnem's hooks yet. Open Codex, type ",
+          el("code", {}, "/hooks"), ", review mnem's hooks and trust them."),
+        el("button", { class: "move-btn", onclick: () => loadAgents() }, "Check again"),
+        status);
+    }
+    const button = el("button", { class: "move-btn primary" }, `Connect ${a.name}`);
+    const row = el("div", { class: "mnem-agent" },
+      el("b", {}, a.name),
+      el("span", { class: "why" }, `Installed, but missing ${missing.join(" and ")}.`),
+      button,
+      status);
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      setStatusEl(status, `Connecting ${a.name}…`);
+      try {
+        const r = await postJSON(`/api/agents/connect?agent=${encodeURIComponent(a.agent)}`);
+        const s = r.status;
+        if (s.state === "connected") setStatusEl(status, `${a.name} is connected. New sessions get memory; restart one that is open.`);
+        else if (s.state === "needs_trust") setStatusEl(status, "Hooks written. Now open Codex, type /hooks and trust mnem's hooks.");
+        else setStatusEl(status, `Still not connected: ${s.action || "see the details below"}`, true);
+        row.append(el("pre", {}, (r.log || []).join("\n")));
+      } catch (e) {
+        setStatusEl(status, `Could not connect: ${e.message}`, true);
+        if (e.data && e.data.log) row.append(el("pre", {}, e.data.log.join("\n")));
+      } finally {
+        button.disabled = false;
+        agentsShown = ""; // show the new state on the next check
+        setTimeout(loadAgents, 4000);
+      }
+    });
+    return row;
+  }
+
+  function setStatusEl(s, text, error = false) {
+    s.textContent = text;
+    s.classList.toggle("error", error);
+  }
+
   // ---------- backup & move ----------
 
   const fmtBytes = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : `${Math.max(1, Math.round(n / 1e6))} MB`);
@@ -640,13 +715,16 @@
 
     loadProjects().catch(console.error);
     loadHealth();
+    loadAgents();
     reset();
     setInterval(poll, 4000);
     setInterval(() => document.hidden || loadHealth(), 15000);
+    setInterval(() => document.hidden || loadAgents(), 60000);
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) return;
       poll();
       loadHealth();
+      loadAgents();
     });
   }
 

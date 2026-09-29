@@ -15,6 +15,7 @@ rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+toml_edit = "0.25.15"
 ureq = { version = "3.4.2", features = ["json"] }
 walkdir = "2.5.0"
 xxhash-rust = { version = "0.8.18", features = ["xxh3"] }

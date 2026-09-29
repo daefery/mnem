@@ -91,6 +91,22 @@ fn back_up_download_and_import_on_another_machine() {
 
     // Changing actions need the viewer's header and origin.
     assert_eq!(request(port_a, "POST", "/api/backups", "", b"").status, 403);
+    // Connecting an agent writes its settings: the same guard.
+    for extra in ["", "X-Mnem: 1\r\nOrigin: http://evil.example\r\n"] {
+        assert_eq!(
+            request(port_a, "POST", "/api/agents/connect?agent=pi", extra, b"").status,
+            403
+        );
+    }
+    assert_eq!(
+        request(port_a, "GET", "/api/agents/connect?agent=pi", "", b"").status,
+        404,
+        "not reachable by GET"
+    );
+    assert_eq!(
+        request(port_a, "POST", "/api/agents/connect?agent=nope", OK, b"").status,
+        400
+    );
     let evil = "X-Mnem: 1\r\nOrigin: http://evil.example\r\n";
     assert_eq!(
         request(port_a, "POST", "/api/backups", evil, b"").status,

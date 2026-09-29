@@ -387,6 +387,7 @@ fn route(path: &str, q: &HashMap<String, String>, db_path: &Path) -> Result<Resp
         "/api/feed" => Response::json(&feed(&open(db_path)?, q)?),
         "/api/projects" => Response::json(&projects(&open(db_path)?)?),
         "/api/stats" => Response::json(&stats(&open(db_path)?)?),
+        "/api/agents" => Response::json(&json!({ "agents": crate::agents::status_all() })),
         "/api/embed" => {
             let text = crate::text::head(
                 q.get("q").map(String::as_str).unwrap_or_default(),
@@ -656,6 +657,30 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                 let _ = std::fs::remove_file(incoming().join(name));
             }
             Response::json(&json!({ "discarded": true }))
+        }
+        // Connect one agent: what `mnem install --only <agent>` does, reported back.
+        "/api/agents/connect" => {
+            let Some(agent) = q.get("agent").and_then(|a| crate::agents::Agent::parse(a)) else {
+                return Ok(Response::error("400 Bad Request", "unknown agent"));
+            };
+            let plan = crate::install::Plan {
+                bin: crate::install::default_bin(),
+                dry_run: false,
+                claude: agent == crate::agents::Agent::Claude,
+                codex: agent == crate::agents::Agent::Codex,
+                pi: agent == crate::agents::Agent::Pi,
+                watch: false,
+            };
+            let (result, log) = crate::install::collecting(|| crate::install::run(&plan));
+            let status = crate::agents::status(agent);
+            match result {
+                Ok(()) => Response::json(&json!({ "status": status, "log": log })),
+                Err(e) => Response::text(
+                    "500 Internal Server Error",
+                    "application/json; charset=utf-8",
+                    json!({ "error": format!("{e:#}"), "status": status, "log": log }).to_string(),
+                ),
+            }
         }
         "/api/restart" => {
             if !under_service() {

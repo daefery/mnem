@@ -487,8 +487,9 @@
       justify-content: center;
     }
 
-    .feed-content {
+    .feed-column {
       max-width: 650px;
+      width: 100%;
     }
 
     .card {
@@ -1408,7 +1409,21 @@
       padding: 40px;
       color: #8b949e;
     }
-    .move-preview[hidden], .move-progress[hidden] { display: none; }
+    .move-preview[hidden], .move-progress[hidden], .mnem-agents[hidden] { display: none; }
+    .mnem-agents {
+      margin-bottom: 24px; padding: 14px 16px;
+      border: 1px solid var(--color-border-summary); border-radius: 8px;
+      background: var(--color-bg-summary); color: var(--color-text-primary);
+      font-size: 13px; line-height: 1.5;
+    }
+    .mnem-agents h3 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--color-text-summary); }
+    .mnem-agent { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 6px 0; border-top: 1px solid var(--color-border-secondary); }
+    .mnem-agent:first-of-type { border-top: 0; }
+    .mnem-agent b { min-width: 92px; }
+    .mnem-agent .why { flex: 1 1 260px; color: var(--color-text-secondary); }
+    .mnem-agent code { font-family: var(--font-terminal); font-size: 12px; }
+    .mnem-agent .move-status { flex-basis: 100%; }
+    .mnem-agent pre { flex-basis: 100%; margin: 4px 0 0; padding: 8px; max-height: 160px; overflow: auto; font: 11px/1.45 var(--font-terminal); background: var(--color-bg-card); border: 1px solid var(--color-border-primary); border-radius: 6px; white-space: pre-wrap; }
     .move-modal { max-width: 760px; height: auto; max-height: 90vh; }
     .move-body { overflow-y: auto; padding: 8px 24px 24px; display: flex; flex-direction: column; gap: 4px; }
     .move-section { padding: 16px 0; border-bottom: 1px solid var(--color-border-primary); display: flex; flex-direction: column; gap: 10px; }

@@ -219,7 +219,17 @@ pub fn run(conn: &Connection) -> Result<bool> {
             }
         );
     }
-    let alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+    // An installed agent that is not connected gets no memory: that is a health problem.
+    let agents = crate::agents::status_all();
+    println!("agents");
+    print!("{}", crate::agents::render(&agents));
+    let mut alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+    alerts.extend(
+        agents
+            .iter()
+            .filter(|a| a.state == "needs_install" || a.state == "needs_trust")
+            .filter_map(|a| a.action.clone()),
+    );
     if !alerts.is_empty() {
         healthy = false;
         println!("alerts");
