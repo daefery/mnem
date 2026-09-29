@@ -182,13 +182,25 @@ pub fn build_real(conn: &Connection, n: usize) -> Result<(usize, usize)> {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
+    split_real(rows, "real", |session| {
+        question_key(session).ends_with(['0', '2', '4', '6', '8', 'a', 'c', 'e'])
+    })
+}
+
+/// Write sampled prompts into `<name>-dev` and `<name>-test`, split by session so one
+/// conversation never lands in both.
+fn split_real(
+    rows: Vec<(String, i64, String, String)>,
+    name: &str,
+    dev_half: impl Fn(&str) -> bool,
+) -> Result<(usize, usize)> {
     let dir = db::data_dir().join("eval");
     std::fs::create_dir_all(&dir)?;
-    let mut dev = std::fs::File::create(set_path("real-dev"))?;
-    let mut test = std::fs::File::create(set_path("real-test"))?;
+    let mut dev = std::fs::File::create(set_path(&format!("{name}-dev")))?;
+    let mut test = std::fs::File::create(set_path(&format!("{name}-test")))?;
     let (mut a, mut b) = (0, 0);
     for (question, ts, project, session) in rows {
-        let dev_half = question_key(&session).ends_with(['0', '2', '4', '6', '8', 'a', 'c', 'e']);
+        let dev_half = dev_half(&session);
         let case = serde_json::to_string(&Case {
             id: None,
             ids: vec![],
@@ -212,6 +224,67 @@ pub fn build_real(conn: &Connection, n: usize) -> Result<(usize, usize)> {
 
 /// Memories about a file offered with each edit (at most).
 pub const FILE_TOP: usize = 3;
+
+/// Prompts typed once mnem distilled sessions itself: from the last `days` days, in
+/// projects that already held at least 20 memories mnem distilled when the prompt was
+/// typed, so recall is measured on the memories mnem now writes (the `real` sets mostly
+/// predate them and see imported claude-mem memories). No project fills more than half
+/// the sample and no session more than 6 prompts; sessions are dealt to the two halves
+/// largest first, each to the smaller half, since there are few and they run long.
+/// Prompts an agent wrote for another agent are left out: ones that point at a Claude
+/// Code scratchpad (/tmp/claude-) or ask for a verbatim reply (tool tests).
+pub fn build_recent(conn: &Connection, n: usize, days: i64) -> Result<(usize, usize)> {
+    let mut st = conn.prepare(
+        "SELECT e.text, e.ts, s.project, s.id FROM events e JOIN sessions s ON s.id = e.session_id
+         WHERE e.kind = 'prompt' AND e.label IS NULL AND e.thread IS NULL AND e.ts > ?1
+           AND length(e.text) BETWEEN 40 AND 800 AND s.project NOT LIKE '/%'
+           AND e.text NOT LIKE '%/tmp/claude-%' AND lower(e.text) NOT LIKE '%reply with only%'
+           AND lower(e.text) NOT LIKE '%reply with exactly%'
+           AND (SELECT count(*) FROM memories m WHERE m.origin = 'mnem' AND m.project = s.project
+                  AND m.created_at < e.ts) >= 20
+         ORDER BY abs(random())",
+    )?;
+    let all: Vec<(String, i64, String, String)> = st
+        .query_map([db::now_ms() - days * 86_400_000], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    use std::collections::HashMap;
+    let cap = n.div_ceil(2);
+    let mut per_project: HashMap<String, usize> = HashMap::new();
+    let mut per_session: HashMap<String, usize> = HashMap::new();
+    let rows: Vec<_> = all
+        .into_iter()
+        .filter(|r| {
+            let s = per_session.entry(r.3.clone()).or_default();
+            *s += 1;
+            if *s > 6 {
+                return false;
+            }
+            let p = per_project.entry(r.2.clone()).or_default();
+            *p += 1;
+            *p <= cap
+        })
+        .take(n)
+        .collect();
+    let mut sizes: HashMap<&str, usize> = HashMap::new();
+    for r in &rows {
+        *sizes.entry(r.3.as_str()).or_default() += 1;
+    }
+    let mut order: Vec<(&str, usize)> = sizes.into_iter().collect();
+    order.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let (mut dev_n, mut test_n) = (0, 0);
+    let mut dev = std::collections::HashSet::new();
+    for (session, k) in order {
+        if dev_n <= test_n {
+            dev_n += k;
+            dev.insert(session.to_string());
+        } else {
+            test_n += k;
+        }
+    }
+    split_real(rows, "recent", |s| dev.contains(s))
+}
 
 /// Sample `n` real file edits (the prompt of that turn and the file, repo-relative)
 /// into `files-dev` and `files-test`, split by session. Each is replayed as of the edit

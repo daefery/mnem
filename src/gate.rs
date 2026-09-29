@@ -33,6 +33,10 @@ pub struct Metrics {
     pub vague_false_alarms: usize,
     /// Real prompts (tuning half), judged; None when not judged.
     pub real: Option<Real>,
+    /// Prompts from the weeks mnem distilled sessions itself (tuning half), judged; None
+    /// when not judged or from a build that predates the set.
+    #[serde(default)]
+    pub recent: Option<Real>,
     /// Slowest 5% of rankings on the known and vague questions (ms, in process).
     pub p95_ms: f64,
     /// MCP search on the known questions.
@@ -111,6 +115,7 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         ("recall", "mnem eval --build 40"),
         ("vague", "write it by hand (see README)"),
         ("real-dev", "mnem eval --build-real 160"),
+        ("recent-dev", "mnem eval --build-recent 160"),
         ("files-dev", "mnem eval --build-files 300"),
     ] {
         if !set_path(set).exists() {
@@ -130,19 +135,18 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         );
     }
     let p95 = recall.p95_ms.max(vague.p95_ms);
-    let real = if judge {
-        // Its ranking time is not gated here: replaying old prompts measures word rarity
-        // as of their date, which production never pays. The hook check below times real
-        // prompts through the production path instead.
-        let r = run("real-dev", Some("chain"))?;
-        let j = r.judged;
-        if j.prompts < 30 {
-            bail!(
-                "the real-dev set has {} prompts; the gate needs 30",
-                j.prompts
-            );
+    // Their ranking time is not gated here: replaying old prompts measures word rarity
+    // as of their date, which production never pays. The hook check below times real
+    // prompts through the production path instead.
+    let judged = |set: &str| -> Result<Option<Real>> {
+        if !judge {
+            return Ok(None);
         }
-        Some(Real {
+        let j = run(set, Some("chain"))?.judged;
+        if j.prompts < 30 {
+            bail!("the {set} set has {} prompts; the gate needs 30", j.prompts);
+        }
+        Ok(Some(Real {
             prompts: j.judged_prompts,
             shown: j.judged_shown,
             helpful: j.right,
@@ -150,10 +154,10 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
             unjudged: j.unjudged,
             unhelpful_only: Some(j.judged_prompts - j.helped),
             total: Some(j.prompts),
-        })
-    } else {
-        None
+        }))
     };
+    let real = judged("real-dev")?;
+    let recent = judged("recent-dev")?;
     let files = if judge {
         let f = run("files-dev", Some("chain"))?.judged;
         Some(Files {
@@ -280,6 +284,7 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         vague_negatives: vague.negatives,
         vague_false_alarms: vague.false_alarms.len(),
         real,
+        recent,
         p95_ms: p95,
         search: Some(Search {
             cases: n,
@@ -290,6 +295,100 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
         hook: Some(hook),
         files,
     })
+}
+
+/// The names of the checks on one judged prompt set.
+struct JudgedNames {
+    unhelpful: &'static str,
+    unhelpful_only: &'static str,
+    share: &'static str,
+    helped: &'static str,
+    unjudged: &'static str,
+    missing: &'static str,
+}
+
+const REAL: JudgedNames = JudgedNames {
+    unhelpful: "real prompts: unhelpful memories shown",
+    unhelpful_only: "real prompts shown only unhelpful memories",
+    share: "real prompts: shown memories judged helpful",
+    helped: "real prompts helped",
+    unjudged: "real prompts the judge could not judge",
+    missing: "real prompts (judged)",
+};
+
+const RECENT: JudgedNames = JudgedNames {
+    unhelpful: "recent prompts: unhelpful memories shown",
+    unhelpful_only: "recent prompts shown only unhelpful memories",
+    share: "recent prompts: shown memories judged helpful",
+    helped: "recent prompts helped",
+    unjudged: "recent prompts the judge could not judge",
+    missing: "recent prompts (judged)",
+};
+
+/// The judged checks on one real-prompt set. With `baseline_may_lack`, a baseline that
+/// did not measure the set skips them; otherwise both builds must have been judged.
+fn judged_checks(
+    add: &mut dyn FnMut(&'static str, String, String, String, bool),
+    n: &JudgedNames,
+    b: Option<&Real>,
+    c: Option<&Real>,
+    baseline_may_lack: bool,
+) {
+    let at_least = |n: usize, k: usize| n.saturating_sub(k);
+    let (br, cr) = match (b, c) {
+        (Some(br), Some(cr)) => (br, cr),
+        (None, _) if baseline_may_lack => return,
+        _ => {
+            add(n.missing, "-".into(), "-".into(), "judged".into(), false);
+            return;
+        }
+    };
+    let p = |r: &Real| r.helpful as f64 / r.shown.max(1) as f64;
+    // The 95% interval is shown beside the share: a 3-point limit is tighter than the
+    // noise at this size, so a narrow failure deserves a human look.
+    let share = |r: &Real| {
+        let (lo, hi) = crate::eval::wilson(r.helpful, r.shown);
+        format!("{:.0}% [{:.0}-{:.0}]", 100.0 * p(r), 100.0 * lo, 100.0 * hi)
+    };
+    let unhelpful = |r: &Real| r.shown - r.helpful;
+    let cap = unhelpful(br) + unhelpful(br) / 10 + 3;
+    add(
+        n.unhelpful,
+        unhelpful(br).to_string(),
+        unhelpful(cr).to_string(),
+        format!("≤ {cap}"),
+        unhelpful(cr) <= cap,
+    );
+    if let (Some(bu), Some(cu)) = (br.unhelpful_only, cr.unhelpful_only) {
+        add(
+            n.unhelpful_only,
+            bu.to_string(),
+            cu.to_string(),
+            format!("≤ {}", bu + 2),
+            cu <= bu + 2,
+        );
+    }
+    add(
+        n.share,
+        share(br),
+        share(cr),
+        format!("≥ {:.0}%", 100.0 * (p(br) - 0.03)),
+        p(cr) >= p(br) - 0.03,
+    );
+    add(
+        n.helped,
+        format!("{}/{}", br.helped, br.prompts),
+        format!("{}/{}", cr.helped, cr.prompts),
+        format!("≥ {}", at_least(br.helped, 2)),
+        cr.helped >= at_least(br.helped, 2),
+    );
+    add(
+        n.unjudged,
+        br.unjudged.to_string(),
+        cr.unjudged.to_string(),
+        "0".into(),
+        cr.unjudged == 0,
+    );
 }
 
 /// One rule's outcome.
@@ -324,13 +423,22 @@ pub fn compare(b: &Metrics, c: &Metrics) -> Vec<Check> {
         b.real.as_ref().and_then(|r| r.total),
         c.real.as_ref().and_then(|r| r.total),
     );
+    let recent_totals = (
+        b.recent.as_ref().and_then(|r| r.total),
+        c.recent.as_ref().and_then(|r| r.total),
+    );
     let sizes = |m: &Metrics, real: Option<usize>| {
         format!(
-            "{}+{}{}",
+            "{}+{}{}{}",
             m.recall_cases,
             m.vague_cases + m.vague_negatives,
             match (totals.0.is_some() && totals.1.is_some(), real) {
                 (true, Some(t)) => format!("+{t}"),
+                _ => String::new(),
+            },
+            match recent_totals {
+                (Some(_), Some(_)) =>
+                    format!("+{}", m.recent.as_ref().and_then(|r| r.total).unwrap_or(0)),
                 _ => String::new(),
             }
         )
@@ -391,63 +499,15 @@ pub fn compare(b: &Metrics, c: &Metrics) -> Vec<Check> {
         format!("≤ {fa_limit}"),
         c.vague_false_alarms <= fa_limit,
     );
-    match (&b.real, &c.real) {
-        (Some(br), Some(cr)) => {
-            let p = |r: &Real| r.helpful as f64 / r.shown.max(1) as f64;
-            // The 95% interval is shown beside the share: a 3-point limit is tighter than
-            // the noise at this size, so a narrow failure deserves a human look.
-            let share = |r: &Real| {
-                let (lo, hi) = crate::eval::wilson(r.helpful, r.shown);
-                format!("{:.0}% [{:.0}-{:.0}]", 100.0 * p(r), 100.0 * lo, 100.0 * hi)
-            };
-            let unhelpful = |r: &Real| r.shown - r.helpful;
-            let cap = unhelpful(br) + unhelpful(br) / 10 + 3;
-            add(
-                "real prompts: unhelpful memories shown",
-                unhelpful(br).to_string(),
-                unhelpful(cr).to_string(),
-                format!("≤ {cap}"),
-                unhelpful(cr) <= cap,
-            );
-            if let (Some(bu), Some(cu)) = (br.unhelpful_only, cr.unhelpful_only) {
-                add(
-                    "real prompts shown only unhelpful memories",
-                    bu.to_string(),
-                    cu.to_string(),
-                    format!("≤ {}", bu + 2),
-                    cu <= bu + 2,
-                );
-            }
-            add(
-                "real prompts: shown memories judged helpful",
-                share(br),
-                share(cr),
-                format!("≥ {:.0}%", 100.0 * (p(br) - 0.03)),
-                p(cr) >= p(br) - 0.03,
-            );
-            add(
-                "real prompts helped",
-                format!("{}/{}", br.helped, br.prompts),
-                format!("{}/{}", cr.helped, cr.prompts),
-                format!("≥ {}", at_least(br.helped, 2)),
-                cr.helped >= at_least(br.helped, 2),
-            );
-            add(
-                "real prompts the judge could not judge",
-                br.unjudged.to_string(),
-                cr.unjudged.to_string(),
-                "0".into(),
-                cr.unjudged == 0,
-            );
-        }
-        _ => add(
-            "real prompts (judged)",
-            "-".into(),
-            "-".into(),
-            "judged".into(),
-            false,
-        ),
-    }
+    judged_checks(&mut add, &REAL, b.real.as_ref(), c.real.as_ref(), false);
+    // A baseline built before the recent set existed cannot report it: skipped then.
+    judged_checks(
+        &mut add,
+        &RECENT,
+        b.recent.as_ref(),
+        c.recent.as_ref(),
+        true,
+    );
     match (&b.files, &c.files) {
         (Some(bf), Some(cf)) => {
             let p = |f: &Files| f.helpful as f64 / f.shown.max(1) as f64;
@@ -650,6 +710,15 @@ mod tests {
                 unhelpful_only: Some(4),
                 total: Some(70),
             }),
+            recent: Some(Real {
+                prompts: 60,
+                shown: 240,
+                helpful: 150,
+                helped: 50,
+                unjudged: 0,
+                unhelpful_only: Some(5),
+                total: Some(80),
+            }),
             p95_ms: 140.0,
             search: Some(Search {
                 cases: 38,
@@ -704,6 +773,15 @@ mod tests {
             unhelpful_only: Some(7),
             total: Some(70),
         });
+        c.recent = Some(Real {
+            prompts: 60,
+            shown: 240,
+            helpful: 130,
+            helped: 45,
+            unjudged: 0,
+            unhelpful_only: Some(5),
+            total: Some(80),
+        });
         c.p95_ms = 301.0;
         c.model_loaded = false;
         c.search = Some(Search {
@@ -733,6 +811,8 @@ mod tests {
             "real prompts the judge could not judge",
             "real prompts: unhelpful memories shown",
             "real prompts shown only unhelpful memories",
+            "recent prompts: shown memories judged helpful",
+            "recent prompts helped",
             "slowest 5% of rankings",
             "embedding model",
             "MCP search: known questions in top 5",
@@ -774,6 +854,11 @@ mod tests {
         let names: Vec<&str> = compare(&b, &base()).iter().map(|k| k.name).collect();
         assert!(!names.contains(&"real prompts shown only unhelpful memories"));
         assert!(compare(&b, &base()).iter().all(|k| k.pass));
+        // A baseline from before the recent set: its checks are skipped, not failed.
+        b.recent = None;
+        let names: Vec<&str> = compare(&b, &base()).iter().map(|k| k.name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("recent prompts")));
+        assert!(compare(&b, &base()).iter().all(|k| k.pass));
     }
 
     #[test]
@@ -787,12 +872,14 @@ mod tests {
     fn without_judgments_or_measurements_the_gate_fails() {
         let mut c = base();
         c.real = None;
+        c.recent = None;
         c.search = None;
         c.hook = None;
         c.files = None;
         let f = failed(&c);
         for name in [
             "real prompts (judged)",
+            "recent prompts (judged)",
             "MCP search",
             "hook recall",
             "file recall (judged)",

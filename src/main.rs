@@ -233,6 +233,10 @@ enum Cmd {
         /// Sample N real prompts from transcripts into real-dev and real-test
         #[arg(long)]
         build_real: Option<usize>,
+        /// Sample N prompts from the last 30 days, in projects with memories mnem
+        /// distilled, into recent-dev and recent-test
+        #[arg(long)]
+        build_recent: Option<usize>,
         /// Sample N real file edits into files-dev and files-test (file-aware recall)
         #[arg(long)]
         build_files: Option<usize>,
@@ -521,6 +525,7 @@ fn main() -> Result<()> {
             cosines,
             set,
             build_real,
+            build_recent,
             build_files,
             judge,
             judge_model,
@@ -581,6 +586,11 @@ fn main() -> Result<()> {
             if let Some(n) = build_real {
                 let (dev, test) = mnem::eval::build_real(&conn, n)?;
                 println!("sampled {dev} prompts into real-dev and {test} into real-test");
+                return Ok(());
+            }
+            if let Some(n) = build_recent {
+                let (dev, test) = mnem::eval::build_recent(&conn, n, 30)?;
+                println!("sampled {dev} prompts into recent-dev and {test} into recent-test");
                 return Ok(());
             }
             let path = mnem::eval::set_path(&set);

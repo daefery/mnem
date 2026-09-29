@@ -93,8 +93,12 @@ something since, a short "meanwhile" update.
   (hand-written, `"id": null` for prompts nothing should answer), `--set real-dev` /
   `real-test` (real prompts replayed as of when they were typed, `--build-real N`;
   add `--judge` to have the distillation models judge what recall showed, or
-  `--judge-model <model>` for a second judge and its agreement with the first). Tune
-  on `real-dev`; read `real-test` only to confirm.
+  `--judge-model <model>` for a second judge and its agreement with the first), and
+  `--set recent-dev` / `recent-test` (`--build-recent N`: prompts of the last 30 days
+  in projects that already held 20 memories mnem distilled itself, at most 6 per
+  session and half per project; the `real` sets mostly predate those memories and
+  see imported claude-mem ones). Tune on the dev halves; read the test halves only
+  to confirm.
 - `distill.exclude_providers` / `distill.exclude_models`: never use these models, e.g.
   `["antigravity"]` and `["gemini"]`.
 - `harness_prompts`: prompts matching these patterns are labelled as tooling-injected,
@@ -168,17 +172,18 @@ mnem eval --gate --candidate-config new-config.json  # a settings change instead
 It runs the installed mnem and the candidate one after the other on one frozen copy
 of the database and the same cached judgments (live sessions cannot move one run and
 not the other), over the
-model-written, hand-written and real-prompt (tuning half) test sets, and exits 1 if
+model-written, hand-written and both real-prompt (tuning half) test sets, and exits 1 if
 recall got worse:
 
 - the embedding model must still load;
 - known questions in the top 5 may drop by at most one case, found first by two;
 - vague questions in the top 5 by at most one;
 - prompts with no answer that still recall something: at most 3, and at most one more;
-- real prompts, judged: helpful share of shown memories at most 3 points lower (its
-  95% interval is printed beside it), unhelpful memories at most 10% (+3) more,
-  prompts shown only unhelpful memories at most two more, prompts helped at most two
-  fewer, and every prompt judged; the judge is always the live settings' models;
+- real prompts, judged, and the same for recent prompts: helpful share of shown
+  memories at most 3 points lower (its 95% interval is printed beside it), unhelpful
+  memories at most 10% (+3) more, prompts shown only unhelpful memories at most two
+  more, prompts helped at most two fewer, and every prompt judged; the judge is always
+  the live settings' models (a baseline built before the recent set skips its checks);
 - MCP search on the known questions: top 5 and top 20 at most one lower, and no
   personal-detail memory listed unasked;
 - speed: the slowest 5% of rankings, and of prompt recall as the hook runs it (a fresh
