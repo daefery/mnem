@@ -18,6 +18,7 @@ pub mod ingest;
 pub mod install;
 pub mod mcp;
 pub mod model;
+pub mod privacy;
 pub mod project;
 pub mod recall;
 pub mod rerank;

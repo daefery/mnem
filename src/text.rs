@@ -3,6 +3,10 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
+/// Bump when SECRETS changes: the watcher then redacts what is already stored again
+/// (`privacy::catch_up`).
+pub const REDACTION_VERSION: i64 = 2;
+
 static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
         (r"(?s)<private>.*?</private>", "[private]"),
@@ -17,6 +21,14 @@ static SECRETS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"\bAKIA[0-9A-Z]{16}\b", "[redacted:aws]"),
         (r"\bxox[abprs]-[A-Za-z0-9-]{10,}", "[redacted:slack]"),
         (r"\bpk_[0-9]{6,}_[A-Z0-9]{20,}", "[redacted:clickup]"),
+        (r"\b(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{16,}", "[redacted:stripe]"),
+        (r"\bAIza[0-9A-Za-z_-]{35}\b", "[redacted:google]"),
+        (r"\bhf_[A-Za-z0-9]{30,}", "[redacted:huggingface]"),
+        (r"\bnpm_[A-Za-z0-9]{30,}", "[redacted:npm]"),
+        (r"https://hooks\.slack\.com/services/[A-Za-z0-9/]{20,}", "[redacted:slack-webhook]"),
+        (r"\b[0-9]{8,10}:AA[0-9A-Za-z_-]{33}\b", "[redacted:telegram]"),
+        // A password in a URL (postgres://user:pass@host, https://user:token@host).
+        (r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@\[\]]+:)[^\s/@]{3,}@", "$1[redacted]@"),
         (r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{20,}=*", "Bearer [redacted]"),
         (
             r#"(?i)\b([A-Z0-9_]*(?:api[_-]?key|secret|token|passwd|password|credential)[A-Z0-9_]*)(\s*[:=]\s*["']?)[^\s"',;]{8,}"#,
@@ -222,6 +234,56 @@ mod tests {
             parse_ts("2026-09-27T12:13:24.101+01:00"),
             Some(1_790_507_604_101)
         );
+    }
+
+    #[test]
+    fn redacts_url_passwords_and_more_token_formats() {
+        let s = redact(
+            "psql postgres://app:Xk29fqLm@db.prod.internal:5432/main; git clone https://ci:T0k3nValue99@gitlab.example.org/r.git",
+        );
+        assert!(
+            !s.contains("Xk29fqLm") && !s.contains("T0k3nValue99"),
+            "{s}"
+        );
+        assert!(
+            s.contains("postgres://app:[redacted]@db.prod.internal"),
+            "{s}"
+        );
+        // Idempotent, and a URL without a password is left alone.
+        assert_eq!(redact(&s), s);
+        assert_eq!(
+            redact("see https://github.com/a/b@main"),
+            "see https://github.com/a/b@main"
+        );
+        for (secret, label) in [
+            (format!("sk_live_{}", "4eC39HqLyjWDarjtT1zdp7dc"), "stripe"),
+            (
+                format!("AIza{}", "SyD1x7kQ2mN8pL4vR6tW9zB3cF5hJ0gK7eA"),
+                "google",
+            ),
+            (
+                format!("hf_{}", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456"),
+                "huggingface",
+            ),
+            (
+                format!("npm_{}", "aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456"),
+                "npm",
+            ),
+            (
+                format!(
+                    "https://hooks.slack.com/services/{}",
+                    "T0000A1B2/B0000C3D4/xYz0123456789"
+                ),
+                "slack-webhook",
+            ),
+            (
+                format!("123456789:AA{}", "Fq2m4N6p8R0t2V4x6Z8b0D2f4H6j8L0n2"),
+                "telegram",
+            ),
+        ] {
+            let r = redact(&format!("value {secret} end"));
+            assert_eq!(r, format!("value [redacted:{label}] end"), "{secret}");
+        }
     }
 
     #[test]

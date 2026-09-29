@@ -376,9 +376,27 @@ mod tests {
         .unwrap();
         for (id, session, kind, title, at) in [
             (1, "claude:me", "summary", "Ship the retry fix", 100),
-            (2, "pi:council", "summary", "Review Round 41 for correctness", 200),
-            (3, "claude:me", "observation", "Retry loop backs off on 429", 100),
-            (4, "pi:council", "observation", "Round 41 findings written", 200),
+            (
+                2,
+                "pi:council",
+                "summary",
+                "Review Round 41 for correctness",
+                200,
+            ),
+            (
+                3,
+                "claude:me",
+                "observation",
+                "Retry loop backs off on 429",
+                100,
+            ),
+            (
+                4,
+                "pi:council",
+                "observation",
+                "Round 41 findings written",
+                200,
+            ),
         ] {
             c.execute(
                 "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)

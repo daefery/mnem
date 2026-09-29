@@ -70,7 +70,6 @@ pub fn is_scripted(conn: &Connection, session: &str) -> bool {
     }
 }
 
-
 /// Mark the sessions whose prompts match, scanning only prompts not seen yet; when the
 /// patterns change, forget every mark and scan everything again. Returns sessions marked.
 pub fn refresh(conn: &Connection) -> Result<usize> {

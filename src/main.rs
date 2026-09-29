@@ -900,6 +900,10 @@ fn main() -> Result<()> {
                         }
                         std::thread::sleep(pause);
                     };
+                    // Text stored under older redaction patterns is redacted again, once.
+                    if let Err(e) = mnem::privacy::catch_up(&conn) {
+                        hook::log(&format!("privacy: {e:#}"));
+                    }
                     // Recorded even with backfill off, so doctor can tell what ages out.
                     if let Err(e) = distill::backfill_since(&conn) {
                         hook::log(&format!("watch distill (backfill): {e:#}"));

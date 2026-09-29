@@ -256,7 +256,13 @@ own origin, so another website open in the browser cannot trigger them.
   4 KB before the cursor. An in-place, same-size change further back is not detected
   (no supported agent mutates history that way).
 - Quarantined lines keep a redacted excerpt; replay reads the source at the stored offset.
-- Secrets are redacted by pattern before storage. This is best effort, not a guarantee.
+- Secrets are redacted by pattern before storage: private keys, JWTs, OpenAI/Anthropic,
+  GitHub, GitLab, AWS, Slack, ClickUp, Stripe, Google, Hugging Face, npm and Telegram
+  tokens, Slack webhooks, Bearer headers, `*KEY/SECRET/TOKEN/PASSWORD=` assignments and
+  passwords in URLs (`postgres://user:[redacted]@host`). When the patterns grow, the
+  watcher redacts what is already stored again, once, in batches (events, memories,
+  session titles); the transcripts on disk are the agents' own and stay as they are, and
+  so do earlier backups. This is best effort, not a guarantee.
 
 ## Build
 
