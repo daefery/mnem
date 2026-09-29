@@ -617,6 +617,7 @@ pub struct Snapshot(pub std::path::PathBuf);
 
 impl Snapshot {
     pub fn take(live: &Path) -> Result<Snapshot> {
+        sweep_abandoned(&crate::db::data_dir(), std::time::Duration::from_secs(6 * 3600));
         let path = crate::db::data_dir().join(format!(".gate-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         Connection::open_with_flags(live, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?
@@ -631,6 +632,27 @@ impl Snapshot {
         let path = self.0.with_extension("copy.db");
         std::fs::copy(&self.0, &path)?;
         Ok(Snapshot(path))
+    }
+}
+
+/// Remove snapshots a gate run left behind when it was killed (its drop never ran): each
+/// is a full copy of the database. A run takes minutes, so anything older than `age` is
+/// abandoned.
+fn sweep_abandoned(dir: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|a| a > age);
+        if name.starts_with(".gate-") && name.contains(".db") && old {
+            let _ = std::fs::remove_file(e.path());
+        }
     }
 }
 
@@ -886,6 +908,28 @@ mod tests {
         ] {
             assert!(f.contains(&name), "{name}: {f:?}");
         }
+    }
+
+    #[test]
+    fn snapshots_of_killed_gate_runs_are_swept() {
+        let d = std::env::temp_dir().join(format!("mnem-gate-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
+        for name in [".gate-1.db", ".gate-1.copy.db", ".gate-1.db-wal", "mnem.db"] {
+            let f = std::fs::File::create(d.join(name)).unwrap();
+            f.set_modified(day_ago).unwrap();
+        }
+        std::fs::File::create(d.join(".gate-2.db")).unwrap();
+        sweep_abandoned(&d, std::time::Duration::from_secs(3600));
+        let mut left: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        left.sort();
+        // A running gate's copy and the live database stay.
+        assert_eq!(left, [".gate-2.db", "mnem.db"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
