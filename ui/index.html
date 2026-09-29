@@ -8,84 +8,74 @@
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <div class="header">
-    <div class="header-main">
-      <h1>
-        <img src="/logo.svg" alt="" class="mnem-logomark" id="logomark">
-        <span class="logo-text">mnem</span>
-      </h1>
-    </div>
-    <div class="status">
-      <input class="mnem-search" id="search" type="search" placeholder="Search memory…" autocomplete="off">
-      <span class="mnem-health" id="health" title="Capture health">
-        <span class="dot"></span><span class="label" id="health-label">…</span>
-      </span>
-      <select id="project">
-        <option value="">All Projects</option>
-      </select>
-      <button class="theme-toggle-btn" id="theme" title="Theme"></button>
-      <button class="settings-btn" id="move-btn" title="Backup &amp; move to another machine">
-        <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
-          <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path>
-          <path d="M4 11v6c0 1.66 3.58 3 8 3"></path>
-          <polyline points="16 17 19 20 22 17"></polyline><line x1="19" y1="13" x2="19" y2="20"></line>
-        </svg>
+  <header class="bar">
+    <button class="icon-btn nav-toggle" id="nav-toggle" title="Filters" aria-label="Show filters" aria-expanded="false" aria-controls="nav">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="18" x2="20" y2="18"></line></svg>
+    </button>
+    <a class="brand" href="/" title="mnem">
+      <img src="/logo.svg" alt="" class="logomark" id="logomark">
+      <span>mnem</span>
+    </a>
+    <label class="search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+      <input id="search" type="search" placeholder="Search memory" autocomplete="off" aria-label="Search memory">
+      <kbd>/</kbd>
+    </label>
+    <div class="health" id="health" role="status" aria-live="polite"></div>
+    <div class="bar-actions">
+      <button class="icon-btn" id="theme" title="Theme"></button>
+      <button class="icon-btn" id="move-btn" title="Backup &amp; move to another machine" aria-label="Backup and move">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"></ellipse><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path><path d="M4 11v6c0 1.66 3.58 3 8 3"></path><polyline points="16 17 19 20 22 17"></polyline><line x1="19" y1="13" x2="19" y2="20"></line></svg>
       </button>
-      <button class="settings-btn" id="context-btn" title="Session-start context preview">
-        <svg class="settings-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
-          <circle cx="12" cy="12" r="3"></circle>
-        </svg>
+      <button class="icon-btn" id="context-btn" title="Session-start context preview" aria-label="Session-start context">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
       </button>
     </div>
+  </header>
+
+  <div class="panes" id="panes">
+    <nav class="nav" id="nav" aria-label="Filters">
+      <section>
+        <h6>Views</h6>
+        <div class="nav-list" id="views"></div>
+      </section>
+      <section class="nav-projects">
+        <h6>Projects</h6>
+        <div class="nav-list" id="projects"></div>
+      </section>
+    </nav>
+
+    <section class="list-pane" aria-label="Memories">
+      <div class="chips" id="type-chips" role="group" aria-label="Type"></div>
+      <div class="chips" id="agent-chips" role="group" aria-label="Agent"></div>
+      <div class="list" id="list" role="listbox" tabindex="0" aria-label="Memories"></div>
+    </section>
+
+    <article class="detail" id="detail" tabindex="-1" aria-label="Selected memory">
+      <div class="empty">Select a memory to read it.</div>
+    </article>
   </div>
 
-  <div class="feed" id="feed">
-    <div class="feed-content" id="feed-content"></div>
-  </div>
-
-  <button class="scroll-to-top" id="to-top" title="Scroll to top" style="display:none">
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="18 15 12 9 6 15"></polyline>
-    </svg>
-  </button>
-
-  <div class="modal-backdrop" id="context-modal" style="display:none">
-    <div class="context-settings-modal">
+  <div class="modal-backdrop" id="context-modal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="context-title">
       <div class="modal-header">
-        <h2>Session-start context</h2>
-        <div class="header-controls">
-          <label class="preview-selector">
-            Project
-            <select id="context-project"></select>
-          </label>
-          <button class="modal-close-btn" id="context-close" title="Close">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
-        </div>
+        <h2 id="context-title">Session-start context</h2>
+        <label class="preview-selector">Project <select id="context-project"></select></label>
+        <button class="icon-btn" id="context-close" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
       </div>
-      <div class="modal-body">
-        <div class="preview-column">
-          <div class="preview-content"><pre id="context-text">Loading…</pre></div>
-        </div>
-      </div>
+      <div class="modal-body"><pre id="context-text">Loading…</pre></div>
     </div>
   </div>
 
-  <div class="modal-backdrop" id="move-modal" style="display:none">
-    <div class="context-settings-modal move-modal" role="dialog" aria-labelledby="move-title">
+  <div class="modal-backdrop" id="move-modal" hidden>
+    <div class="modal move-modal" role="dialog" aria-modal="true" aria-labelledby="move-title">
       <div class="modal-header">
         <h2 id="move-title">Backup &amp; move</h2>
-        <div class="header-controls">
-          <button class="modal-close-btn" id="move-close" title="Close">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>
-            </svg>
-          </button>
-        </div>
+        <button class="icon-btn" id="move-close" title="Close" aria-label="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
       </div>
       <div class="modal-body move-body">
         <section class="move-section">

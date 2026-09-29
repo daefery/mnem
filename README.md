@@ -19,7 +19,7 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 | `mnem doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, claude-mem comparison |
 | `mnem context --cwd DIR` | The context injected at session start |
 | `mnem search <query>` | Full-text search over captured events |
-| `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
+| `mnem ui [--port 37777]` | Web viewer (local only): filters, list and the selected memory in full; whether the code a memory describes is still there and whether agents opened it; search, pinned facts, never-opened and changed-code views, capture/distill/backup health, context preview |
 | `mnem watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
 | `mnem distill` / `mnem models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
 | `mnem embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
