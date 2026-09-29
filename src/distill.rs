@@ -1435,6 +1435,9 @@ pub(crate) fn store(
 /// blocks the next.
 struct Lock(#[allow(dead_code)] std::fs::File);
 
+/// How long a held distill lock is retried before another distill is assumed running.
+const LOCK_SETTLE: std::time::Duration = std::time::Duration::from_millis(200);
+
 impl Lock {
     fn acquire(conn: &Connection) -> Result<Option<Lock>> {
         let dir = conn
@@ -1447,10 +1450,20 @@ impl Lock {
             .create(true)
             .truncate(false)
             .open(dir.join("distill.lock"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(Lock(file))),
-            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
-            Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+        // A lock just released can look held for a moment: a subprocess started by any
+        // thread (git, the model client) holds a copy of every open file between its
+        // fork and exec, the lock's included. Only a lock still held after a short wait
+        // means another distill is running.
+        let deadline = std::time::Instant::now() + LOCK_SETTLE;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Some(Lock(file))),
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(5))
+                }
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+                Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            }
         }
     }
 }
