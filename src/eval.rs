@@ -1057,3 +1057,332 @@ mod tests {
         );
     }
 }
+
+const ASK_FROM_DIGEST: &str = r#"You write evaluation questions for a memory search system used by software developers.
+Given the digest of one past AI coding session, write the question a developer would type to
+their coding agent weeks later that this session's durable outcome answers (a decision, a fix,
+how something works). Describe the problem or goal as a real person would, not the answer.
+One sentence, 8-25 words. If nothing durable happened, return {"question": null}.
+Return JSON only: {"question": "..."}"#;
+
+const CHOOSE: &str = r#"A coding agent is about to answer a developer. It was shown past memories by id,
+type and title only, and can open any of them in full. Which would it open because they likely
+help answer the question? Return JSON only: {"open": [ids]} (an empty list if none)."#;
+
+/// Writes the questions and picks what to open; not the distillation model.
+const TITLES_JUDGE: &str = "developer/claude-haiku-4-5-20251001";
+const TITLES_DISTILLER: &str = "gpt-5.6-luna";
+
+#[derive(Default, Debug)]
+pub struct TitleArm {
+    pub hit1: usize,
+    pub hit5: usize,
+    pub mrr: f64,
+    /// A target was among the five memories shown.
+    pub shown: usize,
+    /// The judge, seeing titles only, chose to open a target.
+    pub opened: usize,
+    /// Memories the judge chose to open that were not targets.
+    pub opened_other: usize,
+}
+
+/// Compare the distillation title rule with the candidate on the same session chunks.
+/// On a frozen copy of the database, `n` chunks the live prompt distilled are distilled
+/// again with the candidate rule (same model) into a second copy; a different model
+/// writes the question each chunk answers from its digest, never from either memory.
+/// Both copies are then scored with prompt recall as the hook runs it (top five), and on
+/// whether that model, shown only the titles, would open a memory from the chunk.
+pub fn titles(live: &Path, n: usize, out: &Path) -> Result<(usize, TitleArm, TitleArm)> {
+    let snap_a = crate::gate::Snapshot::take(live)?;
+    let snap_b = snap_a.copy()?;
+    let a = db::open(&snap_a.0)?;
+    let mut b = db::open(&snap_b.0)?;
+    let distiller = Llm::from_config()?.only(TITLES_DISTILLER);
+    let judge = Llm::from_config()?.only(TITLES_JUDGE);
+    let system = crate::distill::SYSTEM
+        .replace(crate::distill::TITLE_RULE, crate::distill::TITLE_RULE_NAMED);
+    anyhow::ensure!(
+        system != crate::distill::SYSTEM,
+        "title rule not found in the prompt"
+    );
+
+    // Chunks the current prompt distilled (memories with evidence links), by that model,
+    // at most a quarter from one project.
+    let groups: Vec<(String, String)> = {
+        let mut st = a.prepare(
+            "SELECT DISTINCT substr(m.origin_id, 1, instr(m.origin_id, '#') - 1), m.project
+             FROM memories m
+             WHERE m.origin = 'mnem' AND m.kind = 'observation' AND m.model = ?1
+               AND m.project NOT LIKE '/%' AND instr(m.origin_id, '#') > 0
+               AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.memory_id = m.id)
+             ORDER BY abs(random())",
+        )?;
+        st.query_map([TITLES_DISTILLER], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    let per_project = n.div_ceil(4).max(1);
+    let mut taken: std::collections::HashMap<String, usize> = Default::default();
+    let targets = |conn: &Connection, base: &str| -> Result<Vec<(i64, String)>> {
+        let mut st = conn.prepare(
+            "SELECT id, title FROM memories WHERE origin = 'mnem' AND kind = 'observation'
+               AND origin_id LIKE ?1 || '#%' ORDER BY id",
+        )?;
+        Ok(st
+            .query_map([base], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let mut cases: Vec<(String, String, Vec<i64>, Vec<i64>)> = Vec::new();
+    let mut log = std::fs::File::create(out)?;
+    for (base, project) in groups {
+        if cases.len() >= n {
+            break;
+        }
+        if taken.get(&project).copied().unwrap_or(0) >= per_project {
+            continue;
+        }
+        let Some((sid, range)) = base.rsplit_once('@') else {
+            continue;
+        };
+        let Some((from, through)) = range
+            .split_once('-')
+            .and_then(|(f, t)| Some((f.parse::<i64>().ok()?, t.parse::<i64>().ok()?)))
+        else {
+            continue;
+        };
+        // The chunk must come out of the digest builder exactly as it was distilled.
+        let Some(c) = crate::distill::chunks(&a, sid, from - 1)?
+            .into_iter()
+            .next()
+            .filter(|c| c.from == from && c.through == through)
+        else {
+            continue;
+        };
+        let (agent, title): (String, String) = a.query_row(
+            "SELECT agent, coalesce(title, '') FROM sessions WHERE id = ?1",
+            [sid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let user = crate::distill::digest_prompt(&project, &agent, &title, &c.text);
+        let Ok((q, _)) = judge.ask(ASK_FROM_DIGEST, &user) else {
+            continue;
+        };
+        let Some(question) = q["question"].as_str().filter(|s| s.len() > 10) else {
+            continue;
+        };
+        let (v, model) = match distiller.ask(&system, &user) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{base}: {e:#}");
+                continue;
+            }
+        };
+        b.execute(
+            "DELETE FROM memories WHERE origin = 'mnem' AND origin_id LIKE ?1 || '#%'",
+            [&base],
+        )?;
+        crate::distill::store(&mut b, sid, &project, &model, &c, &v)?;
+        let old = targets(&a, &base)?;
+        let new = targets(&b, &base)?;
+        if old.is_empty() || new.is_empty() {
+            continue;
+        }
+        writeln!(
+            log,
+            "{}",
+            json!({ "chunk": base, "project": project, "question": question,
+                    "old": old.iter().map(|t| &t.1).collect::<Vec<_>>(),
+                    "new": new.iter().map(|t| &t.1).collect::<Vec<_>>() })
+        )?;
+        *taken.entry(project.clone()).or_default() += 1;
+        cases.push((
+            project,
+            question.to_string(),
+            old.into_iter().map(|t| t.0).collect(),
+            new.into_iter().map(|t| t.0).collect(),
+        ));
+        eprint!("\rtitles: {} of {n} chunks", cases.len());
+    }
+    eprintln!();
+    // The new memories need vectors, as the watcher would give them.
+    if let Some(e) = recall::semantic_embedder() {
+        crate::embed::backfill(&mut b, &e, None)?;
+    }
+    let embedder = recall::semantic_embedder();
+    let (mut old, mut new) = (TitleArm::default(), TitleArm::default());
+    for (project, question, want_a, want_b) in &cases {
+        for (arm, conn, want) in [(&mut old, &a, want_a), (&mut new, &b, want_b)] {
+            let s = score_titles(conn, &judge, embedder.as_ref(), project, question, want)?;
+            arm.hit1 += s.hit1;
+            arm.hit5 += s.hit5;
+            arm.mrr += s.mrr;
+            arm.shown += s.shown;
+            arm.opened += s.opened;
+            arm.opened_other += s.opened_other;
+        }
+    }
+    Ok((cases.len(), old, new))
+}
+
+/// Prompt recall as the hook runs it (top five) for one question, and whether the judge,
+/// shown only the titles, would open one of the memories that answer it.
+fn score_titles(
+    conn: &Connection,
+    judge: &Llm,
+    embedder: Option<&crate::embed::Embedder>,
+    project: &str,
+    question: &str,
+    want: &[i64],
+) -> Result<TitleArm> {
+    let query = embedder.map(|e| e.query(question));
+    let scope = recall::Scope {
+        session: None,
+        offered_to: None,
+        before: None,
+    };
+    let ranked = recall::rank(
+        conn,
+        project,
+        question,
+        &scope,
+        10,
+        query.as_ref(),
+        recall::Mode::Fill,
+    )?;
+    let mut arm = TitleArm::default();
+    if let Some(pos) = ranked.iter().position(|r| want.contains(&r.0)) {
+        arm.hit1 += (pos == 0) as usize;
+        arm.hit5 += (pos < 5) as usize;
+        arm.mrr += 1.0 / (pos + 1) as f64;
+    }
+    let top: Vec<i64> = ranked.iter().take(5).map(|r| r.0).collect();
+    arm.shown += top.iter().any(|id| want.contains(id)) as usize;
+    if top.is_empty() {
+        return Ok(arm);
+    }
+    let mut lines = format!("Question: {question}\n\nMemories:\n");
+    for id in &top {
+        let (ty, title): (String, String) = conn.query_row(
+            "SELECT coalesce(type, kind), title FROM memories WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        lines.push_str(&format!("#{id} {ty} · {title}\n"));
+    }
+    if let Ok((v, _)) = judge.ask(CHOOSE, &lines) {
+        let open: Vec<i64> = v["open"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| {
+                x.as_i64()
+                    .or_else(|| x.as_str()?.trim_start_matches('#').parse().ok())
+            })
+            .collect();
+        arm.opened += open.iter().any(|id| want.contains(id)) as usize;
+        arm.opened_other += open.iter().filter(|id| !want.contains(id)).count();
+    }
+    Ok(arm)
+}
+
+const RETITLE: &str = r#"You rewrite the titles of stored engineering memories. Keep what each memory says;
+change only its title, following this rule:
+{rule}
+Return JSON only: {"titles": [{"id": 123, "title": "..."}]}, one entry per memory given."#;
+
+/// Titles alone: the chunks and questions of an earlier `--titles` run (its side-by-side
+/// file), every memory kept as it is and only its title rewritten under the candidate
+/// rule in a second copy, so content, count and everything else stay the same.
+pub fn retitle(live: &Path, compare: &Path, out: &Path) -> Result<(usize, TitleArm, TitleArm)> {
+    let snap_a = crate::gate::Snapshot::take(live)?;
+    let snap_b = snap_a.copy()?;
+    let a = db::open(&snap_a.0)?;
+    let mut b = db::open(&snap_b.0)?;
+    let writer = Llm::from_config()?.only(TITLES_DISTILLER);
+    let judge = Llm::from_config()?.only(TITLES_JUDGE);
+    let system = RETITLE.replace("{rule}", crate::distill::TITLE_RULE_NAMED);
+    let prior: Vec<Value> = std::io::BufReader::new(std::fs::File::open(compare)?)
+        .lines()
+        .map_while(Result::ok)
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect();
+    let mut log = std::fs::File::create(out)?;
+    let mut cases: Vec<(String, String, Vec<i64>)> = Vec::new();
+    for p in &prior {
+        let (Some(base), Some(project), Some(question)) = (
+            p["chunk"].as_str(),
+            p["project"].as_str(),
+            p["question"].as_str(),
+        ) else {
+            continue;
+        };
+        type Mem = (i64, String, String, String, String);
+        let mems: Vec<Mem> = {
+            let mut st = a.prepare(
+                "SELECT id, title, coalesce(subtitle, ''), coalesce(narrative, ''), coalesce(facts, '[]')
+                 FROM memories WHERE origin = 'mnem' AND kind = 'observation'
+                   AND origin_id LIKE ?1 || '#%' ORDER BY id",
+            )?;
+            st.query_map([base], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?
+        };
+        if mems.is_empty() {
+            continue;
+        }
+        let input = json!({ "project": project, "memories": mems.iter().map(|m| json!({
+            "id": m.0, "title": m.1, "subtitle": m.2, "narrative": m.3, "facts": m.4 }))
+            .collect::<Vec<_>>() });
+        let v = match writer.ask(&system, &input.to_string()) {
+            Ok((v, _)) => v,
+            Err(e) => {
+                eprintln!("{base}: {e:#}");
+                continue;
+            }
+        };
+        let mut new = Vec::new();
+        for t in v["titles"].as_array().into_iter().flatten() {
+            let (Some(id), Some(title)) = (t["id"].as_i64(), t["title"].as_str()) else {
+                continue;
+            };
+            if mems.iter().any(|m| m.0 == id) && !title.trim().is_empty() {
+                b.execute(
+                    "UPDATE memories SET title = ?2 WHERE id = ?1",
+                    params![id, title.trim()],
+                )?;
+                new.push(title.trim().to_string());
+            }
+        }
+        writeln!(
+            log,
+            "{}",
+            json!({ "chunk": base, "project": project, "question": question,
+                    "old": mems.iter().map(|m| &m.1).collect::<Vec<_>>(), "new": new })
+        )?;
+        cases.push((
+            project.into(),
+            question.into(),
+            mems.iter().map(|m| m.0).collect(),
+        ));
+        eprint!("\rretitle: {} of {} chunks", cases.len(), prior.len());
+    }
+    eprintln!();
+    // Rewritten titles lose their vectors (trigger); embed them again.
+    if let Some(e) = recall::semantic_embedder() {
+        crate::embed::backfill(&mut b, &e, None)?;
+    }
+    let embedder = recall::semantic_embedder();
+    let (mut old, mut new) = (TitleArm::default(), TitleArm::default());
+    for (project, question, want) in &cases {
+        for (arm, conn) in [(&mut old, &a), (&mut new, &b)] {
+            let s = score_titles(conn, &judge, embedder.as_ref(), project, question, want)?;
+            arm.hit1 += s.hit1;
+            arm.hit5 += s.hit5;
+            arm.mrr += s.mrr;
+            arm.shown += s.shown;
+            arm.opened += s.opened;
+            arm.opened_other += s.opened_other;
+        }
+    }
+    Ok((cases.len(), old, new))
+}

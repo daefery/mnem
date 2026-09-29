@@ -114,6 +114,12 @@ CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
   INSERT INTO memories_fts(memories_fts, rowid, title, subtitle, narrative, facts, concepts)
   VALUES ('delete', old.id, old.title, old.subtitle, old.narrative, old.facts, old.concepts);
 END;
+CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF title, subtitle, narrative, facts, concepts ON memories BEGIN
+  INSERT INTO memories_fts(memories_fts, rowid, title, subtitle, narrative, facts, concepts)
+  VALUES ('delete', old.id, old.title, old.subtitle, old.narrative, old.facts, old.concepts);
+  INSERT INTO memories_fts(rowid, title, subtitle, narrative, facts, concepts)
+  VALUES (new.id, new.title, new.subtitle, new.narrative, new.facts, new.concepts);
+END;
 
 -- Which transcript events support each distilled memory. event_hash is the event's
 -- text hash when linked, so a later rewrite of that event shows as changed evidence.
@@ -293,7 +299,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 20;
+pub const SCHEMA_VERSION: i64 = 21;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))

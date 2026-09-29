@@ -78,6 +78,12 @@ something since, a short "meanwhile" update.
   two uses stay untested: scoring a wider pool (keyword ranks 11-60 and meaning-only
   hits) and reordering MCP search results, where seconds of latency are acceptable.
   `mnem eval --rerank <model> --dump <file>` re-runs the comparison.
+  A distillation title rule that names the component, file or decision first was not
+  adopted either: on 30 chunks with the contents unchanged and only titles rewritten,
+  top-5 recall fell from 22 to 18 and titles-only choices to open a memory from 19 to 16;
+  paths and ids replaced the words people ask in. `mnem eval --titles N` (re-distils N
+  chunks with the candidate rule) and `--titles N --retitle` (rewrites only the titles
+  of the last run's chunks) re-run it.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
   and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge

@@ -34,7 +34,7 @@ const MIN_DIGEST_CHARS: usize = 300;
 const UNDISTILLED: &str = "EXISTS (SELECT 1 FROM events e WHERE e.session_id = s.id
     AND e.id > max(coalesce(d.through, 0), coalesce(d.settled, 0)) AND e.thread IS NULL)";
 
-const SYSTEM: &str = r#"You turn a digest of an AI coding session into durable memory for future sessions.
+pub(crate) const SYSTEM: &str = r#"You turn a digest of an AI coding session into durable memory for future sessions.
 Record durable technical signal only: what the system now does differently, what shipped, decisions
 with their rationale, and concrete findings from debugging (logs, data, code paths). Skip routine
 operations, empty checks, and anything already obvious from the code.
@@ -53,6 +53,15 @@ narrative: 2-4 sentences a teammate could act on.
 evidence: the [E123] ids from the digest that support the observation (1-6 ids). Cite only ids
 that appear in the digest; never invent one.
 Use 0-5 observations; return an empty list when nothing durable happened. summary may be null."#;
+
+/// The title rule in SYSTEM, and a candidate that names what the memory is about first
+/// (`mnem eval --titles` compares them).
+pub(crate) const TITLE_RULE: &str = r#"title: under 12 words, states the outcome ("Retry loop now backs off on 429"), not the activity."#;
+pub(crate) const TITLE_RULE_NAMED: &str = r#"title: under 12 words. Start with the specific thing it concerns (the component, file,
+command, setting or decision, named as the code or the team names it), then the outcome
+("distill watcher: backfill runs oldest first under a daily budget", "fetch.rs retry loop now
+backs off on 429"). Never a title that would fit any project ("Bug fixed", "Change passed
+validation", "New sessions are no longer lost")."#;
 
 /// Default preference order: cheap, capable models spread across providers, so one
 /// exhausted account does not stop distillation.
@@ -510,7 +519,7 @@ mod chain_tests {
         assert!(state(&conn, "pi:old-small").1 > 0);
         assert_eq!(state(&conn, "pi:new-small"), (0, 0));
         let st = run(&mut conn, &Options::new("manual", 2, 10)).unwrap();
-        assert_eq!((st.sessions, st.settled), (1, 0));
+        assert_eq!((st.sessions, st.settled), (1, 0), "{st:?}");
 
         // Settling is not distilling: when the session resumes, its tail is read again
         // with the new work (a dry run shows the digest would start from event 0).
@@ -608,7 +617,9 @@ mod chain_tests {
                 if String::from_utf8_lossy(&buf[..n]).contains("chat/completions") {
                     seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
-                let _ = s.write_all(b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                let _ = s.write_all(
+                    b"HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
             }
         });
         let cfg: crate::config::DistillConfig = serde_json::from_value(serde_json::json!({
@@ -624,6 +635,40 @@ mod chain_tests {
         assert!(err.contains("budget reached"), "{err}");
         assert_eq!(llm.requests.get(), 2);
         assert_eq!(completions.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn an_edited_title_is_searched_by_its_new_words() {
+        let d = std::env::temp_dir().join(format!("mnem-retitle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let conn = db::open(&d.join("m.db")).unwrap();
+        conn.execute(
+            "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1, 'observation', 'Bug fixed', 'mnem', 'x')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memories SET title = 'fetch.rs retry loop backs off' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let hits = |q: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM memories_fts WHERE memories_fts MATCH ?1",
+                [q],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!((hits("retry"), hits("bug")), (1, 0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_title_rule_is_the_one_in_the_prompt() {
+        assert!(SYSTEM.contains(TITLE_RULE));
+        assert!(!SYSTEM.contains(TITLE_RULE_NAMED));
     }
 
     #[test]
@@ -676,11 +721,11 @@ struct TurnDigest {
     errors: Vec<(i64, String)>,
 }
 
-struct Chunk {
-    from: i64,
-    through: i64,
-    at: i64,
-    text: String,
+pub(crate) struct Chunk {
+    pub(crate) from: i64,
+    pub(crate) through: i64,
+    pub(crate) at: i64,
+    pub(crate) text: String,
     /// Event ids shown to the model; citations outside this set are rejected.
     shown: std::collections::HashSet<i64>,
 }
@@ -697,7 +742,7 @@ impl Chunk {
     }
 }
 
-fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
+pub(crate) fn chunks(conn: &Connection, session: &str, after: i64) -> Result<Vec<Chunk>> {
     let mut s = conn.prepare(
         "SELECT id, coalesce(turn, 0), kind, label, coalesce(path, ''), coalesce(text, ''), coalesce(ts, 0)
          FROM events WHERE session_id = ?1 AND id > ?2 AND thread IS NULL ORDER BY id",
@@ -1115,10 +1160,7 @@ pub fn run(conn: &mut Connection, o: &Options) -> Result<Stats> {
                 },
                 None => None,
             };
-            let user = format!(
-                "Project: {project}\nAgent: {agent}\nSession title: {title}\n\n{}",
-                c.text
-            );
+            let user = digest_prompt(&project, &agent, &title, &c.text);
             if o.dry_run {
                 st.would_call += 1;
                 st.would_chars += user.len();
@@ -1181,6 +1223,11 @@ fn advance(conn: &Connection, sid: &str, through: i64, err: Option<&str>) -> Res
         params![sid, through, db::now_ms(), err],
     )?;
     Ok(())
+}
+
+/// What the model is sent for one chunk.
+pub(crate) fn digest_prompt(project: &str, agent: &str, title: &str, text: &str) -> String {
+    format!("Project: {project}\nAgent: {agent}\nSession title: {title}\n\n{text}")
 }
 
 /// Take a session's too-small final chunk (events through `through`) off the backlog
@@ -1265,7 +1312,7 @@ fn field(v: &Value, k: &str) -> String {
 }
 
 /// Insert one chunk's memories and advance the mark, atomically.
-fn store(
+pub(crate) fn store(
     conn: &mut Connection,
     sid: &str,
     project: &str,

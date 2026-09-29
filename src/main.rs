@@ -264,6 +264,13 @@ enum Cmd {
         /// Skip the judged real-prompt checks (the gate then fails; for a quick look)
         #[arg(long)]
         no_judge: bool,
+        /// Compare the distillation title rule with the candidate on N session chunks
+        #[arg(long)]
+        titles: Option<usize>,
+        /// With --titles: keep the last run's chunks, questions and memories, and rewrite
+        /// only the titles
+        #[arg(long)]
+        retitle: bool,
         /// Print this build's gate metrics as JSON (used by --gate)
         #[arg(long, hide = true)]
         gate_metrics: bool,
@@ -524,8 +531,38 @@ fn main() -> Result<()> {
             baseline,
             candidate_config,
             no_judge,
+            titles,
+            retitle,
             gate_metrics,
         } => {
+            if let Some(n) = titles {
+                let compare = mnem::eval::set_path("titles-compare");
+                let (out, (cases, old, new)) = if retitle {
+                    let out = mnem::eval::set_path("titles-retitled");
+                    let r = mnem::eval::retitle(&path, &compare, &out)?;
+                    (out, r)
+                } else {
+                    let r = mnem::eval::titles(&path, n, &compare)?;
+                    (compare, r)
+                };
+                let pct = |k: usize| 100.0 * k as f64 / cases.max(1) as f64;
+                println!(
+                    "titles: {cases} chunks, questions and choices by the judge model; titles side by side in {}",
+                    out.display()
+                );
+                for (name, a) in [("current  ", &old), ("candidate", &new)] {
+                    println!(
+                        "  {name}  hit@1 {:>3.0}%  hit@5 {:>3.0}%  MRR {:.2}  shown {:>3.0}%  opened {:>3.0}%  other memories opened {}",
+                        pct(a.hit1),
+                        pct(a.hit5),
+                        a.mrr / cases.max(1) as f64,
+                        pct(a.shown),
+                        pct(a.opened),
+                        a.opened_other
+                    );
+                }
+                return Ok(());
+            }
             if gate_metrics {
                 let m = mnem::gate::metrics(&conn, &path, !no_judge)?;
                 println!("{}", serde_json::to_string(&m)?);
