@@ -437,7 +437,7 @@ export default function (pi: ExtensionAPI) {
 		}), "mnem_get_observations: full text of a memory shown to you (#id) that looks relevant"),
 	);
 	pi.registerTool(
-		tool("recall_file", "Memories about one file (past bugs, decisions, changes), one line each, marked with whether the file changed since: use before changing a file you have not worked on in this session; once per file. Says so when there are none.", Type.Object({
+		tool("recall_file", "Memories about one file (past bugs, decisions, changes), one line each, marked with whether its own edits are still in the file (else whether the file changed since): use before changing a file you have not worked on in this session; once per file. Says so when there are none.", Type.Object({
 			path: Type.String({ description: "The file, absolute or relative to the session's working directory" }),
 			cwd: Type.Optional(Type.String({ description: "Directory a relative path starts from (default: the session's)" })),
 			limit: Type.Optional(Type.Number({ description: "Max memories (default 5)" })),

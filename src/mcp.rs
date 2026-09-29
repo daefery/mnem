@@ -232,7 +232,7 @@ fn tools() -> Value {
         },
         {
             "name": "recall_file",
-            "description": "Memories about one file: past bugs, decisions and changes that read or modified it, one line each, marked with whether the file changed since (commits, uncommitted edits, lines). Use before changing a file when no memories about it were shown in this session; once per file. Says so when there are none.",
+            "description": "Memories about one file: past bugs, decisions and changes that read or modified it, one line each, marked with whether the lines each memory's session wrote are still in the file, else whether the file changed since (commits, uncommitted edits, lines). Use before changing a file when no memories about it were shown in this session; once per file. Says so when there are none.",
             "inputSchema": { "type": "object", "required": ["path"], "properties": {
                 "path": { "type": "string", "description": "The file, absolute or relative to cwd" },
                 "cwd": { "type": "string", "description": "Directory relative paths start from (default: this server's working directory)" },

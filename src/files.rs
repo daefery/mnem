@@ -17,7 +17,7 @@
 //! the change. A memory about a file that changed since may describe code that is gone.
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -512,9 +512,12 @@ pub fn on_touch(
         }
     }
     let ids: Vec<i64> = fresh.iter().map(|a| a.id).collect();
+    // The text first (it reads transcripts and the file): a run cut short before it is
+    // done leaves these memories unshown and free to be offered again.
+    let text = (!fresh.is_empty()).then(|| touch_text(conn, t, &fresh));
     crate::uptake::offered(&tx, session, &ids, "file")?;
     tx.commit()?;
-    Ok((!fresh.is_empty()).then(|| touch_text(t, &fresh)))
+    Ok(text)
 }
 
 /// Mark `t` as touched by `session`; false when it already was.
@@ -525,19 +528,29 @@ pub fn claim(conn: &Connection, session: &str, t: &Target) -> Result<bool> {
     )? == 1)
 }
 
-/// Compact: one line per memory with the size of the change since it, and one line
-/// saying how the file moved on since the newest of them.
-fn touch_text(t: &Target, found: &[About]) -> String {
+/// Compact: one line per memory with whether its own edits are still in the file (or,
+/// when they cannot be read back, the size of the change since it), and one line saying
+/// how the file moved on since the newest memory that may be out of date.
+fn touch_text(conn: &Connection, t: &Target, found: &[About]) -> String {
     let h = history(&t.root, &t.rel);
     let now = crate::db::now_ms();
     let mut w = format!(
         "mnem: past memories about {} (full text: get_observations([ids]))\n",
         t.rel
     );
-    let mut stale = 0;
+    let mut stale = Vec::new();
     for a in found {
-        let note = if changed(&h, a.as_of) {
-            stale += 1;
+        let kept = a
+            .modified
+            .then(|| edits_kept(conn, a.id, &t.root, &t.rel).ok().flatten())
+            .flatten();
+        let note = if let Some(k) = kept.filter(|_| h.exists) {
+            if !k.intact() {
+                stale.push(a.as_of);
+            }
+            format!(" ({})", k.phrase())
+        } else if changed(&h, a.as_of) {
+            stale.push(a.as_of);
             // Counting lines is one more git call: only when git answered and the file is there.
             let lines = (h.exists && h.known)
                 .then(|| lines_since(&t.root, &t.rel, a.as_of))
@@ -561,12 +574,12 @@ fn touch_text(t: &Target, found: &[About]) -> String {
             crate::text::head(&a.title, 110)
         ));
     }
-    if stale > 0 {
-        let newest = found.iter().map(|a| a.as_of).max().unwrap_or(0);
-        let summary = change_since(&h, newest, now, None)
+    if let Some(newest) = stale.iter().max() {
+        let summary = change_since(&h, *newest, now, None)
             .unwrap_or_else(|| "it changed since some of them".into());
         w.push_str(&format!(
-            "{stale} of {} predate changes to the file: {summary}. Check the code before relying on them.\n",
+            "{} of {} may describe code that changed: {summary}. Check the code before relying on them.\n",
+            stale.len(),
             found.len()
         ));
     }
@@ -595,16 +608,23 @@ pub fn report(conn: &Connection, t: &Target, limit: usize) -> Result<String> {
             if a.modified { "modified it" } else { "read it" },
             crate::text::head(&a.title, 140)
         ));
+        let kept = a
+            .modified
+            .then(|| edits_kept(conn, a.id, &t.root, &t.rel).ok().flatten())
+            .flatten()
+            .filter(|_| h.exists);
         let lines = changed(&h, a.as_of)
             .then(|| lines_since(&t.root, &t.rel, a.as_of))
             .flatten();
-        match change_since(&h, a.as_of, now, lines) {
-            Some(c) => {
-                stale += 1;
-                w.push_str(&format!("   changed since: {c}\n"));
-            }
-            None => w.push_str("   file unchanged since\n"),
-        }
+        let file = change_since(&h, a.as_of, now, lines);
+        stale += (file.is_some() && !kept.is_some_and(|k| k.intact())) as usize;
+        // One line: whether its own edits survive, then how the file moved on.
+        w.push_str(&match (kept, file) {
+            (Some(k), Some(c)) => format!("   {} (file changed since: {c})\n", k.phrase()),
+            (Some(k), None) => format!("   {} (file unchanged since)\n", k.phrase()),
+            (None, Some(c)) => format!("   changed since: {c}\n"),
+            (None, None) => "   file unchanged since\n".to_string(),
+        });
     }
     if stale > 0 {
         w.push_str(&format!(
@@ -654,13 +674,248 @@ pub fn staleness_lines(conn: &Connection, memory_id: i64, max: usize) -> Result<
             .then(|| lines_since(&root, &rel, as_of))
             .flatten();
         if let Some(c) = change_since(&h, as_of, now, lines) {
-            out.push(format!("{rel}: {c}"));
+            match edits_kept(conn, memory_id, &root, &rel)?.filter(|_| h.exists) {
+                Some(k) => out.push(format!("{rel}: {} (file: {c})", k.phrase())),
+                None => out.push(format!("{rel}: {c}")),
+            }
         }
         if out.len() >= max {
             break;
         }
     }
     Ok(out)
+}
+
+/// How much of what a memory's session left in a file is still in it: lines kept and
+/// lines looked for. None when that cannot be told reliably, and the file-level note is
+/// used instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Kept {
+    pub kept: usize,
+    pub of: usize,
+}
+
+impl Kept {
+    /// Most of it (4 in 5 lines or more) is still there.
+    pub fn intact(&self) -> bool {
+        self.kept * 5 >= self.of * 4
+    }
+
+    pub fn phrase(&self) -> String {
+        if self.intact() {
+            "its edited lines are still there".into()
+        } else if self.kept * 5 >= self.of {
+            format!(
+                "its edited lines partly changed, {} of {} kept",
+                self.kept, self.of
+            )
+        } else {
+            "its edited lines are gone".into()
+        }
+    }
+}
+
+/// Bounds that keep the check inside a hook's time: edits read back per memory and
+/// file (more than this and the chunk's final state is not reconstructed), bytes of one
+/// transcript record, bytes of the current file, and lines compared.
+const EDITS_READ: usize = 20;
+const RECORD_BYTES: u64 = 4 << 20;
+const FILE_BYTES: u64 = 2 << 20;
+const LINES_COMPARED: usize = 400;
+
+/// One edit as the agent made it: the lines it replaced and the lines it wrote,
+/// trimmed, 12 characters or more (braces and blank lines say nothing).
+#[derive(Debug, Default, PartialEq)]
+pub struct Edit {
+    pub old: Vec<String>,
+    pub new: Vec<String>,
+}
+
+/// Whether a recorded path is `rel` (repo-relative): the same path, or one ending in
+/// `/rel` (never a longer file name ending in the same characters).
+fn is_rel(recorded: &str, rel: &str) -> bool {
+    let p = recorded.replace('\\', "/");
+    p == rel || p.ends_with(&format!("/{rel}"))
+}
+
+/// The lines memory `id`'s session left in `rel` (under `root`), compared with the file
+/// as it is now. Events keep only an edit's path, so each edit is read back from the
+/// transcript record it came from and checked to be that event's tool call. Edits apply
+/// in order within the memory's chunk: a line a later edit replaced is not counted.
+/// Only lines that occur at most once in the file now are evidence (a line found in
+/// several places says nothing about this one).
+pub fn edits_kept(conn: &Connection, id: i64, root: &Path, rel: &str) -> Result<Option<Kept>> {
+    let origin: Option<(String, String)> = conn
+        .query_row(
+            "SELECT coalesce(session_id, ''), coalesce(origin_id, '') FROM memories WHERE id = ?1 AND origin = 'mnem'",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    // Distilled memories are named `<session>@<first event>-<last event>#<n>`.
+    let Some((from, through, session)) = origin.and_then(|(session, o)| {
+        let range = o.rsplit_once('@')?.1.split('#').next()?;
+        let (a, b) = range.split_once('-')?;
+        Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?, session))
+    }) else {
+        return Ok(None);
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT path, record_key, source_path, coalesce(byte_offset, 0) FROM events
+          WHERE session_id = ?1 AND id BETWEEN ?2 AND ?3 AND kind = 'file_edit'
+            AND path IS NOT NULL AND source_path IS NOT NULL ORDER BY id",
+    )?;
+    let edits: Vec<(String, String, String, i64)> = st
+        .query_map(params![session, from, through], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .filter(|e| is_rel(&e.0, rel))
+        .take(EDITS_READ + 1)
+        .collect();
+    if edits.is_empty() || edits.len() > EDITS_READ {
+        return Ok(None);
+    }
+    // The chunk's edits in order: what a later one replaced no longer counts.
+    let mut left: Vec<String> = Vec::new();
+    for (path, key, source, offset) in &edits {
+        let Some(e) = record_at(Path::new(source), *offset).and_then(|r| edit_at(&r, key, path))
+        else {
+            // One edit that cannot be read back leaves the final state unknown.
+            return Ok(None);
+        };
+        left.retain(|l| !e.old.contains(l));
+        for l in e.new {
+            if !left.contains(&l) {
+                left.push(l);
+            }
+        }
+    }
+    let file = root.join(rel);
+    if !std::fs::metadata(&file).is_ok_and(|m| m.is_file() && m.len() <= FILE_BYTES) {
+        return Ok(None);
+    }
+    let Ok(now) = std::fs::read_to_string(&file) else {
+        return Ok(None);
+    };
+    let mut count: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for l in now.lines() {
+        *count.entry(l.trim()).or_default() += 1;
+    }
+    let evidence: Vec<usize> = left
+        .iter()
+        .take(LINES_COMPARED)
+        .map(|l| count.get(l.as_str()).copied().unwrap_or(0))
+        .filter(|n| *n <= 1)
+        .collect();
+    if evidence.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Kept {
+        kept: evidence.iter().filter(|n| **n == 1).count(),
+        of: evidence.len(),
+    }))
+}
+
+/// The transcript record (one JSON line) at `offset` in `file`: a regular file, and a
+/// line of at most RECORD_BYTES.
+fn record_at(file: &Path, offset: i64) -> Option<serde_json::Value> {
+    use std::io::{BufRead, Read, Seek, SeekFrom};
+    if !std::fs::metadata(file).ok()?.is_file() {
+        return None;
+    }
+    let mut f = std::fs::File::open(file).ok()?;
+    f.seek(SeekFrom::Start(u64::try_from(offset).ok()?)).ok()?;
+    let mut line = Vec::new();
+    std::io::BufReader::new(f.take(RECORD_BYTES))
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.last() != Some(&b'\n') && line.len() as u64 >= RECORD_BYTES {
+        return None;
+    }
+    serde_json::from_slice(&line).ok()
+}
+
+/// The edit event `key` (`<record id>:<content index>` for Claude Code and pi,
+/// `<item id>:<path hash>` for Codex) made to `path`, if `record` is the record it came
+/// from. A record at that offset with another id (a transcript rewritten since) is None.
+pub fn edit_at(record: &serde_json::Value, key: &str, path: &str) -> Option<Edit> {
+    use serde_json::Value;
+    let (id, part) = key.rsplit_once(':')?;
+    let lines = |t: &str, out: &mut Vec<String>| {
+        out.extend(
+            t.lines()
+                .map(str::trim)
+                .filter(|l| l.chars().count() >= 12)
+                .map(str::to_string),
+        )
+    };
+    fn texts(input: &Value, keys: &[&str], out: &mut Vec<String>) {
+        for k in keys {
+            if let Some(t) = input.get(*k).and_then(Value::as_str) {
+                out.push(t.to_string());
+            }
+        }
+        for e in input.get("edits").and_then(Value::as_array).into_iter().flatten() {
+            texts(e, keys, out);
+        }
+    }
+    let same = |a: &str| a.replace('\\', "/") == path.replace('\\', "/");
+    let str_at = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    // Claude Code (`uuid`) and pi (`id`): the tool call at that index of the message.
+    if str_at(record, "uuid").or_else(|| str_at(record, "id")).as_deref() == Some(id) {
+        let call = record.get("message")?.get("content")?.get(part.parse::<usize>().ok()?)?;
+        let input = match call.get("input").or_else(|| call.get("arguments"))? {
+            Value::String(s) => serde_json::from_str::<Value>(s).ok()?,
+            v => v.clone(),
+        };
+        let named = ["file_path", "path", "notebook_path"]
+            .iter()
+            .find_map(|k| input.get(*k).and_then(Value::as_str))?;
+        if !same(named) {
+            return None;
+        }
+        let (mut old, mut new) = (Vec::new(), Vec::new());
+        texts(&input, &["old_string", "oldText", "old_str"], &mut old);
+        texts(&input, &["new_string", "newText", "new_str", "content"], &mut new);
+        let mut e = Edit::default();
+        old.iter().for_each(|t| lines(t, &mut e.old));
+        new.iter().for_each(|t| lines(t, &mut e.new));
+        return Some(e);
+    }
+    // Codex: the item with that id, its change to this path (a whole file or a diff).
+    let item = record
+        .get("payload")
+        .and_then(|p| p.get("item"))
+        .or_else(|| record.get("item"))?;
+    if str_at(item, "id").as_deref() != Some(id) {
+        return None;
+    }
+    let changes = item.get("changes")?.as_object()?;
+    let content = changes
+        .iter()
+        .find(|(p, _)| same(p))?
+        .1
+        .get("content")?
+        .as_str()?;
+    let mut e = Edit::default();
+    if content.lines().any(|l| l.starts_with("@@")) {
+        for l in content.lines() {
+            if let Some(t) = l.strip_prefix('+').filter(|_| !l.starts_with("+++")) {
+                lines(t, &mut e.new);
+            } else if let Some(t) = l.strip_prefix('-').filter(|_| !l.starts_with("---")) {
+                lines(t, &mut e.old);
+            }
+        }
+    } else {
+        lines(content, &mut e.new);
+    }
+    Some(e)
 }
 
 /// A recorded path as a repo-relative path under `root`, if that file exists here.
@@ -909,7 +1164,7 @@ mod tests {
         let touch = on_touch(&c, "claude:s", &t, 3).unwrap().unwrap();
         assert!(touch.contains("(file since: +1 −0 lines)"), "{touch}");
         assert!(
-            touch.contains("1 of 1 predate changes to the file: "),
+            touch.contains("1 of 1 may describe code that changed: "),
             "{touch}"
         );
         assert!(
@@ -922,6 +1177,124 @@ mod tests {
         let r = report(&c, &t, 10).unwrap();
         let after = r.split("#2 ").nth(1).unwrap();
         assert!(after.lines().nth(1).unwrap().contains("unchanged"), "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_edit_is_read_back_from_its_own_tool_call_only() {
+        use serde_json::json;
+        let line = "let retries = backoff(attempt);";
+        let other = "let unrelated = something_else();";
+        // Claude Code: the record's uuid, the tool call at that content index.
+        let claude = json!({ "uuid": "u1", "message": { "content": [
+            { "type": "tool_use", "input": { "file_path": "/r/src/a.rs", "old_string": other, "new_string": other } },
+            { "type": "tool_use", "input": { "file_path": "/r/src/a.rs", "old_string": "fn old_name_here() {}", "new_string": format!("{line}\n}}") } },
+        ] } });
+        let e = edit_at(&claude, "u1:1", "/r/src/a.rs").unwrap();
+        assert_eq!((e.old, e.new), (vec!["fn old_name_here() {}".to_string()], vec![line.to_string()]));
+        // A rewritten transcript: another record at that offset is not this edit.
+        assert!(edit_at(&claude, "u2:1", "/r/src/a.rs").is_none());
+        // The event's path must be the tool call's path.
+        assert!(edit_at(&claude, "u1:1", "/r/src/b.rs").is_none());
+        // pi: the record's id, arguments as an object or a JSON string, and edit lists.
+        let pi = json!({ "id": "p1", "message": { "content": [{ "type": "toolCall",
+            "arguments": json!({ "path": "src/a.rs", "edits": [{ "oldText": other, "newText": line }] }).to_string() }] } });
+        let e = edit_at(&pi, "p1:0", "src/a.rs").unwrap();
+        assert_eq!((e.old, e.new), (vec![other.to_string()], vec![line.to_string()]));
+        // Codex: the item's id, its change to this path; a diff's added and removed lines.
+        let codex = json!({ "payload": { "item": { "id": "c1", "changes": { "/r/src/a.rs": {
+            "type": "update", "content": format!("@@ -1 +1 @@\n-fn old_name_here() {{}}\n+{line}\n") } } } } });
+        let e = edit_at(&codex, "c1:abc", "/r/src/a.rs").unwrap();
+        assert_eq!((e.old, e.new), (vec!["fn old_name_here() {}".to_string()], vec![line.to_string()]));
+        assert!(edit_at(&codex, "c2:abc", "/r/src/a.rs").is_none());
+        // A path matches on whole components only.
+        assert!(is_rel("/r/src/a.rs", "src/a.rs") && is_rel("src\\a.rs", "src/a.rs"));
+        assert!(!is_rel("/r/src/not_a.rs", "a.rs"));
+    }
+
+    #[test]
+    fn a_memory_says_whether_its_own_edits_are_still_there() {
+        let dir = std::env::temp_dir().join(format!("mnem-files-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let file = dir.join("src/a.rs").to_string_lossy().to_string();
+        let kept = "let retries = backoff(attempt);";
+        let gone = "log::warn!(\"giving up after {n} tries\");";
+        let first = "let first_draft = compute_once();";
+        let twice = "let repeated_line = shared_helper();";
+        // The transcript: one Claude Code record per edit.
+        let transcript = dir.join("t.jsonl");
+        let mut body = String::new();
+        let mut offsets = Vec::new();
+        for (i, (old, new)) in [
+            ("", kept),        // event 10
+            ("", gone),        // event 11
+            ("", first),       // event 12: replaced by event 13 in the same chunk
+            (first, kept),     // event 13
+            ("", twice),       // event 14
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            offsets.push(body.len() as i64);
+            body.push_str(&serde_json::json!({ "uuid": format!("u{i}"), "message": { "content": [
+                { "type": "tool_use", "input": { "file_path": file, "old_string": old, "new_string": new } }] } })
+                .to_string());
+            body.push('\n');
+        }
+        std::fs::write(&transcript, &body).unwrap();
+        let c = crate::db::open_with(Path::new(":memory:"), Duration::from_secs(1)).unwrap();
+        for (i, off) in offsets.iter().enumerate() {
+            c.execute(
+                "INSERT INTO events(id, session_id, record_key, kind, path, source_path, byte_offset)
+                 VALUES (?1, 's', ?2, 'file_edit', ?3, ?4, ?5)",
+                params![10 + i as i64, format!("u{i}:0"), file, transcript.to_string_lossy(), off],
+            )
+            .unwrap();
+        }
+        // Another file whose name ends the same way: never this file's edit.
+        c.execute(
+            "INSERT INTO events(id, session_id, record_key, kind, path, source_path, byte_offset)
+             VALUES (15, 's', 'u9:0', 'file_edit', '/elsewhere/src/not_a.rs', ?1, 0)",
+            [transcript.to_string_lossy()],
+        )
+        .unwrap();
+        let memory = |id: i64, range: &str| {
+            c.execute(
+                "INSERT INTO memories(id, session_id, project, kind, title, origin, origin_id) VALUES (?1, 's', 'p', 'observation', 't', 'mnem', ?2)",
+                params![id, format!("s@{range}#0")],
+            )
+            .unwrap();
+        };
+        memory(1, "10-10");
+        memory(2, "11-11");
+        memory(3, "12-13");
+        memory(4, "14-14");
+        memory(5, "16-20");
+        memory(6, "15-15");
+        std::fs::write(
+            dir.join("src/a.rs"),
+            format!("fn new() {{}}\n    {kept}\n// {gone}\n{twice}\n{twice}\n"),
+        )
+        .unwrap();
+        let k = |id| edits_kept(&c, id, &dir, "src/a.rs").unwrap();
+        assert_eq!(k(1), Some(Kept { kept: 1, of: 1 }));
+        assert_eq!(k(1).unwrap().phrase(), "its edited lines are still there");
+        // Commented out is not still there.
+        assert_eq!(k(2).unwrap().phrase(), "its edited lines are gone");
+        // The first draft was replaced within the chunk: only what it left counts.
+        assert_eq!(k(3), Some(Kept { kept: 1, of: 1 }));
+        // A line found twice in the file now is no evidence either way.
+        assert_eq!(k(4), None);
+        assert_eq!(k(5), None, "no edits in its range");
+        assert_eq!(k(6), None, "not_a.rs is not a.rs");
+        // A transcript rewritten since: the record at that offset is another one.
+        std::fs::write(&transcript, body.replace("\"u0\"", "\"x0\"")).unwrap();
+        assert_eq!(k(1), None);
+        assert_eq!(
+            Kept { kept: 3, of: 10 }.phrase(),
+            "its edited lines partly changed, 3 of 10 kept"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

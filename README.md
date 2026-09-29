@@ -124,12 +124,22 @@ something since, a short "meanwhile" update.
 
 When Claude Code or pi first reads or edits a file in a session, mnem adds up to three
 past memories about that file (those that changed it first; never the session's own,
-never one the session was already shown), each
-with how the file changed since in git: commits after the memory, uncommitted edits,
-lines added and removed, or that the file is gone. It takes about 40 ms, once per file
-per session. Claude Code gets them from a PostToolUse hook; pi's extension appends them
+never one the session was already shown), each with whether the lines its session
+left in the file are still there: all or most of them (4 in 5), partly (how many), or
+gone. Edit events keep only the path, so each edit is read back from the transcript
+record it came from, checked to be that event's tool call (Claude Code and pi tool
+input, Codex changes). Edits apply in order within the memory's chunk, so a line a later
+edit replaced does not count; trimmed lines of 12 characters or more are matched whole,
+and a line found more than once in the file now is no evidence either way. When that
+cannot be told (edits made through a shell, a transcript gone or rewritten, more than 20
+edits, a file over 2 MB), it says how the file changed since in git instead: commits
+after the memory, uncommitted edits, lines added and removed, or that the file is gone.
+On 460 recent memory-file pairs, 354 could be told: 268 still had their lines, 77
+partly, 9 not, where the file-level check called nearly all of them changed. It takes
+about 60 ms, once per file per session. Claude Code gets them from a PostToolUse hook; pi's extension appends them
 to the read, edit or write result (`mnem file <path> --touch`, at most 2.5 s). Any agent can ask with the MCP tool `recall_file(path)`, and people with
-`mnem file <path>`; `get_observations` also says when a memory's files changed since.
+`mnem file <path>`; `get_observations` also says, per file a memory touched, whether
+its edits are still there and how the file changed since.
 
 Recorded paths are placed before they are compared: a relative path is resolved
 against the memory's session directory when that was inside the repository (monorepo
