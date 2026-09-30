@@ -500,6 +500,16 @@ fn download(path: &str) -> Response {
 /// The viewer's actions: take a backup, upload one, restore it, or restart mnem.
 fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> Result<Response> {
     Ok(match path {
+        // Delete one backup (and its manifest).
+        "/api/backups/remove" => {
+            let Some(name) = q.get("file").and_then(|f| safe_name(f, "mnem-")) else {
+                return Ok(Response::error("400 Bad Request", "not a backup name"));
+            };
+            match crate::backup::remove(&crate::backup::dir(), name) {
+                Ok(()) => Response::json(&json!({ "removed": name })),
+                Err(e) => Response::error("404 Not Found", format!("{e:#}")),
+            }
+        }
         // The daily automatic backup, on or off.
         "/api/backups/auto" => {
             let on = match q.get("on").map(String::as_str) {

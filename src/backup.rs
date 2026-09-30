@@ -396,6 +396,24 @@ pub fn set_auto(conn: &Connection, on: bool) -> Result<()> {
     Ok(())
 }
 
+/// Delete one snapshot and its manifest. `file` must be a plain snapshot name in `dir`
+/// (as `list` returns it): nothing outside the folder, nothing else in it.
+pub fn remove(dir: &Path, file: &str) -> Result<()> {
+    ensure!(
+        file.starts_with("mnem-")
+            && file.ends_with(".db")
+            && !file.contains('/')
+            && !file.contains('\\')
+            && !file.contains(".."),
+        "not a backup name: {file}"
+    );
+    let path = dir.join(file);
+    ensure!(path.is_file(), "no such backup: {file}");
+    let _ = std::fs::remove_file(manifest_path(&path));
+    std::fs::remove_file(&path)?;
+    Ok(())
+}
+
 /// Age in ms of the newest verified snapshot, or None when there is none.
 pub fn newest_age(dir: &Path) -> Option<i64> {
     list(dir)
@@ -626,6 +644,45 @@ fn chrono_stamp(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_is_removed_one_at_a_time_and_only_backups() {
+        let d = std::env::temp_dir().join(format!("mnem-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let c = crate::db::open(&d.join("m.db")).unwrap();
+        let backups = d.join("backups");
+        let a = create(&c, &backups, KEEP).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let b = create(&c, &backups, KEEP).unwrap();
+        assert_ne!(a.file, b.file);
+        remove(&backups, &a.file).unwrap();
+        let left: Vec<String> = list(&backups)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, m)| m)
+            .map(|m| m.file)
+            .collect();
+        assert_eq!(left, std::slice::from_ref(&b.file), "only the chosen one went");
+        assert!(
+            !backups.join(a.file.replace(".db", ".json")).exists(),
+            "its manifest too"
+        );
+        // Anything that is not a backup in this folder is refused.
+        std::fs::write(d.join("mnem-outside.db"), "x").unwrap();
+        for bad in [
+            "../mnem-outside.db",
+            "m.db",
+            "mnem-x.json",
+            "/etc/passwd",
+            "mnem-..db",
+            &a.file,
+        ] {
+            assert!(remove(&backups, bad).is_err(), "{bad}");
+        }
+        assert!(d.join("mnem-outside.db").exists() && d.join("m.db").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn the_daily_backup_switch_is_on_by_default_and_remembered() {

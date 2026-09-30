@@ -475,11 +475,27 @@
               el("b", {}, fmtDate(b.created_at)), ` · ${fmtBytes(b.bytes)} · ${countsText(b)}`,
               b.host ? ` · from ${b.host}` : "",
               b.has_settings ? " · with settings" : ""),
-            el("a", { class: "move-btn", href: `/api/backups/${encodeURIComponent(b.file)}`, download: b.file }, "Download"))),
+            el("div", { class: "move-row-actions" },
+              el("a", { class: "move-btn", href: `/api/backups/${encodeURIComponent(b.file)}`, download: b.file }, "Download"),
+              el("button", { class: "move-btn danger", title: "Delete this backup", onclick: (e) => removeBackup(b, e.currentTarget) }, "Delete")))),
       );
       if (!data.backups.length) $("move-list").replaceChildren(el("p", { class: "move-help" }, "No backups yet."));
     } catch (e) {
       $("move-current").textContent = `Could not read backups: ${e.message}`;
+    }
+  }
+
+  // Delete one backup: asks first, since a deleted backup cannot be brought back.
+  async function removeBackup(b, button) {
+    if (!confirm(`Delete the backup from ${fmtDate(b.created_at)} (${fmtBytes(b.bytes)})? This cannot be undone.`)) return;
+    button.disabled = true;
+    try {
+      await postJSON(`/api/backups/remove?file=${encodeURIComponent(b.file)}`);
+      setStatus("move-create-status", `Deleted the backup from ${fmtDate(b.created_at)}.`);
+      await showMove();
+    } catch (e) {
+      setStatus("move-create-status", `Could not delete it: ${e.message}`, true);
+      button.disabled = false;
     }
   }
 

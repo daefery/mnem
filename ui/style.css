@@ -1410,6 +1410,7 @@
       color: #8b949e;
     }
     .move-preview[hidden], .move-progress[hidden], .mnem-agents[hidden] { display: none; }
+    .move-row-actions { display: flex; gap: 6px; flex: none; }
     .move-auto { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--color-text-primary); cursor: pointer; }
     .move-auto input { margin-top: 2px; }
     .move-auto small { display: block; color: var(--color-text-secondary); font-size: 12px; }

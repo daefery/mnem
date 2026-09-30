@@ -124,6 +124,43 @@ fn back_up_download_and_import_on_another_machine() {
         request(port_a, "POST", "/api/backups/auto?on=maybe", OK, b"").status,
         400
     );
+    // Deleting a backup: same guard; only backup names in the backups folder.
+    assert_eq!(
+        request(
+            port_a,
+            "POST",
+            "/api/backups/remove?file=mnem-x.db",
+            "",
+            b""
+        )
+        .status,
+        403
+    );
+    for bad in ["..%2Fmnem.db", "mnem.db%2F..", "config.json", "mnem-x.json"] {
+        assert_eq!(
+            request(
+                port_a,
+                "POST",
+                &format!("/api/backups/remove?file={bad}"),
+                OK,
+                b""
+            )
+            .status,
+            400,
+            "{bad}"
+        );
+    }
+    assert_eq!(
+        request(
+            port_a,
+            "POST",
+            "/api/backups/remove?file=mnem-none.db",
+            OK,
+            b""
+        )
+        .status,
+        404
+    );
     let evil = "X-Mnem: 1\r\nOrigin: http://evil.example\r\n";
     assert_eq!(
         request(port_a, "POST", "/api/backups", evil, b"").status,
