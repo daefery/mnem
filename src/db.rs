@@ -360,7 +360,9 @@ pub fn sanitize_schema(conn: &Connection) -> Result<()> {
     };
     let objects: Vec<(String, String)> = {
         let mut st =
-            conn.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'")?;
+            // SQLite's own objects start with "sqlite_" (GLOB: in LIKE, "_" is any character,
+            // and a trigger named "sqliteevil" would be spared).
+            conn.prepare("SELECT type, name FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'")?;
         st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?
     };

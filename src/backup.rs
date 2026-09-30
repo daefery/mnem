@@ -458,10 +458,14 @@ fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
                 "row counts differ from manifest"
             );
         }
-        // Opening through mnem runs migrations exactly as a restored database would, and
-        // only this build's own triggers, views and indexes survive.
+        // Its own triggers, views and indexes go before anything writes to it (a trigger
+        // smuggled in the file would run on mnem's schema setup and migrations); then it
+        // is opened through mnem, which migrates it exactly as a restored database.
+        {
+            let raw = rusqlite::Connection::open(&staged)?;
+            db::sanitize_schema(&raw)?;
+        }
         let c = db::open(&staged)?;
-        db::sanitize_schema(&c)?;
         for t in ["memories_fts", "events_fts"] {
             c.execute(
                 &format!("INSERT INTO {t}({t}) VALUES ('integrity-check')"),
@@ -663,7 +667,11 @@ mod tests {
             .filter_map(|(_, m)| m)
             .map(|m| m.file)
             .collect();
-        assert_eq!(left, std::slice::from_ref(&b.file), "only the chosen one went");
+        assert_eq!(
+            left,
+            std::slice::from_ref(&b.file),
+            "only the chosen one went"
+        );
         assert!(
             !backups.join(a.file.replace(".db", ".json")).exists(),
             "its manifest too"
@@ -762,6 +770,62 @@ mod tests {
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 2, "live database unchanged");
+    }
+
+    /// A trigger in the backup never runs: not on the writes mnem's schema setup makes
+    /// while the backup is checked, and not by a name that looks like SQLite's own.
+    #[test]
+    fn a_smuggled_trigger_never_runs_during_restore() {
+        let d = std::env::temp_dir().join(format!("mnem-restore-early-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let evil = d.join("evil.db");
+        {
+            let c = db::open(&evil).unwrap();
+            c.execute(
+                "INSERT INTO sessions(id, agent, native_id, title) VALUES ('pi:s', 'pi', 's', 'clean')",
+                [],
+            )
+            .unwrap();
+            c.execute_batch(
+                "CREATE TRIGGER early_meta BEFORE INSERT ON meta BEGIN UPDATE sessions SET title = 'pwned'; END;
+                 CREATE TRIGGER sqliteevil BEFORE INSERT ON meta BEGIN UPDATE sessions SET title = 'pwned'; END;
+                 CREATE TRIGGER sqliteXevil AFTER UPDATE ON sessions BEGIN UPDATE sessions SET native_id = 'pwned' WHERE native_id != 'pwned'; END;
+                 DELETE FROM meta;
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        }
+        let mut conn = db::open(&d.join("m.db")).unwrap();
+        restore(&evil, &mut conn, &d.join("backups")).unwrap();
+        let title: String = conn
+            .query_row("SELECT title FROM sessions WHERE id = 'pi:s'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(title, "clean");
+        let left: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND (name GLOB '*evil*' OR name GLOB 'early*')")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(left.is_empty(), "{left:?}");
+        conn.execute(
+            "UPDATE sessions SET title = 'renamed' WHERE id = 'pi:s'",
+            [],
+        )
+        .unwrap();
+        let native: String = conn
+            .query_row(
+                "SELECT native_id FROM sessions WHERE id = 'pi:s'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(native, "s");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
