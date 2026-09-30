@@ -477,7 +477,8 @@ fn backups(conn: &Connection, db_path: &Path) -> Result<Value> {
         })
         .collect();
     Ok(
-        json!({ "current": counts(conn, db_path)?, "backups": list, "can_restart": under_service() }),
+        json!({ "current": counts(conn, db_path)?, "backups": list, "can_restart": under_service(),
+                "auto": crate::backup::auto_enabled(conn) }),
     )
 }
 
@@ -499,6 +500,17 @@ fn download(path: &str) -> Response {
 /// The viewer's actions: take a backup, upload one, restore it, or restart mnem.
 fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> Result<Response> {
     Ok(match path {
+        // The daily automatic backup, on or off.
+        "/api/backups/auto" => {
+            let on = match q.get("on").map(String::as_str) {
+                Some("1") => true,
+                Some("0") => false,
+                _ => return Ok(Response::error("400 Bad Request", "on must be 1 or 0")),
+            };
+            let conn = open(db_path)?;
+            crate::backup::set_auto(&conn, on)?;
+            Response::json(&json!({ "auto": crate::backup::auto_enabled(&conn) }))
+        }
         "/api/backups" => {
             let m =
                 crate::backup::create(&open(db_path)?, &crate::backup::dir(), crate::backup::KEEP)?;

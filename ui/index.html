@@ -97,11 +97,15 @@
         </section>
         <section class="move-section">
           <h3>1 · Back up</h3>
-          <p class="move-help">A backup is one file with every session, memory and your settings (never API keys). It holds your full history, prompts and code included, so keep it private. mnem also takes one every night and keeps seven.</p>
+          <p class="move-help">A backup is one file with every session, memory and your settings (never API keys). It holds your full history, prompts and code included, so keep it private. The seven newest are kept.</p>
           <div class="move-actions">
             <button class="move-btn primary" id="move-create">Create backup now</button>
             <span class="move-status" id="move-create-status" role="status"></span>
           </div>
+          <label class="move-auto">
+            <input type="checkbox" id="move-auto">
+            <span>Back up automatically every day <small id="move-auto-note"></small></span>
+          </label>
           <div class="move-list" id="move-list"></div>
         </section>
         <section class="move-section">

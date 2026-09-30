@@ -375,6 +375,27 @@ fn rotate(dir: &Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
+/// Whether `mnem watch` takes a snapshot by itself every day (on unless switched off in
+/// the viewer or with `mnem backup --auto off`). Kept in the database, so the running
+/// watcher follows a change on its next pass.
+pub fn auto_enabled(conn: &Connection) -> bool {
+    conn.query_row("SELECT v FROM meta WHERE k = 'backup.auto'", [], |r| {
+        r.get::<_, String>(0)
+    })
+    .optional()
+    .ok()
+    .flatten()
+    .is_none_or(|v| v != "off")
+}
+
+pub fn set_auto(conn: &Connection, on: bool) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meta(k, v) VALUES ('backup.auto', ?1) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+        [if on { "on" } else { "off" }],
+    )?;
+    Ok(())
+}
+
 /// Age in ms of the newest verified snapshot, or None when there is none.
 pub fn newest_age(dir: &Path) -> Option<i64> {
     list(dir)
@@ -605,6 +626,25 @@ fn chrono_stamp(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daily_backup_switch_is_on_by_default_and_remembered() {
+        let c =
+            crate::db::open_with(Path::new(":memory:"), std::time::Duration::from_secs(1)).unwrap();
+        assert!(auto_enabled(&c), "on until switched off");
+        set_auto(&c, false).unwrap();
+        assert!(!auto_enabled(&c));
+        // Off, a missing or old backup is not a health alert (backing up is the user's).
+        assert!(
+            !crate::health::for_hook(&c)
+                .iter()
+                .any(|a| a.contains("backup")),
+            "{:?}",
+            crate::health::for_hook(&c)
+        );
+        set_auto(&c, true).unwrap();
+        assert!(auto_enabled(&c));
+    }
 
     #[test]
     fn concurrent_backups_do_not_collide() {

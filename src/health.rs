@@ -83,8 +83,9 @@ fn cheap(conn: &Connection) -> Vec<String> {
     let mut out = Vec::new();
     let now = db::now_ms();
 
-    // Backups.
+    // Backups (only when mnem takes them itself: switched off, backing up is the user's).
     match backup::newest_age(&backup::dir()) {
+        _ if !backup::auto_enabled(conn) => {}
         None => out.push("no verified backup yet (run `mnem backup`)".into()),
         Some(age) if age > 2 * backup::INTERVAL_MS => out.push(format!(
             "last verified backup is {} old (run `mnem backup`)",

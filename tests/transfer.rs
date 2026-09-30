@@ -107,6 +107,23 @@ fn back_up_download_and_import_on_another_machine() {
         request(port_a, "POST", "/api/agents/connect?agent=nope", OK, b"").status,
         400
     );
+    // The daily backup switch: same guard, and the viewer reads it back.
+    assert_eq!(
+        request(port_a, "POST", "/api/backups/auto?on=0", "", b"").status,
+        403
+    );
+    let off = request(port_a, "POST", "/api/backups/auto?on=0", OK, b"");
+    assert_eq!(json(&off)["auto"], false);
+    assert_eq!(
+        json(&request(port_a, "GET", "/api/backups", "", b""))["auto"],
+        false
+    );
+    let on = request(port_a, "POST", "/api/backups/auto?on=1", OK, b"");
+    assert_eq!(json(&on)["auto"], true);
+    assert_eq!(
+        request(port_a, "POST", "/api/backups/auto?on=maybe", OK, b"").status,
+        400
+    );
     let evil = "X-Mnem: 1\r\nOrigin: http://evil.example\r\n";
     assert_eq!(
         request(port_a, "POST", "/api/backups", evil, b"").status,

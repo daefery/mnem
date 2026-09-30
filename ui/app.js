@@ -464,6 +464,7 @@
     $("move-modal").style.display = "flex";
     try {
       const data = await getJSON("/api/backups");
+      showAuto(data.auto);
       const c = data.current;
       $("move-current").replaceChildren(
         el("b", {}, c.host), ` holds ${countsText(c)} (${fmtBytes(c.bytes)}).`);
@@ -479,6 +480,28 @@
       if (!data.backups.length) $("move-list").replaceChildren(el("p", { class: "move-help" }, "No backups yet."));
     } catch (e) {
       $("move-current").textContent = `Could not read backups: ${e.message}`;
+    }
+  }
+
+  function showAuto(on) {
+    $("move-auto").checked = !!on;
+    $("move-auto-note").textContent = on
+      ? "mnem-watch takes one when the newest is a day old."
+      : "Off: backups are taken only when you press Create backup now.";
+  }
+
+  async function setAuto(on) {
+    const box = $("move-auto");
+    box.disabled = true;
+    try {
+      const r = await postJSON(`/api/backups/auto?on=${on ? 1 : 0}`);
+      showAuto(r.auto);
+      loadHealth();
+    } catch (e) {
+      showAuto(!on);
+      $("move-auto-note").textContent = `Could not change it: ${e.message}`;
+    } finally {
+      box.disabled = false;
     }
   }
 
@@ -692,6 +715,7 @@
       if (e.target.id === "move-modal") e.target.style.display = "none";
     });
     $("move-create").addEventListener("click", createBackup);
+    $("move-auto").addEventListener("change", (e) => setAuto(e.target.checked));
     $("move-file").addEventListener("change", (e) => chooseFile(e.target.files[0]));
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {

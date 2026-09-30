@@ -216,6 +216,15 @@ The real-prompt test half is never used by the gate, so repeated gating cannot t
 recall to it; read it once when a change is final. The gate takes about a minute; new
 candidates are judged once by the configured models and cached.
 
+## Backups
+
+`mnem watch` takes a verified backup when the newest is a day old and keeps the seven
+newest in `~/.mnem/backups/` (about the database's size each). To back up only by hand,
+untick **Back up automatically every day** under **Backup & move** in the viewer, or run
+`mnem backup --auto off` (`--auto on` turns it back on). Then backups are taken only with
+**Create backup now** or `mnem backup`, and a missing or old backup is no longer an
+alert.
+
 ## Moving to another machine
 
 In the viewer (http://127.0.0.1:37777), open **Backup & move**:
@@ -244,7 +253,7 @@ The viewer's restart button appears only when mnem runs under a systemd unit wit
 `Restart=always` or `on-failure` (as `mnem install` sets up).
 
 From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
-`mnem restore <file> --apply [--settings]`. Nightly backups carry settings too.
+`mnem restore <file> --apply [--settings]`. Automatic backups carry settings too.
 
 The viewer's changing actions are POSTs that need an `X-Mnem` header from the viewer's
 own origin, so another website open in the browser cannot trigger them.

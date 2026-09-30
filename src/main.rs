@@ -170,6 +170,9 @@ enum Cmd {
     Backup {
         #[arg(long, default_value_t = backup::KEEP)]
         keep: usize,
+        /// Switch the daily automatic backup on or off (no backup is taken)
+        #[arg(long, value_parser = ["on", "off"])]
+        auto: Option<String>,
     },
     /// List snapshots with their row counts
     Backups,
@@ -774,7 +777,18 @@ fn main() -> Result<()> {
             let recorded = mnem::gitstate::record(&conn, &session, &cwd)?;
             println!("{}", if recorded { "recorded" } else { "unchanged" });
         }
-        Cmd::Backup { keep } => {
+        Cmd::Backup { auto: Some(a), .. } => {
+            backup::set_auto(&conn, a == "on")?;
+            println!(
+                "daily automatic backup: {} (mnem watch follows on its next pass)",
+                if a == "on" {
+                    "on"
+                } else {
+                    "off; take one with `mnem backup` or in the viewer"
+                }
+            );
+        }
+        Cmd::Backup { keep, auto: None } => {
             let t = Instant::now();
             let m = backup::create(&conn, &backup::dir(), keep)?;
             println!(
@@ -945,7 +959,10 @@ fn main() -> Result<()> {
                 {
                     hook::log(&format!("watch health: {e:#}"));
                 }
-                if backup::newest_age(&backup::dir()).is_none_or(|age| age > backup::INTERVAL_MS) {
+                if backup::auto_enabled(&conn)
+                    && backup::newest_age(&backup::dir())
+                        .is_none_or(|age| age > backup::INTERVAL_MS)
+                {
                     match backup::create(&conn, &backup::dir(), backup::KEEP) {
                         Ok(m) => hook::log(&format!(
                             "watch backup: {} ({} memories)",

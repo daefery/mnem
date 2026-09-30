@@ -123,7 +123,13 @@ pub fn run(conn: &Connection) -> Result<bool> {
         .collect::<rusqlite::Result<_>>()?;
     println!("  {}", kinds.join(" "));
 
+    let auto = crate::backup::auto_enabled(conn);
     match crate::backup::newest_age(&crate::backup::dir()) {
+        age if !auto => println!(
+            "backup: automatic off (manual: viewer or `mnem backup`){}",
+            age.map(|a| format!("; newest verified snapshot {} ago", crate::context::ago(a)))
+                .unwrap_or_else(|| "; none taken yet".into())
+        ),
         Some(age) if age <= 2 * crate::backup::INTERVAL_MS => {
             println!(
                 "backup: newest verified snapshot {} ago",
@@ -139,7 +145,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
         }
         None => {
             healthy = false;
-            println!("backup: NONE, run `mnem backup` (the watch service does this nightly)");
+            println!("backup: NONE, run `mnem backup` (the watch service does this daily)");
         }
     }
     let model = crate::embed::model_name();
