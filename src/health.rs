@@ -94,6 +94,12 @@ fn cheap(conn: &Connection) -> Vec<String> {
         _ => {}
     }
 
+    // Distillation that never runs: capture and search work, but no memory is made, so
+    // recall, file memories and summaries stay empty with nothing else saying why.
+    if let Some(why) = distill::not_configured(&CONFIG.distill) {
+        out.push(why.into());
+    }
+
     // Distillation: sessions about to leave the backfill window undistilled are lost to
     // recall (their transcript stays, but no memory is ever made from it).
     if let Ok(b) = distill::backlog(conn) {

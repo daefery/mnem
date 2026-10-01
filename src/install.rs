@@ -78,6 +78,9 @@ pub fn run(p: &Plan) -> Result<()> {
     } else {
         say!("\nagents");
         say_raw(&crate::agents::render(&crate::agents::status_all()));
+        if let Some(why) = crate::distill::not_configured(&crate::config::CONFIG.distill) {
+            say!("\n{why}");
+        }
     }
     Ok(())
 }

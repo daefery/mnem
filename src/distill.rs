@@ -162,6 +162,15 @@ pub fn order_candidates(
     out
 }
 
+/// Why `c` cannot distill, in words for the user, or None when a key is configured. A
+/// key that is configured but unreadable is caught by the failing-summaries alert once
+/// distillation runs; this covers the case where it never runs at all.
+pub fn not_configured(c: &crate::config::DistillConfig) -> Option<&'static str> {
+    (c.api_key_env.is_none() && c.api_key_json.is_none()).then_some(
+        "no memories are being made: distillation has no model configured (set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see README · Configuration)",
+    )
+}
+
 impl Llm {
     pub fn from_config() -> Result<Llm> {
         Self::from_distill(&CONFIG.distill)
@@ -409,6 +418,16 @@ impl Llm {
 #[cfg(test)]
 mod chain_tests {
     use super::*;
+
+    #[test]
+    fn no_key_means_no_memories_and_is_said() {
+        let cfg = |v| serde_json::from_value::<crate::config::DistillConfig>(v).unwrap();
+        assert!(not_configured(&cfg(serde_json::json!({}))).is_some());
+        // A model alone is not enough: nothing can be sent without a key.
+        assert!(not_configured(&cfg(serde_json::json!({ "models": ["m"] }))).is_some());
+        assert!(not_configured(&cfg(serde_json::json!({ "api_key_env": "K" }))).is_none());
+        assert!(not_configured(&cfg(serde_json::json!({ "api_key_json": "~/k.json" }))).is_none());
+    }
 
     #[test]
     fn chain_falls_back_to_available_cheap_models() {

@@ -276,3 +276,24 @@ fn walk(d: &Path) -> Vec<PathBuf> {
     }
     out
 }
+
+/// A fresh install with no settings captures but makes no memories: install and doctor
+/// both say so, and a configured key silences it.
+#[test]
+fn without_a_model_install_and_doctor_say_no_memories_are_made() {
+    let home = scratch("no-model");
+    let warning = "no memories are being made";
+    let report = mnem(&home, &["install", "--only", "pi"]);
+    assert!(report.contains(warning), "install report:\n{report}");
+    let doctor = mnem(&home, &["doctor"]);
+    assert!(doctor.contains(warning), "doctor:\n{doctor}");
+
+    std::fs::write(
+        home.join(".mnem/config.json"),
+        r#"{"distill": {"api_key_env": "MNEM_TEST_KEY"}}"#,
+    )
+    .unwrap();
+    let doctor = mnem(&home, &["doctor"]);
+    assert!(!doctor.contains(warning), "doctor with a key:\n{doctor}");
+    let _ = std::fs::remove_dir_all(&home);
+}
