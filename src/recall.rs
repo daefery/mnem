@@ -409,6 +409,23 @@ pub fn keyword_rank(
     Ok(rows)
 }
 
+/// Whether `session` is in the trial half of a presentation trial: a fixed split by a
+/// hash of the session id, so a session stays in one half and the split can be
+/// recomputed later from the id alone.
+pub fn trial_arm(session: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(session.as_bytes())[0] & 1 == 1
+}
+
+/// How many memories prompt recall shows `session`: `trial_top` for the trial half,
+/// else TOP (never more than TOP, never zero).
+fn top_for(session: &str, trial_top: Option<usize>) -> usize {
+    match trial_top {
+        Some(n) if trial_arm(session) => n.clamp(1, TOP),
+        _ => TOP,
+    }
+}
+
 /// Up to TOP unseen memories in `project` matching `prompt`, formatted for injection.
 pub fn recall(
     conn: &Connection,
@@ -420,6 +437,8 @@ pub fn recall(
     // the watch service drops keyword hits that share words but not meaning, then fills
     // empty slots. Without the service, keywords alone.
     let scope = Scope::session(session);
+    // Ranked to the usual five either way; a trial session is shown the best of them.
+    let top = top_for(session, crate::config::CONFIG.recall.trial_top);
     let mut rows = keyword_rank(conn, project, prompt, &scope, TOP * 2)?;
     if semantic_enabled()
         && classify_prompt(prompt)
@@ -430,7 +449,7 @@ pub fn recall(
         rows.truncate(TOP);
         fill_with_vectors(conn, &q, project, &scope, &mut rows, TOP)?;
     }
-    rows.truncate(TOP);
+    rows.truncate(top);
     if rows.is_empty() {
         return Ok(None);
     }
@@ -470,7 +489,23 @@ pub fn recall(
 
 #[cfg(test)]
 mod tests {
-    use super::terms;
+    use super::{TOP, terms, top_for, trial_arm};
+
+    #[test]
+    fn a_trial_shows_fewer_memories_to_half_the_sessions_only() {
+        let ids: Vec<String> = (0..200).map(|i| format!("pi:session-{i}")).collect();
+        let trial = ids.iter().filter(|s| trial_arm(s)).count();
+        assert!((70..=130).contains(&trial), "split {trial} of 200");
+        for s in &ids {
+            // The same session always lands in the same half.
+            assert_eq!(trial_arm(s), trial_arm(&s.clone()));
+            assert_eq!(top_for(s, None), TOP);
+            assert_eq!(top_for(s, Some(2)), if trial_arm(s) { 2 } else { TOP });
+            // Out-of-range settings stay within one and the usual five.
+            assert_eq!(top_for(s, Some(0)), if trial_arm(s) { 1 } else { TOP });
+            assert_eq!(top_for(s, Some(9)), TOP);
+        }
+    }
 
     #[test]
     fn extracts_distinctive_terms() {

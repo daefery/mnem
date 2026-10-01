@@ -30,6 +30,8 @@ pub struct Config {
     pub exclude_projects: Vec<String>,
     #[serde(default)]
     pub semantic: SemanticConfig,
+    #[serde(default)]
+    pub recall: RecallConfig,
     /// Port of the viewer and embedding service run by `mnem watch` (default 37777).
     pub ui_port: Option<u16>,
     /// When this process read the settings (ms): a long-running process keeps what it
@@ -52,6 +54,15 @@ pub struct SemanticConfig {
     pub fill_cosine: Option<f32>,
     /// Search drops any-word matches below this (default 0.35).
     pub search_cosine: Option<f32>,
+}
+
+/// What prompt recall shows.
+#[derive(Debug, Default, Deserialize)]
+pub struct RecallConfig {
+    /// A presentation trial: sessions in the trial half (`recall::trial_arm`) are shown at
+    /// most this many memories per prompt; the other half keep the usual five. Unset: no
+    /// trial, every session gets five.
+    pub trial_top: Option<usize>,
 }
 
 /// Background distillation through any OpenAI-compatible endpoint.
