@@ -1,0 +1,84 @@
+# Prebuilt binaries, so nobody needs Rust to use mnem. A tag like v0.2.0 builds every
+# target, tests it on the machine it runs on, and attaches the archives and their
+# checksums to a GitHub release. `workflow_dispatch` builds and tests without
+# releasing (the artifacts stay on the run), for checking a change first.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is built on the oldest supported runner so the binary runs on older
+          # glibc (Ubuntu 22.04, Debian 12 and newer), not just on what built it.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, features: fastembed }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, features: fastembed }
+          - { target: aarch64-apple-darwin, os: macos-14, features: fastembed }
+          # ONNX Runtime ships no prebuilt library for Intel Macs: keyword recall plus the
+          # small potion model, everything else the same.
+          - { target: x86_64-apple-darwin, os: macos-14, features: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
+      # Tests run where the binary can run: every target but the Intel one, which the
+      # Apple Silicon runner builds without running.
+      - name: Test
+        if: matrix.target != 'x86_64-apple-darwin'
+        run: cargo test --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
+      - name: Smoke test the binary
+        if: matrix.target != 'x86_64-apple-darwin'
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/mnem
+          "$bin" --version
+          export HOME="$RUNNER_TEMP/home" MNEM_HOME="$RUNNER_TEMP/home/.mnem"
+          mkdir -p "$HOME"
+          "$bin" install --dry-run --watch
+          "$bin" doctor
+      - name: Package
+        shell: bash
+        run: |
+          name=mnem-${{ matrix.target }}
+          mkdir -p "dist/$name"
+          cp target/${{ matrix.target }}/release/mnem README.md NOTICE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mnem-${{ matrix.target }}
+          path: dist/mnem-${{ matrix.target }}.tar.gz*
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat dist/*.sha256 > dist/checksums.txt
+          gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt install.sh \
+            --title "mnem $GITHUB_REF_NAME" --generate-notes

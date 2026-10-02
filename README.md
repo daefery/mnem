@@ -9,6 +9,43 @@ transaction, and events are deduplicated by the agent's own record ids. A crash,
 a missed hook or a rewritten file can delay capture but cannot lose it, and
 `mnem doctor` shows exactly how far behind capture is.
 
+## Install
+
+No Rust or build needed. On Linux (x86_64 or arm64, glibc 2.35 or newer: Ubuntu 22.04,
+Debian 12 and newer), WSL, or macOS:
+
+```sh
+curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
+```
+
+While the repository is private, with the GitHub CLI signed in to an account that can
+see it (`gh auth login`):
+
+```sh
+gh release download -R daefery/mnem -p install.sh -O - | sh
+```
+
+The script downloads the binary for your system, checks its SHA-256 against the
+release, puts it in `~/.local/bin` and runs `mnem install --watch`: it connects Claude
+Code, Codex and pi (installed yet or not), starts the background service (systemd on
+Linux and WSL, launchd on macOS), and sets distillation to the Claude Code or Codex you
+are signed in to when no model is configured. Then, after your first session:
+
+```sh
+mnem doctor    # ends with "status: OK"; the viewer is at http://127.0.0.1:37777
+```
+
+The first run downloads the embedding model (about 90 MB, once). Intel Macs get a build
+without the ONNX runtime (keyword recall with the small potion model), because ONNX
+Runtime ships no prebuilt library for them. Windows: use WSL. `MNEM_VERSION=v0.2.0`
+picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1` installs only the
+binary. To build from source instead, see Build below.
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed: each
+target is built and tested on its own runner (Linux on Ubuntu 22.04 for older glibc,
+macOS on Apple Silicon), then the archives, `checksums.txt` and `install.sh` are
+attached to the release.
+
 ## Commands
 
 | Command | What it does |
@@ -50,7 +87,8 @@ something since, a short "meanwhile" update.
 }
 ```
 
-- `semantic.model` (default `minishlab/potion-base-8M`), `semantic.enabled`: local
+- `semantic.model` (default `fastembed:AllMiniLML6V2` in builds with `--features fastembed`,
+  as the release binaries are, else `minishlab/potion-base-8M`), `semantic.enabled`: local
   semantic recall. The watch service keeps the model loaded and embeds new memories;
   hooks ask it for query vectors over localhost and fall back to keywords if it is down.
   Prompt recall leaves out memories from the asking session (the agent has that

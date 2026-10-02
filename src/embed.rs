@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// The model a build uses when the settings name none: MiniLM where the build can run it
+/// (picked on judged real prompts, see README), else potion-base-8M.
+#[cfg(feature = "fastembed")]
+pub const DEFAULT_MODEL: &str = "fastembed:AllMiniLML6V2";
+#[cfg(not(feature = "fastembed"))]
 pub const DEFAULT_MODEL: &str = "minishlab/potion-base-8M";
 const FILES: &[&str] = &["tokenizer.json", "model.safetensors", "config.json"];
 
