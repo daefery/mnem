@@ -477,7 +477,7 @@ fn backups(conn: &Connection, db_path: &Path) -> Result<Value> {
         })
         .collect();
     Ok(
-        json!({ "current": counts(conn, db_path)?, "backups": list, "can_restart": under_service(),
+        json!({ "current": counts(conn, db_path)?, "backups": list, "can_restart": crate::service::supervised_with_restart(),
                 "auto": crate::backup::auto_enabled(conn) }),
     )
 }
@@ -670,7 +670,7 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                 "settings_applied": settings,
                 "settings_error": settings_error,
                 "foreign_transcripts": foreign,
-                "can_restart": under_service(),
+                "can_restart": crate::service::supervised_with_restart(),
                 "current": counts(&conn, db_path)?,
             }))
         }
@@ -705,13 +705,14 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             }
         }
         "/api/restart" => {
-            if !under_service() {
+            if !crate::service::supervised_with_restart() {
                 return Ok(Response::error(
                     "409 Conflict",
-                    "mnem is not running under a systemd unit that restarts it: restart mnem yourself",
+                    "mnem is not running as a service that restarts it: restart mnem yourself",
                 ));
             }
-            // systemd (Restart=always) starts mnem again; answer first, then exit.
+            // The service manager (systemd Restart=always, launchd KeepAlive) starts mnem
+            // again; answer first, then exit.
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
                 // EX_TEMPFAIL: Restart=always and on-failure both start mnem again.
@@ -726,34 +727,6 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
 /// The settings text an origin carried (checked before the restore began).
 fn file_settings(origin: &crate::backup::Origin) -> String {
     origin.config.clone().unwrap_or_default()
-}
-
-/// True when systemd supervises this process (it sets INVOCATION_ID) and its unit
-/// restarts it after the exit code the restart action uses.
-fn under_service() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some()
-        && restart_policy().is_some_and(|p| p == "always" || p == "on-failure")
-}
-
-/// The Restart= policy of the systemd unit running this process, read from its cgroup.
-fn restart_policy() -> Option<String> {
-    let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok()?;
-    let unit = cgroup
-        .lines()
-        .flat_map(|l| l.rsplit('/'))
-        .find(|p| p.ends_with(".service"))?
-        .to_string();
-    let mut cmd = std::process::Command::new("systemctl");
-    if cgroup.contains("/user@") {
-        cmd.arg("--user");
-    }
-    let out = cmd
-        .args(["show", "-p", "Restart", "--value", &unit])
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn not_found() -> Response {

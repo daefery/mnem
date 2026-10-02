@@ -758,30 +758,21 @@ export default function (pi: ExtensionAPI) {
 
 fn watch_service(p: &Plan) -> Result<()> {
     say!("watch service");
-    let unit = db::home().join(".config/systemd/user/mnem-watch.service");
-    let body = format!(
-        "[Unit]\nDescription=mnem transcript watcher\n\n[Service]\nExecStart={} watch\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n",
-        p.bin
-    );
+    let m = crate::service::manager();
+    let file = m.file();
     if p.dry_run {
-        say!("  would write {} and enable it", unit.display());
+        say!("  would write {} and start it", file.display());
         return Ok(());
     }
-    std::fs::create_dir_all(unit.parent().expect("has parent"))?;
-    std::fs::write(&unit, body)?;
-    let ok = |args: &[&str]| {
-        Command::new("systemctl")
-            .args(args)
-            .output()
-            .is_ok_and(|o| o.status.success())
-    };
-    if ok(&["--user", "daemon-reload"]) && ok(&["--user", "enable", "--now", "mnem-watch.service"])
-    {
-        say!("  enabled and started mnem-watch.service");
+    std::fs::create_dir_all(file.parent().expect("has parent"))?;
+    std::fs::write(&file, m.definition(&p.bin))?;
+    if m.start() {
+        say!("  started the watch service ({})", file.display());
     } else {
         say!(
-            "  wrote {}; start it with: systemctl --user enable --now mnem-watch.service",
-            unit.display()
+            "  wrote {}; start it with: {}",
+            file.display(),
+            m.start_hint()
         );
     }
     Ok(())
@@ -863,18 +854,15 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
             }
         }
     }
-    let unit = db::home().join(".config/systemd/user/mnem-watch.service");
+    let m = crate::service::manager();
+    let unit = m.file();
     if unit.exists() {
         if dry_run {
             say!("  would stop and remove {}", unit.display());
         } else {
-            let _ = Command::new("systemctl")
-                .args(["--user", "disable", "--now", "mnem-watch.service"])
-                .output();
+            m.stop();
             std::fs::remove_file(&unit)?;
-            let _ = Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .output();
+            m.forget();
             say!("  removed {}", unit.display());
         }
     }

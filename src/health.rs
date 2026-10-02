@@ -13,7 +13,7 @@ use std::collections::HashMap;
 /// Capture that is behind for longer than this is an alert, not normal lag.
 const STUCK_MS: i64 = 5 * 60_000;
 
-/// Full check, including the costly parts (a stat per transcript, a systemctl call).
+/// Full check, including the costly parts (a stat per transcript, asking the service manager).
 /// For `mnem doctor`, the viewer and the watcher; hooks use `for_hook`.
 pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -21,10 +21,12 @@ pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
         out.push(stuck_message(stuck_files));
     }
     out.extend(cheap(conn));
-    if watch_installed() && !watch_active() {
-        out.push(
-            "mnem-watch.service is not running (systemctl --user start mnem-watch.service)".into(),
-        );
+    let m = crate::service::manager();
+    if watch_installed() && !m.active() {
+        out.push(format!(
+            "the mnem watch service is not running ({})",
+            m.start_hint()
+        ));
     }
     out
 }
@@ -62,16 +64,18 @@ pub fn for_hook(conn: &Connection) -> Vec<String> {
                 let age = db::now_ms() - r["at"].as_i64().unwrap_or(0);
                 if age > 5 * 60_000 {
                     out.push(format!(
-                        "mnem-watch has not reported for {} (is it running? systemctl --user status mnem-watch.service)",
-                        ago(age)
+                        "mnem-watch has not reported for {} (is it running? {})",
+                        ago(age),
+                        crate::service::manager().status_hint()
                     ));
                 } else if let Some(n) = r["stuck"].as_u64().filter(|n| *n > 0) {
                     out.push(stuck_message(n as usize));
                 }
             }
-            None => out.push(
-                "mnem-watch has never reported (systemctl --user status mnem-watch.service)".into(),
-            ),
+            None => out.push(format!(
+                "mnem-watch has never reported ({})",
+                crate::service::manager().status_hint()
+            )),
         }
     }
     out.extend(cheap(conn));
@@ -218,14 +222,5 @@ fn has_complete_line(path: &str, offset: u64) -> bool {
 }
 
 fn watch_installed() -> bool {
-    db::home()
-        .join(".config/systemd/user/mnem-watch.service")
-        .exists()
-}
-
-fn watch_active() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "mnem-watch.service"])
-        .status()
-        .is_ok_and(|s| s.success())
+    crate::service::manager().file().exists()
 }

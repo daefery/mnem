@@ -59,7 +59,7 @@ enum Cmd {
         /// mnem binary to register (default: this executable)
         #[arg(long)]
         bin: Option<String>,
-        /// Also install and start the `mnem watch` systemd user service
+        /// Also install and start the `mnem watch` background service (systemd, or launchd on macOS)
         #[arg(long)]
         watch: bool,
     },

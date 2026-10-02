@@ -251,7 +251,7 @@ In the viewer (http://127.0.0.1:37777), open **Backup & move**:
    fall between the two. Only data is taken from the file: its triggers, views and
    indexes are dropped and rebuilt from this build. Settings are off by default; the
    preview lists every setting that would change and flags any that change where
-   prompts go or which key is used. After ticking them, **Restart mnem** (under systemd
+   prompts go or which key is used. After ticking them, **Restart mnem** (as a service
    it comes back in about 10 s). Transcripts on the new machine are read again
    afterwards, so its own sessions return; the old machine's are kept as history and
    `mnem doctor` lists them as from another machine.
@@ -260,8 +260,9 @@ Needs free space for about twice the backup plus the current database. A backup 
 settings use `fastembed:` models needs a build with `--features fastembed`; the preview
 says so. The watch service downloads a missing embedding model when it starts (internet
 required) and re-embeds memories in the background; recall uses keywords until then.
-The viewer's restart button appears only when mnem runs under a systemd unit with
-`Restart=always` or `on-failure` (as `mnem install` sets up).
+The viewer's restart button appears only when mnem runs as the service `mnem install
+--watch` sets up, which restarts it: a systemd user unit with `Restart=always` on Linux
+and WSL, a launchd agent with `KeepAlive` on macOS.
 
 From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
 `mnem restore <file> --apply [--settings]`. Automatic backups carry settings too.
@@ -289,7 +290,8 @@ own origin, so another website open in the browser cannot trigger them.
 ```sh
 cargo install --path . --locked --features fastembed   # --features fastembed: semantic recall
 mnem install --dry-run   # what it would change
-mnem install --watch     # connect the agents, start the background service, and pick
+mnem install --watch     # connect the agents, start the background service (systemd;
+                         # launchd on macOS), and pick
                          # Claude Code or Codex for distillation if no model is set
 mnem doctor              # ends with "status: OK"
 ```

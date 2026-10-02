@@ -681,7 +681,7 @@
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
-    result.textContent = "mnem has not come back yet; check `systemctl --user status mnem-watch`.";
+    result.textContent = "mnem has not come back yet; run `mnem doctor` to see what the watch service is doing.";
   }
 
   function init() {
