@@ -73,17 +73,70 @@ pub fn run(p: &Plan) -> Result<()> {
     if p.watch {
         watch_service(p)?;
     }
+    distillation(p)?;
     if p.dry_run {
         say!("\n(dry run: nothing written)");
     } else {
         say!("\nagents");
         say_raw(&crate::agents::render(&crate::agents::status_all()));
-        if let Some(why) = crate::distill::not_configured(&crate::config::CONFIG.distill) {
-            say!("\n{why}");
-        }
     }
     Ok(())
 }
+
+/// Distillation needs a model. With none configured, use a coding agent's own command
+/// line, signed in as the user already is: Claude Code first (most teams have it), else
+/// Codex. Only `distill.provider` is written (and the daily cap, for a new user), other
+/// settings are kept; an existing configuration is never changed.
+fn distillation(p: &Plan) -> Result<()> {
+    let cfg = &crate::config::CONFIG.distill;
+    if crate::distill::not_configured(cfg).is_none() {
+        return Ok(());
+    }
+    let choice = [crate::cli_llm::Cli::Claude, crate::cli_llm::Cli::Codex]
+        .into_iter()
+        .find(|c| crate::cli_llm::locate(*c).is_some());
+    let Some(cli) = choice else {
+        if let Some(why) = crate::distill::not_configured(cfg) {
+            say!("\n{why}");
+        }
+        return Ok(());
+    };
+    say!(
+        "\ndistillation: using `{}` ({}), signed in as you; at most {} background requests a day",
+        cli.command(),
+        cli.default_chain().join(", "),
+        NEW_USER_DAILY_CALLS
+    );
+    if p.dry_run {
+        return Ok(());
+    }
+    let path = crate::config::path();
+    let mut v: serde_json::Value = match std::fs::read_to_string(&path) {
+        Ok(s) => serde_json::from_str(&s)
+            .with_context(|| format!("{} is not valid JSON; not changed", path.display()))?,
+        Err(_) => serde_json::json!({}),
+    };
+    let d = v
+        .as_object_mut()
+        .context("settings file is not a JSON object; not changed")?
+        .entry("distill")
+        .or_insert_with(|| serde_json::json!({}));
+    let d = d
+        .as_object_mut()
+        .context("distill settings are not an object; not changed")?;
+    d.insert("provider".into(), cli.name().into());
+    d.entry("daily_calls")
+        .or_insert_with(|| NEW_USER_DAILY_CALLS.into());
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
+    say!("  written to {}", path.display());
+    Ok(())
+}
+
+/// Background requests a day for a user whose distillation runs on their own plan.
+const NEW_USER_DAILY_CALLS: usize = 100;
 
 pub(crate) type HookEntry = (&'static str, Option<&'static str>, String, u64);
 

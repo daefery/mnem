@@ -90,6 +90,8 @@ const CHEAP_MARKERS: &[&str] = &["lite", "flash", "haiku", "luna", "mini", "nano
 /// A model that runs out of quota, is rate limited or unavailable is put on cooldown
 /// and the next one is tried; cooldowns persist across runs in `meta`.
 pub struct Llm {
+    /// A coding agent's command line instead of an HTTP endpoint (no key, no model list).
+    cli: Option<crate::cli_llm::Cli>,
     base_url: String,
     key: String,
     chain: Vec<String>,
@@ -104,6 +106,7 @@ pub struct Llm {
 }
 
 /// How a failed call affects the model that made it.
+#[derive(Debug)]
 pub enum Failure {
     /// Try the next model; cool this one down for the given milliseconds (0 = none).
     NextModel(i64, String),
@@ -166,8 +169,17 @@ pub fn order_candidates(
 /// key that is configured but unreadable is caught by the failing-summaries alert once
 /// distillation runs; this covers the case where it never runs at all.
 pub fn not_configured(c: &crate::config::DistillConfig) -> Option<&'static str> {
+    if let Some(cli) = c
+        .provider
+        .as_deref()
+        .and_then(crate::cli_llm::Cli::from_name)
+    {
+        return crate::cli_llm::locate(cli).is_none().then_some(
+            "no memories are being made: distillation is set to a command line that is not installed (distill.provider in ~/.mnem/config.json; run `mnem install` again to pick one)",
+        );
+    }
     (c.api_key_env.is_none() && c.api_key_json.is_none()).then_some(
-        "no memories are being made: distillation has no model configured (set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see README · Configuration)",
+        "no memories are being made: distillation has no model configured (install Claude Code or Codex and run `mnem install` again, or set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see README · Configuration)",
     )
 }
 
@@ -179,6 +191,36 @@ impl Llm {
     /// A client for the given distillation settings (the recall gate pins its judge to
     /// the live settings this way, whatever settings the candidate runs with).
     pub fn from_distill(c: &crate::config::DistillConfig) -> Result<Llm> {
+        let cli = match c.provider.as_deref() {
+            None | Some("openai") => None,
+            Some(p) => Some(crate::cli_llm::Cli::from_name(p).with_context(|| {
+                format!("unknown distill.provider {p:?} (openai, claude-cli or codex-cli)")
+            })?),
+        };
+        if let Some(cli) = cli {
+            let mut chain: Vec<String> = c.model.iter().cloned().collect();
+            match &c.models {
+                Some(m) => chain.extend(m.iter().cloned()),
+                None if chain.is_empty() => {
+                    chain.extend(cli.default_chain().iter().map(|s| s.to_string()))
+                }
+                None => {}
+            }
+            chain.dedup();
+            return Ok(Llm {
+                cli: Some(cli),
+                base_url: String::new(),
+                key: String::new(),
+                chain,
+                // A command line lists no models, so there is nothing to fall back to.
+                auto_fallback: false,
+                exclude_models: c.exclude_models.clone(),
+                exclude_providers: vec![],
+                cooldowns: Default::default(),
+                requests: Default::default(),
+                request_limit: Default::default(),
+            });
+        }
         let key = if let Some(env) = &c.api_key_env {
             std::env::var(env).with_context(|| format!("env {env} not set"))?
         } else if let Some(path) = &c.api_key_json {
@@ -201,6 +243,7 @@ impl Llm {
         }
         chain.dedup();
         Ok(Llm {
+            cli: None,
             base_url: c
                 .base_url
                 .clone()
@@ -229,6 +272,9 @@ impl Llm {
 
     /// Models the endpoint currently serves; None if it cannot say.
     fn available(&self) -> Option<Vec<String>> {
+        if self.cli.is_some() {
+            return None;
+        }
         let mut r = Self::agent(20)
             .get(&self.url("models"))
             .header("Authorization", &format!("Bearer {}", self.key))
@@ -275,7 +321,10 @@ impl Llm {
     /// Which models this client asks, in order: identifies a judge in cached results.
     pub fn identity(&self) -> String {
         format!(
-            "{}{}",
+            "{}{}{}",
+            self.cli
+                .map(|c| format!("{}:", c.name()))
+                .unwrap_or_default(),
             self.chain.join(","),
             if self.auto_fallback { ",+auto" } else { "" }
         )
@@ -348,6 +397,11 @@ impl Llm {
     }
 
     fn call(&self, model: &str, system: &str, user: &str) -> std::result::Result<Value, Failure> {
+        if let Some(cli) = self.cli {
+            self.requests.set(self.requests.get() + 1);
+            let text = crate::cli_llm::call(cli, model, system, user, Duration::from_secs(300))?;
+            return json_in(&text);
+        }
         let body = json!({
             "model": model,
             "messages": [{ "role": "system", "content": system }, { "role": "user", "content": user }],
@@ -370,13 +424,11 @@ impl Llm {
             .body_mut()
             .read_json()
             .map_err(|e| Failure::NextModel(0, format!("bad response: {e}")))?;
-        let content = v["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_default();
-        let start = content.find('{').unwrap_or(0);
-        let end = content.rfind('}').map(|i| i + 1).unwrap_or(content.len());
-        serde_json::from_str(content.get(start..end).unwrap_or_default())
-            .map_err(|_| Failure::NextModel(0, "no valid JSON in reply".into()))
+        json_in(
+            v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap_or_default(),
+        )
     }
 
     pub fn load_cooldowns(&self, conn: &Connection) {
@@ -728,6 +780,14 @@ mod chain_tests {
         assert!(matches!(classify_status(401), Failure::Endpoint(_)));
         assert!(matches!(classify_status(503), Failure::NextModel(_, _)));
     }
+}
+
+/// The JSON object in a model's reply, which may wrap it in prose or a code fence.
+fn json_in(content: &str) -> std::result::Result<Value, Failure> {
+    let start = content.find('{').unwrap_or(0);
+    let end = content.rfind('}').map(|i| i + 1).unwrap_or(content.len());
+    serde_json::from_str(content.get(start..end).unwrap_or_default())
+        .map_err(|_| Failure::NextModel(0, "no valid JSON in reply".into()))
 }
 
 fn expand(p: &str) -> String {

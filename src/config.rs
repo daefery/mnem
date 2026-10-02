@@ -68,6 +68,10 @@ pub struct RecallConfig {
 /// Background distillation through any OpenAI-compatible endpoint.
 #[derive(Debug, Default, Deserialize)]
 pub struct DistillConfig {
+    /// Where requests go: "openai" (an OpenAI-compatible endpoint, the default),
+    /// "claude-cli" (`claude -p`) or "codex-cli" (`codex exec`), signed in as the user
+    /// already is. `mnem install` picks one when nothing is configured.
+    pub provider: Option<String>,
     /// Default: http://127.0.0.1:8317/v1 (CLIProxyAPI)
     pub base_url: Option<String>,
     /// A single preferred model, tried first (kept for older configs).

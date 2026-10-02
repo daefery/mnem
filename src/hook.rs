@@ -353,7 +353,8 @@ pub fn prompt_update(
 
 fn spawn_distill(session: &str) {
     let c = &crate::config::CONFIG.distill;
-    if c.on_stop == Some(false) || (c.api_key_env.is_none() && c.api_key_json.is_none()) {
+    // Same test as the no-model alert: a key, or a command line that is installed.
+    if c.on_stop == Some(false) || crate::distill::not_configured(c).is_some() {
         return;
     }
     spawn_detached(&[

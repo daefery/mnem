@@ -129,14 +129,20 @@ fn cheap(conn: &Connection) -> Vec<String> {
         .flatten()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let chain: Vec<String> = match &CONFIG.distill.models {
-        Some(m) => m.clone(),
-        None => distill::DEFAULT_CHAIN
+    let cli = CONFIG
+        .distill
+        .provider
+        .as_deref()
+        .and_then(crate::cli_llm::Cli::from_name);
+    let chain: Vec<String> = match (&CONFIG.distill.models, cli) {
+        (Some(m), _) => m.clone(),
+        (None, Some(c)) => c.default_chain().iter().map(|s| s.to_string()).collect(),
+        (None, None) => distill::DEFAULT_CHAIN
             .iter()
             .map(|s| s.to_string())
             .collect(),
     };
-    let configured = CONFIG.distill.api_key_env.is_some() || CONFIG.distill.api_key_json.is_some();
+    let configured = distill::not_configured(&CONFIG.distill).is_none();
     if configured
         && !chain.is_empty()
         && chain

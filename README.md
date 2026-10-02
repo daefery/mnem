@@ -111,6 +111,17 @@ something since, a short "meanwhile" update.
   pass, or `mnem doctor`, which shows the count) re-marks every session. On this machine
   24 of 2,482 sessions were scripted yet made 17% of a week's distilled memories, and
   9% of the memories shown to real sessions came from them.
+- `distill.provider`: where distillation requests go. `openai` (the default) is any
+  OpenAI-compatible endpoint, below. `claude-cli` runs `claude -p` (default model
+  `sonnet`) and `codex-cli` runs `codex exec` (default `gpt-5.6-luna`, low effort),
+  signed in as the user already is: no key, no proxy. Each run is isolated: an empty
+  directory, no saved session, no tools, no MCP servers, no hooks (mnem's own included)
+  and none of the user's settings or instructions. With nothing configured, `mnem install`
+  picks Claude Code, else Codex, and sets `daily_calls` to 100. Chosen on 30 real session
+  chunks judged blind against luna by two models: sonnet and codex with luna matched
+  it, haiku made up more details and lost (so it is not the default). On a Claude plan a
+  chunk costs about $0.04 of usage with sonnet; thinking is off, since it cost several
+  times more and did not improve memories.
 - `distill`: any OpenAI-compatible endpoint (CLIProxyAPI by default). Models are tried
   in order; a model that hits quota or rate limits (HTTP 402/429) cools down for 30 min,
   an unavailable one (403/404) for 6 h, a failing one (5xx, timeout) for 5 min. With
@@ -278,7 +289,8 @@ own origin, so another website open in the browser cannot trigger them.
 ```sh
 cargo install --path . --locked --features fastembed   # --features fastembed: semantic recall
 mnem install --dry-run   # what it would change
-mnem install --watch     # connect the agents, start the background service
+mnem install --watch     # connect the agents, start the background service, and pick
+                         # Claude Code or Codex for distillation if no model is set
 mnem doctor              # ends with "status: OK"
 ```
 

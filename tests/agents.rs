@@ -297,3 +297,127 @@ fn without_a_model_install_and_doctor_say_no_memories_are_made() {
     assert!(!doctor.contains(warning), "doctor with a key:\n{doctor}");
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// A fake `claude` that records how it was called and its stdin, then answers like the
+/// real one does with `--output-format json`.
+fn fake_claude_distiller(home: &Path) {
+    let bin = home.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = home.join("claude-distill.log");
+    let script = format!(
+        r#"#!/bin/sh
+printf '%s\n' "$@" > {args}
+cat > {stdin}
+pwd > {cwd}
+cat <<'JSON'
+{{"type":"result","is_error":false,"result":"```json\n{{\"observations\": [{{\"type\": \"discovery\", \"title\": \"Fake memory from the CLI provider\", \"narrative\": \"n\", \"facts\": [\"f\"], \"evidence\": []}}], \"summary\": null}}\n```"}}
+JSON
+"#,
+        args = log.with_extension("args").display(),
+        stdin = log.with_extension("stdin").display(),
+        cwd = log.with_extension("cwd").display()
+    );
+    let p = bin.join("claude");
+    std::fs::write(&p, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// With Claude Code installed and nothing configured, install sets distillation to its
+/// command line (sonnet, 100 a day), doctor is quiet, and a distillation run goes through
+/// it isolated: no tools, no user settings, no saved session, an empty directory. An
+/// existing setup is never overwritten.
+#[test]
+fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
+    let home = scratch("cli-provider");
+    fake_claude_distiller(&home);
+    let report = mnem(&home, &["install", "--only", "pi"]);
+    assert!(
+        report.contains("distillation: using `claude`"),
+        "install report:\n{report}"
+    );
+    let cfg: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.join(".mnem/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(cfg["distill"]["provider"], "claude-cli");
+    assert_eq!(cfg["distill"]["daily_calls"], 100);
+    let doctor = mnem(&home, &["doctor"]);
+    assert!(
+        !doctor.contains("no memories are being made"),
+        "doctor:\n{doctor}"
+    );
+
+    // One session with enough to distil, then a distillation run through the fake.
+    let c = mnem::db::open(&home.join(".mnem/mnem.db")).unwrap();
+    c.execute("INSERT INTO sessions(id, agent, native_id, project, last_event_at) VALUES ('pi:s1','pi','s1','proj',1)", [])
+        .unwrap();
+    for (i, (kind, text)) in [
+        ("prompt", "fix the retry loop so it backs off on 429"),
+        (
+            "assistant",
+            &"Changed src/net.rs to back off exponentially on HTTP 429 and added a test. "
+                .repeat(12),
+        ),
+    ]
+    .iter()
+    .enumerate()
+    {
+        c.execute(
+            "INSERT INTO events(session_id, record_key, kind, text, turn, ts, source_path) VALUES ('pi:s1', ?1, ?2, ?3, 1, 1, '/x.jsonl')",
+            rusqlite::params![format!("k{i}"), kind, text],
+        )
+        .unwrap();
+    }
+    drop(c);
+    let out = mnem(
+        &home,
+        &["distill", "--since-days", "100000", "--limit", "5"],
+    );
+    assert!(out.contains("1 observations"), "distill:\n{out}");
+    let args = std::fs::read_to_string(home.join("claude-distill.args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    let has = |f: &str, v: &str| args.windows(2).any(|w| w[0] == f && w[1] == v);
+    assert!(
+        has("--model", "sonnet") && has("--tools", "") && has("--setting-sources", ""),
+        "{args:?}"
+    );
+    assert!(args.contains(&"--no-session-persistence") && args.contains(&"--strict-mcp-config"));
+    let stdin = std::fs::read_to_string(home.join("claude-distill.stdin")).unwrap();
+    assert!(
+        stdin.contains("backs off on 429"),
+        "the digest goes on stdin"
+    );
+    let cwd = std::fs::read_to_string(home.join("claude-distill.cwd")).unwrap();
+    assert!(
+        cwd.contains("mnem-distill-"),
+        "runs in its own empty directory: {cwd}"
+    );
+    let c = mnem::db::open(&home.join(".mnem/mnem.db")).unwrap();
+    let title: String = c
+        .query_row(
+            "SELECT title FROM memories WHERE origin = 'mnem'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(title, "Fake memory from the CLI provider");
+    drop(c);
+
+    // A user's own setup is never replaced.
+    std::fs::write(
+        home.join(".mnem/config.json"),
+        r#"{"distill": {"api_key_env": "MY_KEY", "base_url": "http://x/v1"}}"#,
+    )
+    .unwrap();
+    let report = mnem(&home, &["install", "--only", "pi"]);
+    assert!(
+        !report.contains("distillation: using"),
+        "install report:\n{report}"
+    );
+    let cfg = std::fs::read_to_string(home.join(".mnem/config.json")).unwrap();
+    assert!(
+        cfg.contains("MY_KEY") && !cfg.contains("claude-cli"),
+        "{cfg}"
+    );
+    let _ = std::fs::remove_dir_all(&home);
+}
