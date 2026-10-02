@@ -18,14 +18,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux is built on the oldest supported runner so the binary runs on older
-          # glibc (Ubuntu 22.04, Debian 12 and newer), not just on what built it.
-          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, features: fastembed }
-          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, features: fastembed }
-          - { target: aarch64-apple-darwin, os: macos-14, features: fastembed }
-          # ONNX Runtime ships no prebuilt library for Intel Macs: keyword recall plus the
-          # small potion model, everything else the same.
-          - { target: x86_64-apple-darwin, os: macos-14, features: "" }
+          # The prebuilt ONNX Runtime needs glibc 2.38+ (it uses __isoc23_strtol and
+          # GCC 13's libstdc++), so the full Linux build is made on Ubuntu 24.04 and runs
+          # on glibc 2.39+ (Ubuntu 24.04, Debian 13, Fedora 40 and newer).
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, features: fastembed, suffix: "" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, features: fastembed, suffix: "" }
+          # For older Linux (glibc 2.35+: Ubuntu 22.04, Debian 12): the same mnem without
+          # ONNX Runtime, so meaning search uses the small potion model.
+          - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, features: "", suffix: "-lite" }
+          - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, features: "", suffix: "-lite" }
+          - { target: aarch64-apple-darwin, os: macos-14, features: fastembed, suffix: "" }
+          # ONNX Runtime ships no prebuilt library for Intel Macs: the lite build.
+          - { target: x86_64-apple-darwin, os: macos-14, features: "", suffix: "" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +38,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}${{ matrix.suffix }}
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }} --features "${{ matrix.features }}"
       # Tests run where the binary can run: every target but the Intel one, which the
@@ -55,15 +59,15 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name=mnem-${{ matrix.target }}
+          name=mnem-${{ matrix.target }}${{ matrix.suffix }}
           mkdir -p "dist/$name"
           cp target/${{ matrix.target }}/release/mnem README.md NOTICE "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: mnem-${{ matrix.target }}
-          path: dist/mnem-${{ matrix.target }}.tar.gz*
+          name: mnem-${{ matrix.target }}${{ matrix.suffix }}
+          path: dist/mnem-${{ matrix.target }}${{ matrix.suffix }}.tar.gz*
 
   release:
     needs: build

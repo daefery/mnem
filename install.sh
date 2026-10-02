@@ -34,21 +34,26 @@ case "$os/$arch" in
   *) fail "no prebuilt binary for $os $arch (Linux and macOS on x86_64 or arm64; Windows: use WSL)" ;;
 esac
 
-# glibc 2.35 or newer on Linux (the release is built on Ubuntu 22.04).
+# Linux: the full build needs glibc 2.39+ (its ONNX Runtime does); glibc 2.35 to 2.38
+# gets the lite build (no ONNX Runtime; meaning search with the small potion model).
+flavour=""
 if [ "$os" = Linux ]; then
   if ldd --version 2>&1 | head -1 | grep -qi musl; then
     fail "this Linux uses musl (Alpine?); the binaries need glibc 2.35 or newer"
   fi
   glibc=$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)
-  if [ -n "$glibc" ]; then
-    major=${glibc%.*}; minor=${glibc#*.}
-    if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 35 ]; }; then
-      fail "glibc $glibc is older than 2.35 (Ubuntu 22.04, Debian 12 or newer needed)"
-    fi
+  [ -n "$glibc" ] || fail "could not tell the glibc version (ldd --version); the binaries need 2.35 or newer"
+  major=${glibc%.*}; minor=${glibc#*.}
+  if [ "$major" -lt 2 ] || { [ "$major" -eq 2 ] && [ "$minor" -lt 35 ]; }; then
+    fail "glibc $glibc is older than 2.35 (Ubuntu 22.04, Debian 12 or newer needed)"
+  fi
+  if [ "$major" -eq 2 ] && [ "$minor" -lt 39 ]; then
+    flavour=-lite
+    say "glibc $glibc: installing the lite build (meaning search with a smaller model; glibc 2.39+ gets the full one)"
   fi
 fi
 
-asset="mnem-$target.tar.gz"
+asset="mnem-$target$flavour.tar.gz"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -88,7 +93,7 @@ fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$BIN_DIR"
 # Replace atomically: a running watcher keeps its old file until it restarts.
-cp "$tmp/mnem-$target/mnem" "$BIN_DIR/mnem.new"
+cp "$tmp/mnem-$target$flavour/mnem" "$BIN_DIR/mnem.new"
 chmod 755 "$BIN_DIR/mnem.new"
 # macOS marks downloaded files; a binary fetched by curl is not, but one fetched by a
 # browser or some tools is, and Gatekeeper would then block an unsigned binary.

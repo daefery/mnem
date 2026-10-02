@@ -11,8 +11,7 @@ a missed hook or a rewritten file can delay capture but cannot lose it, and
 
 ## Install
 
-No Rust or build needed. On Linux (x86_64 or arm64, glibc 2.35 or newer: Ubuntu 22.04,
-Debian 12 and newer), WSL, or macOS:
+No Rust or build needed. On Linux (x86_64 or arm64), WSL, or macOS:
 
 ```sh
 curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
@@ -35,15 +34,17 @@ are signed in to when no model is configured. Then, after your first session:
 mnem doctor    # ends with "status: OK"; the viewer is at http://127.0.0.1:37777
 ```
 
-The first run downloads the embedding model (about 90 MB, once). Intel Macs get a build
-without the ONNX runtime (keyword recall with the small potion model), because ONNX
-Runtime ships no prebuilt library for them. Windows: use WSL. `MNEM_VERSION=v0.2.0`
+The first run downloads the embedding model (about 90 MB, once). Linux with glibc 2.39
+or newer (Ubuntu 24.04, Debian 13, Fedora 40) gets the full build; glibc 2.35 to 2.38
+(Ubuntu 22.04, Debian 12) gets a lite build without ONNX Runtime, whose prebuilt library
+needs glibc 2.38: meaning search then uses the small potion model, everything else is the
+same. Intel Macs get the lite build too, since ONNX Runtime ships no library for them. Windows: use WSL. `MNEM_VERSION=v0.2.0`
 picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1` installs only the
 binary. To build from source instead, see Build below.
 
 Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed: each
-target is built and tested on its own runner (Linux on Ubuntu 22.04 for older glibc,
-macOS on Apple Silicon), then the archives, `checksums.txt` and `install.sh` are
+target is built and tested on its own runner (full Linux on Ubuntu 24.04, lite Linux on
+22.04, macOS on Apple Silicon), then the archives, `checksums.txt` and `install.sh` are
 attached to the release.
 
 ## Commands
