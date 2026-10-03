@@ -284,6 +284,19 @@ enum Cmd {
     },
     /// The record API for other tools: its address, token and an example request
     Api,
+    /// Ask about past agent work; answered from memories, with sources you can check
+    Ask {
+        question: Vec<String>,
+        /// Project id (default: the current directory's; --all for every project)
+        #[arg(long)]
+        project: Option<String>,
+        /// Search every project
+        #[arg(long)]
+        all: bool,
+        /// Only list the sources, without asking a model
+        #[arg(long)]
+        sources: bool,
+    },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
     /// Download the embedding model (once) and embed memories that have no vector yet
@@ -490,6 +503,74 @@ fn main() -> Result<()> {
             if pruned > 0 {
                 println!("removed {pruned} vectors of other models or revisions");
             }
+        }
+        Cmd::Ask {
+            question,
+            project,
+            all,
+            sources,
+        } => {
+            let question = question.join(" ");
+            anyhow::ensure!(
+                !question.trim().is_empty(),
+                "ask a question, for example: mnem ask why did we drop the merge button"
+            );
+            let project = if all {
+                None
+            } else {
+                let cwd = std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned());
+                project.or_else(|| hook::project_for(&conn, None, cwd.as_deref()))
+            };
+            let mut found = mnem::ask::sources(&conn, &question, project.as_deref())?;
+            if found.is_empty() {
+                println!(
+                    "No memories match that in {}.{}",
+                    project.as_deref().unwrap_or("any project"),
+                    if project.is_some() { " Try --all." } else { "" }
+                );
+                return Ok(());
+            }
+            mnem::ask::add_code_state(&conn, &mut found);
+            let now = db::now_ms();
+            let print_sources = |cited: &[i64]| {
+                for s in &found {
+                    let mark = if cited.contains(&s.id) { "*" } else { " " };
+                    println!(
+                        "{mark} #{} {} · {} ago · {}",
+                        s.id,
+                        s.kind,
+                        mnem::context::ago(now - s.created_at),
+                        mnem::text::head(&s.title, 100)
+                    );
+                    if let Some(code) = &s.code {
+                        println!("      {code}");
+                    }
+                }
+            };
+            let configured = distill::not_configured(&mnem::config::CONFIG.distill).is_none();
+            if sources || !configured {
+                print_sources(&[]);
+                if !configured && !sources {
+                    println!("\n(no model configured, so these are the sources without an answer)");
+                }
+                return Ok(());
+            }
+            let llm = distill::Llm::from_config()?;
+            llm.load_cooldowns(&conn);
+            match mnem::ask::answer(&llm, &question, &found) {
+                Ok((text, cited)) => {
+                    println!("{text}\n");
+                    println!("Sources (* cited; full text: mnem search or get_observations):");
+                    print_sources(&cited);
+                }
+                Err(e) => {
+                    eprintln!("mnem ask: no answer ({e:#}); the best matches:");
+                    print_sources(&[]);
+                }
+            }
+            llm.save_cooldowns(&conn)?;
         }
         Cmd::Api => {
             let port = mnem::embed::configured_port();
