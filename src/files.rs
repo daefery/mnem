@@ -941,7 +941,7 @@ pub fn edit_at(record: &serde_json::Value, key: &str, path: &str) -> Option<Edit
 }
 
 /// A recorded path as a repo-relative path under `root`, if that file exists here.
-fn local_rel(root: &Path, recorded: &str) -> Option<String> {
+pub(crate) fn local_rel(root: &Path, recorded: &str) -> Option<String> {
     let comps = parts(recorded);
     // The longest tail of the recorded path that names a file here.
     (0..comps.len()).find_map(|i| {

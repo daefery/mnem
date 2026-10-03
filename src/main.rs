@@ -282,6 +282,8 @@ enum Cmd {
         #[arg(long, hide = true)]
         gate_metrics: bool,
     },
+    /// The record API for other tools: its address, token and an example request
+    Api,
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
     /// Download the embedding model (once) and embed memories that have no vector yet
@@ -488,6 +490,25 @@ fn main() -> Result<()> {
             if pruned > 0 {
                 println!("removed {pruned} vectors of other models or revisions");
             }
+        }
+        Cmd::Api => {
+            let port = mnem::embed::configured_port();
+            let token = mnem::api::token()?;
+            println!(
+                "mnem record API v{} (read-only), served by mnem watch",
+                mnem::api::VERSION
+            );
+            println!("  base:  http://127.0.0.1:{port}/v1");
+            println!(
+                "  token: {} (in {})",
+                token,
+                mnem::api::token_path().display()
+            );
+            println!(
+                "  try:   curl -s -H \"Authorization: Bearer $(cat {})\" http://127.0.0.1:{port}/v1",
+                mnem::api::token_path().display()
+            );
+            println!("  docs:  docs/api.md (endpoints: sessions, events, memories, search)");
         }
         Cmd::Pins => {
             let mut st = conn.prepare(

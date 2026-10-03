@@ -1,5 +1,6 @@
 pub mod adapters;
 pub mod agents;
+pub mod api;
 pub mod backup;
 pub mod cli_llm;
 pub mod config;

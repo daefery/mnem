@@ -107,7 +107,11 @@ impl Response {
         )
     }
     fn json(v: &Value) -> Response {
-        Response::text("200 OK", "application/json; charset=utf-8", v.to_string())
+        Response::json_status("200 OK", v)
+    }
+
+    fn json_status(status: &'static str, v: &Value) -> Response {
+        Response::text(status, "application/json; charset=utf-8", v.to_string())
     }
 }
 
@@ -153,6 +157,9 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
             "text/plain",
             "mnem ui only answers local requests\n",
         )
+    } else if method == "GET" && (path == "/v1" || path.starts_with("/v1/")) {
+        let reply = crate::api::handle(&path[3..], &parse_query(query), &headers, db_path);
+        Response::json_status(reply.status, &reply.body)
     } else if method == "GET" {
         route(path, &parse_query(query), db_path).unwrap_or_else(|e| {
             Response::text(
@@ -733,7 +740,7 @@ fn not_found() -> Response {
     Response::text("404 Not Found", "text/plain", "not found\n")
 }
 
-fn open(db_path: &Path) -> Result<Connection> {
+pub(crate) fn open(db_path: &Path) -> Result<Connection> {
     db::open_with(db_path, Duration::from_secs(2))
 }
 

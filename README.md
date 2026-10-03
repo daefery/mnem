@@ -62,6 +62,7 @@ attached to the release.
 | `mnem distill` / `mnem models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
 | `mnem embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
 | `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `session_start_context` |
+| `mnem api` | The record API for your own tools (read-only HTTP, token auth): address, token and an example. See [docs/api.md](docs/api.md) |
 | `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 
 ## What the agent sees
