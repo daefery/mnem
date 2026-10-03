@@ -2,6 +2,9 @@
 name = "mnem"
 version = "0.1.0"
 edition = "2024"
+license = "AGPL-3.0-only"
+repository = "https://github.com/daefery/mnem"
+description = "Local-first memory and activity record for coding agents, read from the transcripts they already write"
 
 [dependencies]
 anyhow = "1.0.104"

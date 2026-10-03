@@ -351,3 +351,12 @@ same above the feed when an installed agent is not connected, with a **Connect**
 button that does what `mnem install --only <agent>` does.
 
 Data lives in `~/.mnem/mnem.db` (override with `MNEM_HOME` or `--db`).
+
+## Licence
+
+mnem is free software under the [GNU Affero General Public License v3.0](LICENSE): use
+it, change it and share it, including at work. If you distribute a modified mnem, or run
+one as a service for others, you share your changes under the same licence. A commercial
+licence is available for uses the AGPL does not suit. Third-party components and their
+licences are listed in `NOTICE` and, in each release, `THIRD-PARTY-LICENSES.txt`.
+Contributions: see [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -61,7 +61,10 @@ jobs:
         run: |
           name=mnem-${{ matrix.target }}${{ matrix.suffix }}
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/mnem README.md NOTICE "dist/$name/"
+          cp target/${{ matrix.target }}/release/mnem README.md NOTICE LICENSE "dist/$name/"
+          features=""
+          [ -n "${{ matrix.features }}" ] && features="--features ${{ matrix.features }}"
+          python3 scripts/third-party-licenses.py $features --target ${{ matrix.target }} > "dist/$name/THIRD-PARTY-LICENSES.txt"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4

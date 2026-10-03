@@ -1,0 +1,31 @@
+# Contributing to mnem
+
+Thanks for helping. Two things to know before you send a change.
+
+## Licence and the contributor agreement
+
+mnem is licensed under the GNU Affero General Public License v3.0 (`LICENSE`), and its
+authors also offer it under a commercial licence to organisations the AGPL does not
+suit. That is how mnem pays for itself, so every contribution has to be usable under
+both.
+
+By opening a pull request you agree that:
+
+1. You wrote the contribution, or have the right to submit it, and it does not include
+   code under a licence incompatible with the AGPL.
+2. You license it to the project under the AGPL-3.0, and you grant the mnem authors a
+   perpetual, worldwide, royalty-free licence to use, modify, sublicense and distribute
+   it under other terms too (including a commercial licence).
+3. You keep the copyright in your contribution.
+
+Write "I agree to the mnem contributor terms in CONTRIBUTING.md" in your first pull
+request. Changes without it cannot be merged.
+
+## How changes are judged
+
+- **Measured, not assumed.** A change to recall runs `mnem eval --gate` and passes it.
+  A claim about speed or quality comes with the numbers.
+- **Nothing lost.** Capture must never drop or duplicate events; `mnem doctor` must say
+  so when anything is behind.
+- **Tests with the change.** `cargo test --release --features fastembed` and
+  `cargo clippy --all-targets` pass, and new behaviour has a test that fails without it.
