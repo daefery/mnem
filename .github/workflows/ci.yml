@@ -1,0 +1,36 @@
+# Tests, lints and the plugin manifest on every push and pull request.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets --features fastembed -- -D warnings
+      - run: cargo test --locked --release --features fastembed
+      - run: cargo test --locked --release
+      - name: Shell scripts
+        if: runner.os == 'Linux'
+        run: shellcheck install.sh plugins/mnem/scripts/*
+      - name: Plugin manifests are valid JSON
+        run: |
+          for f in .claude-plugin/marketplace.json plugins/mnem/.claude-plugin/plugin.json plugins/mnem/hooks/hooks.json plugins/mnem/.mcp.json; do
+            python3 -m json.tool "$f" > /dev/null || { echo "invalid: $f"; exit 1; }
+          done

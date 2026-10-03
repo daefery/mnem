@@ -2,8 +2,8 @@
 //!
 //! ```json
 //! {
-//!   "harness_prompts": ["^: Firstmate instruction waiting"],
-//!   "distill": { "model": "gpt-5.6-luna", "api_key_json": "~/.pi/agent/cliproxyapi.json" }
+//!   "harness_prompts": ["^: Orchestrator instruction waiting"],
+//!   "distill": { "model": "gpt-5.6-luna", "api_key_json": "~/.config/my-proxy/key.json" }
 //! }
 //! ```
 
@@ -83,7 +83,7 @@ pub struct DistillConfig {
     pub auto_fallback: Option<bool>,
     /// Read the API key from this environment variable...
     pub api_key_env: Option<String>,
-    /// ...or from a field of a JSON file (e.g. "~/.pi/agent/cliproxyapi.json").
+    /// ...or from a field of a JSON file (e.g. "~/.config/my-proxy/key.json").
     pub api_key_json: Option<String>,
     /// Field name in `api_key_json` (default "apiKey").
     pub api_key_field: Option<String>,

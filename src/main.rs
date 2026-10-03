@@ -35,6 +35,10 @@ enum Cmd {
         agent: Agent,
         /// session-start | prompt | stop | session-end
         event: String,
+        /// Run by the Claude Code plugin: do nothing when `mnem install` already wired
+        /// this hook into the profile's settings (it would run twice)
+        #[arg(long)]
+        plugin: bool,
     },
     /// Print the session-start context for a project (what hooks inject)
     Context {
@@ -327,7 +331,12 @@ enum Cmd {
         import: Option<PathBuf>,
     },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
-    Mcp,
+    Mcp {
+        /// Run by the Claude Code plugin: offer no tools when `mnem install` already
+        /// registered mnem's (they would be listed twice)
+        #[arg(long)]
+        plugin: bool,
+    },
     /// Catch up a single transcript file
     Ingest { path: PathBuf },
     /// Capture health: coverage, lag, quarantine, claude-mem comparison
@@ -360,6 +369,17 @@ fn main() -> Result<()> {
     } = &cli.cmd
     {
         return run_gate(&path, baseline.clone(), candidate_config.clone(), !no_judge);
+    }
+    // The plugin's copy of a hook `mnem install` already wired does nothing, before the
+    // database is even opened.
+    if let Cmd::Hook {
+        plugin: true,
+        event,
+        ..
+    } = &cli.cmd
+        && mnem::agents::settings_has_hook(event)
+    {
+        return Ok(());
     }
     // Paths that run inside an agent's turn must fail fast rather than wait on a lock.
     let in_turn = matches!(
@@ -426,7 +446,7 @@ fn main() -> Result<()> {
                 t.elapsed().as_secs_f64()
             );
         }
-        Cmd::Hook { agent, event } => {
+        Cmd::Hook { agent, event, .. } => {
             let t = Instant::now();
             if let Err(e) = hook::run(&mut conn, agent, &event) {
                 hook::log(&format!("{} {event}: {e:#}", agent.as_str()));
@@ -466,7 +486,9 @@ fn main() -> Result<()> {
             )?;
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
-        Cmd::Mcp => mcp::serve(&conn)?,
+        Cmd::Mcp { plugin } => {
+            mcp::serve_with(&conn, plugin && mnem::agents::settings_has_tools())?
+        }
         Cmd::Embed {
             probe,
             limit,

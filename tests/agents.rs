@@ -421,3 +421,73 @@ fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+/// The Claude Code plugin's hooks and tools run through `--plugin`: they work when the
+/// plugin is the only setup, and stay quiet when `mnem install` already wired the same
+/// hook or registered the tools, so nothing runs twice.
+#[test]
+fn plugin_hooks_and_tools_never_run_twice() {
+    let home = scratch("plugin");
+    let run = |args: &[&str], stdin: &str| -> String {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mnem"))
+            .args(args)
+            .env("HOME", &home)
+            .env("MNEM_HOME", home.join(".mnem"))
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        use std::io::Write;
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "mnem {args:?}");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let tools = |args: &[&str]| -> usize {
+        let input = concat!(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+            "\n",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            "\n"
+        );
+        let out = run(args, input);
+        let line = out.lines().find(|l| l.contains(r#""id":2"#)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(line).unwrap();
+        v["result"]["tools"].as_array().unwrap().len()
+    };
+    let session_start =
+        r#"{"session_id":"p1","cwd":"/tmp","hook_event_name":"SessionStart","source":"startup"}"#;
+    // The plugin alone: its hook answers and its tools are listed.
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
+    assert!(
+        !run(
+            &["hook", "claude", "session-start", "--plugin"],
+            session_start
+        )
+        .is_empty()
+    );
+    let all = tools(&["mcp"]);
+    assert!(all > 0);
+    assert_eq!(tools(&["mcp", "--plugin"]), all);
+    // After mnem install wired Claude Code: the plugin's copies stay quiet.
+    mnem(&home, &["install", "--only", "claude"]);
+    assert!(
+        run(
+            &["hook", "claude", "session-start", "--plugin"],
+            session_start
+        )
+        .is_empty()
+    );
+    assert_eq!(tools(&["mcp", "--plugin"]), 0);
+    // mnem's own hooks and tools are unaffected.
+    assert!(!run(&["hook", "claude", "session-start"], session_start).is_empty());
+    assert_eq!(tools(&["mcp"]), all);
+    let _ = std::fs::remove_dir_all(&home);
+}

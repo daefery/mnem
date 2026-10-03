@@ -1,0 +1,14 @@
+{
+  "name": "mnem",
+  "owner": { "name": "Fery", "url": "https://github.com/daefery" },
+  "metadata": {
+    "description": "mnem: local-first memory and a complete record for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "mnem",
+      "source": "./plugins/mnem",
+      "description": "Memory that cannot silently lose a session: one local record of every Claude Code, Codex and pi session, memories with evidence, mnem ask, Agent Trace export."
+    }
+  ]
+}

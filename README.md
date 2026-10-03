@@ -17,12 +17,17 @@ No Rust or build needed. On Linux (x86_64 or arm64), WSL, or macOS:
 curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
 ```
 
-While the repository is private, with the GitHub CLI signed in to an account that can
-see it (`gh auth login`):
+Or, in Claude Code, as a plugin:
 
-```sh
-gh release download -R daefery/mnem -p install.sh -O - | sh
 ```
+/plugin marketplace add daefery/mnem
+/plugin install mnem@mnem
+/mnem:setup
+```
+
+The plugin's hooks and tools run the mnem program; `/mnem:setup` installs it with the
+script above. When `mnem install` has also wired Claude Code, the plugin's copies stay
+quiet, so nothing runs twice.
 
 The script downloads the binary for your system, checks its SHA-256 against the
 release, puts it in `~/.local/bin` and runs `mnem install --watch`: it connects Claude
@@ -81,10 +86,10 @@ something since, a short "meanwhile" update.
 
 ```json
 {
-  "harness_prompts": ["^: Firstmate instruction waiting"],
+  "harness_prompts": ["^: Orchestrator instruction waiting"],
   "distill": {
     "base_url": "http://127.0.0.1:8317/v1",
-    "api_key_json": "~/.pi/agent/cliproxyapi.json",
+    "api_key_json": "~/.config/my-proxy/key.json",
     "models": ["gpt-5.6-luna", "developer/claude-haiku-4-5-20251001"],
     "auto_fallback": true
   }

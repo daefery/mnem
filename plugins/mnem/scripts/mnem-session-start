@@ -1,0 +1,10 @@
+#!/bin/sh
+# Claude Code plugin hook: pass the event to the mnem program, or say how to install it.
+# Quiet when mnem install already wired this hook; an mnem older than 0.3.0 is asked to
+# be updated.
+if command -v mnem >/dev/null 2>&1; then
+  mnem hook claude session-start --plugin 2>/dev/null && exit 0
+  echo "The mnem plugin needs mnem 0.3.0 or newer: run /mnem:setup to update it."
+  exit 0
+fi
+echo "The mnem plugin is enabled but the mnem program is not installed: run /mnem:setup to install it (one command, no Rust needed)."

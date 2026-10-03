@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mnem": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/mnem-mcp",
+      "args": []
+    }
+  }
+}

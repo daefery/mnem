@@ -226,6 +226,28 @@ fn all_hooks(doc: &Value, agent: &str) -> bool {
         })
 }
 
+/// The Claude Code profile a hook or MCP server started by Claude Code runs under:
+/// CLAUDE_CONFIG_DIR when set, else ~/.claude.
+pub fn active_claude_dir() -> PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| db::home().join(".claude"))
+}
+
+/// Whether `mnem install` already put mnem's hook for `event` (session-start, prompt,
+/// stop, file) into the active profile's settings: the plugin's copy then stays quiet,
+/// so a hook never runs twice.
+pub fn settings_has_hook(event: &str) -> bool {
+    let doc = read_json(&active_claude_dir().join("settings.json")).unwrap_or(Value::Null);
+    let suffix = format!(" hook claude {event}");
+    hook_commands(&doc).iter().any(|c| c.ends_with(&suffix))
+}
+
+/// Whether the active profile already has mnem's tools registered by `mnem install`.
+pub fn settings_has_tools() -> bool {
+    crate::install::claude_mcp_command(&active_claude_dir()).is_some()
+}
+
 fn claude() -> Found {
     let dirs: Vec<PathBuf> = ingest::claude_config_dirs()
         .into_iter()

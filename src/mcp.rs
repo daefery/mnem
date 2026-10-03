@@ -26,10 +26,19 @@ when a file is first opened): recall_file(path), once per file.
 Numeric ids are memories; ids like \"E123\" are raw transcript events. \
 Call remember(fact) only when the user asks you to remember something.";
 
+/// Set when this server stays out of the way of another registration of mnem's tools.
+static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Protocol versions this server implements, newest first.
 const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
 
 pub fn serve(conn: &Connection) -> Result<()> {
+    serve_with(conn, false)
+}
+
+/// Serve; with `quiet`, list no tools (another registration of mnem already offers them).
+pub fn serve_with(conn: &Connection, quiet: bool) -> Result<()> {
+    QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -86,6 +95,7 @@ pub fn handle(conn: &Connection, line: &str) -> Option<Value> {
             })
         }
         "ping" => json!({}),
+        "tools/list" if QUIET.load(std::sync::atomic::Ordering::Relaxed) => json!({ "tools": [] }),
         "tools/list" => json!({ "tools": tools() }),
         "tools/call" => {
             let name = params
