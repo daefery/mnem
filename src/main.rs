@@ -284,6 +284,18 @@ enum Cmd {
     },
     /// The record API for other tools: its address, token and an example request
     Api,
+    /// Agent Trace records (agent-trace.dev) for this repository's commits: which added
+    /// lines agents wrote, by session and model, from the transcripts mnem holds
+    Trace {
+        /// Commits after this revision (default: the last --commits)
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value_t = 20)]
+        commits: usize,
+        /// Write one <commit>.json per commit into this folder instead of JSONL to stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Ask about past agent work; answered from memories, with sources you can check
     Ask {
         question: Vec<String>,
@@ -571,6 +583,44 @@ fn main() -> Result<()> {
                 }
             }
             llm.save_cooldowns(&conn)?;
+        }
+        Cmd::Trace {
+            since,
+            commits,
+            out,
+        } => {
+            let cwd = std::env::current_dir()?;
+            let root = mnem::files::repo_root(&cwd)
+                .ok_or_else(|| anyhow::anyhow!("not inside a git repository"))?;
+            let list = mnem::trace::commits(&root, since.as_deref(), commits)?;
+            let (records, totals) = mnem::trace::records(&conn, &root, &list)?;
+            match &out {
+                Some(dir) => {
+                    std::fs::create_dir_all(dir)?;
+                    for r in &records {
+                        let sha = r["vcs"]["revision"].as_str().unwrap_or("unknown");
+                        std::fs::write(
+                            dir.join(format!("{sha}.json")),
+                            serde_json::to_string_pretty(r)? + "\n",
+                        )?;
+                    }
+                }
+                None => {
+                    for r in &records {
+                        println!("{r}");
+                    }
+                }
+            }
+            eprintln!(
+                "mnem trace: {} commits, {} added lines, {} written by agents ({:.0}%){}",
+                totals.commits,
+                totals.added,
+                totals.attributed,
+                100.0 * totals.attributed as f64 / totals.added.max(1) as f64,
+                out.as_ref()
+                    .map(|d| format!(", written to {}", d.display()))
+                    .unwrap_or_default()
+            );
         }
         Cmd::Api => {
             let port = mnem::embed::configured_port();

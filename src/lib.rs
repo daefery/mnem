@@ -30,5 +30,6 @@ pub mod scripted;
 pub mod search;
 pub mod service;
 pub mod text;
+pub mod trace;
 pub mod ui;
 pub mod uptake;

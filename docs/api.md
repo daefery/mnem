@@ -109,6 +109,14 @@ with the nearest by meaning when the embedding model is loaded (`"semantic": tru
 Each item adds `match`: `words`, `meaning` or `both`. Parameters: `q` (required),
 `project`, `include=sensitive`, `limit` (at most 200, default 100).
 
+## Agent Trace
+
+`mnem trace` writes [Agent Trace](https://agent-trace.dev) records (v0.1.0) for a
+repository's commits: per commit, the ranges of added lines agents wrote, grouped by
+session (`url`: `mnem://session/<id>`, the id `/v1/sessions/{id}` takes) with the model
+(`anthropic/claude-…`, `openai/gpt-…`). `metadata.dev.mnem` gives the lines the commit
+added and how many were attributed.
+
 ## Building on it
 
 Good fits: standups and weekly summaries, time sheets per client, cost and agent

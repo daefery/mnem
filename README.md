@@ -63,6 +63,7 @@ attached to the release.
 | `mnem embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
 | `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `session_start_context` |
 | `mnem ask <question> [--all] [--sources]` | Ask about past agent work in this project: answered from memories by your distillation model, citing the memories it used (only ones it was shown), each with whether its code is still there. `--sources` lists them without a model |
+| `mnem trace [--commits N \| --since REV] [--out DIR]` | [Agent Trace](https://agent-trace.dev) records for this repository's commits: which lines each commit added were written by an agent, by session and model, worked out from the transcripts mnem already holds, so it covers commits made before any tracing tool was installed. Exact line matches only (a floor: files written by shell commands are not seen); edits in other worktrees or clones of the same repository count |
 | `mnem api` | The record API for your own tools (read-only HTTP, token auth): address, token and an example. See [docs/api.md](docs/api.md) |
 | `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 

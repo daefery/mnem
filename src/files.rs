@@ -830,7 +830,7 @@ pub fn edits_kept(conn: &Connection, id: i64, root: &Path, rel: &str) -> Result<
 
 /// The transcript record (one JSON line) at `offset` in `file`: a regular file, and a
 /// line of at most RECORD_BYTES.
-fn record_at(file: &Path, offset: i64) -> Option<serde_json::Value> {
+pub(crate) fn record_at(file: &Path, offset: i64) -> Option<serde_json::Value> {
     use std::io::{BufRead, Read, Seek, SeekFrom};
     if !std::fs::metadata(file).ok()?.is_file() {
         return None;
