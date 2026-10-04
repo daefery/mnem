@@ -133,9 +133,15 @@ impl Manager {
         }
     }
 
-    /// The command a user runs to start it by hand.
+    /// Whether this system can run the service at all (no systemd: not without help).
+    pub fn can_start(self) -> bool {
+        self != Manager::Systemd || systemd_running()
+    }
+
+    /// The command a user runs to start it by hand, or what to do where it cannot run.
     pub fn start_hint(self) -> String {
         match self {
+            Manager::Systemd if !systemd_running() => no_systemd_hint(),
             Manager::Systemd => format!("systemctl --user enable --now {UNIT}"),
             Manager::Launchd => {
                 format!("launchctl bootstrap gui/$(id -u) {}", self.file().display())
@@ -149,6 +155,27 @@ impl Manager {
             Manager::Systemd => format!("systemctl --user status {UNIT}"),
             Manager::Launchd => format!("launchctl print gui/$(id -u)/{LABEL}"),
         }
+    }
+}
+
+/// Whether systemd runs this system (it does not on WSL unless turned on, nor in most
+/// containers): the test systemd itself documents, sd_booted().
+fn systemd_running() -> bool {
+    std::path::Path::new("/run/systemd/system").is_dir()
+}
+
+/// What to do where there is no systemd: WSL can turn it on; anywhere, `mnem watch`
+/// can run in a terminal. Without one of them no memories are made.
+fn no_systemd_hint() -> String {
+    // /run/WSL exists inside a WSL distro, not in a container on a WSL kernel (whose
+    // kernel name says "microsoft" too), and unlike WSL_DISTRO_NAME it reaches services.
+    let wsl = std::path::Path::new("/run/WSL").is_dir();
+    if wsl {
+        format!(
+            "this WSL has no systemd: add `[boot]` and `systemd=true` to /etc/wsl.conf, run `wsl --shutdown` in Windows, then `systemctl --user enable --now {UNIT}`; or keep `mnem watch` running in a terminal"
+        )
+    } else {
+        "this system has no systemd: keep `mnem watch` running (a terminal, tmux, or your init system)".to_string()
     }
 }
 

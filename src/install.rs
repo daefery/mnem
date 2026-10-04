@@ -769,11 +769,12 @@ fn watch_service(p: &Plan) -> Result<()> {
     if m.start() {
         say!("  started the watch service ({})", file.display());
     } else {
-        say!(
-            "  wrote {}; start it with: {}",
-            file.display(),
+        let how = if m.can_start() {
+            format!("start it with: {}", m.start_hint())
+        } else {
             m.start_hint()
-        );
+        };
+        say!("  wrote {}; {how}", file.display());
     }
     Ok(())
 }
