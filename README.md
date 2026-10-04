@@ -38,9 +38,11 @@ simply gone, and nothing tells you. **mnem reads the transcript the agent alread
 to disk instead**, so a crash, a missed hook or an offline model can delay a memory but
 never lose the session.
 
-- **Nothing lost, and you'd know.** On the author's machine, claude-mem had stored nothing
-  for 32% of a month's sessions (157 of 493). mnem re-read all 1.45 GB of those
-  transcripts with no duplicates, and `mnem doctor` shows exactly how far behind it is.
+- **Nothing lost, and you'd know.** Every session is read back from its transcript, so a
+  failed hook or model call delays a memory instead of dropping it. On the author's
+  machine, mnem re-read all 1.45 GB of transcripts from zero with no duplicates, and
+  `mnem doctor` shows exactly how far behind it is. How other tools compare, measured
+  and with sources: [the comparison](https://daefery.github.io/mnem/comparison.html).
 - **Memories you can check.** Every memory cites the transcript events it came from, and
   knows whether the code its session wrote is still in your repository.
 - **One memory for every agent.** Claude Code, Codex and pi read and write the same
