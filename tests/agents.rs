@@ -439,12 +439,11 @@ fn plugin_hooks_and_tools_never_run_twice() {
             .spawn()
             .unwrap();
         use std::io::Write;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(stdin.as_bytes())
-            .unwrap();
+        // A plugin hook whose hook is already installed exits without reading its input:
+        // it may be gone before the write, which then fails with a broken pipe.
+        if let Err(e) = child.stdin.take().unwrap().write_all(stdin.as_bytes()) {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+        }
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "mnem {args:?}");
         String::from_utf8_lossy(&out.stdout).into_owned()
