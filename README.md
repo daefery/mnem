@@ -12,69 +12,93 @@
   <img alt="Linux, WSL, macOS" src="https://img.shields.io/badge/runs%20on-Linux%20·%20WSL%20·%20macOS-555">
 </p>
 
+<h3 align="center">Ask why your code is the way it is. mnem answers from your coding agents' own sessions, with sources.</h3>
+
 <p align="center">
-  <b>Local-first memory for coding agents.</b> mnem keeps one complete record of every
-  <b>Claude Code</b>, <b>Codex</b> and <b>pi</b> session, straight from the transcripts they
-  already write, and gives your agents back what they learned: at session start, with
-  each prompt, and when they open a file.
+  mnem keeps a complete local record of every <b>Claude Code</b>, <b>Codex</b> and <b>pi</b>
+  session, read from the transcripts they already save. Every memory shows where it came
+  from, each agent starts with what the others learned, and no session goes missing
+  because a hook failed.
 </p>
 
 <p align="center">
   <a href="#install">Install</a> ·
+  <a href="#try-it-first-without-changing-anything">Try it first</a> ·
   <a href="#what-you-get">What you get</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#privacy">Privacy</a> ·
-  <a href="#faq">FAQ</a> ·
-  <a href="docs/reference.md">Reference</a>
+  <a href="#faq">FAQ</a>
 </p>
-
----
-
-## Why mnem
-
-Most memory tools ask a model to write each memory at the moment you work, through a
-hook that has to succeed. When the hook misfires or the model is busy, that session is
-simply gone, and nothing tells you. **mnem reads the transcript the agent already wrote
-to disk instead**, so a crash, a missed hook or an offline model can delay a memory but
-never lose the session.
-
-- **Nothing lost, and you'd know.** Every session is read back from its transcript, so a
-  failed hook or model call delays a memory instead of dropping it. On the author's
-  machine, mnem re-read all 1.45 GB of transcripts from zero with no duplicates, and
-  `mnem doctor` shows exactly how far behind it is. How other tools compare, measured
-  and with sources: [the comparison](https://daefery.github.io/mnem/comparison.html).
-- **Memories you can check.** Every memory cites the transcript events it came from, and
-  knows whether the code its session wrote is still in your repository.
-- **One memory for every agent.** Claude Code, Codex and pi read and write the same
-  store; a session hears what another agent did in the same project since it last looked.
-- **No extra subscription, nothing to run.** Memories are written by the Claude Code or
-  Codex you're already signed in to (or any OpenAI-compatible endpoint). One binary, no
-  Node, Python, Docker or vector database.
-- **Measured, not claimed.** Recall is tested on your own past prompts, judged by two
-  models, and a release gate refuses any change that makes it worse.
-
-## Install
-
-**One line** (Linux x86_64/arm64, WSL, macOS; no Rust needed):
 
 ```sh
 curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
 ```
 
-It downloads the binary for your system, checks its SHA-256, puts it in `~/.local/bin`,
-connects Claude Code, Codex and pi, starts a small background service, and picks your
-Claude Code or Codex sign-in to write memories. Then just keep working. After your first
-session:
+## Why mnem
+
+Three weeks after an agent changed your code, you want to know why. The chat is gone, and
+the commit message says "fix tests".
+
+Most memory tools can't help, because they write a summary while you work, through a hook
+that has to succeed, and keep only the summary. When the hook misfires or the model is
+busy, that session is never saved, and nothing tells you.
+
+mnem works from the transcripts instead. Claude Code, Codex and pi already save every
+prompt, command and edit to disk. mnem reads those files, so:
+
+- **No session goes missing.** A crash, a skipped hook or a model outage only delays a
+  memory. On the author's machine mnem re-read 1.45 GB of transcripts from scratch with
+  zero duplicates, and `mnem doctor` tells you exactly how far behind it is.
+- **Every answer has a source.** Each memory points to the transcript lines it came from.
+  `mnem ask "why did we..."` answers from memories and lists them, so you can check.
+- **Old memories say they're old.** Each one knows whether the code its session wrote is
+  still in your repository. On mnem's own repo, 75% of the lines agents wrote last month
+  are still there; memories about the rest say so, so they don't send your agent the
+  wrong way.
+- **Your agents share one memory.** A Codex session hears what Claude Code did in the same
+  project an hour ago.
+- **You see which lines an agent wrote,** even in commits from before you installed it.
+
+It runs on the Claude Code or Codex sign-in you already have. One binary, no server, no
+Node, Python, Docker or vector database.
+
+## Install
+
+One line for Linux (x86_64, arm64), WSL and macOS. No Rust needed.
+
+```sh
+curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
+```
+
+The script downloads the binary for your system, checks its SHA-256 and puts it in
+`~/.local/bin`. Then it connects Claude Code, Codex and pi, backing up each settings file
+first, and starts a small background service that writes memories with your Claude Code
+or Codex sign-in. Keep working as usual. After your first session:
 
 ```sh
 mnem doctor        # ends with "status: OK"
 ```
 
-and open the viewer at **http://127.0.0.1:37777**.
+The viewer is at **http://127.0.0.1:37777**.
 
-> **Using Codex?** Codex runs no hook until you trust it. Open Codex once, type `/hooks`,
-> review mnem's three hooks and trust them; until then Codex sessions are still recorded,
-> but get no memories back. `mnem doctor` reminds you while any is untrusted.
+> **Using Codex?** Codex runs no hook until you trust it. Open Codex, type `/hooks` and
+> trust mnem's three hooks. Until then your Codex sessions are still recorded, they just
+> don't get memories back. `mnem doctor` reminds you.
+
+### Try it first, without changing anything
+
+Want to see what mnem finds before it touches your setup? This installs only the binary
+and reads your existing transcripts into its own folder. Your agents' settings stay
+exactly as they are.
+
+```sh
+curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | MNEM_NO_SETUP=1 sh
+~/.local/bin/mnem backfill                  # read every saved session
+~/.local/bin/mnem search "flaky test"       # search all of them, across agents
+~/.local/bin/mnem doctor                    # what was found, per agent
+```
+
+To undo it, delete `~/.local/bin/mnem` and `~/.mnem`. To keep it, run `mnem install --watch`.
 
 <details>
 <summary><b>Or as a Claude Code plugin</b></summary>
@@ -98,27 +122,34 @@ cargo install --path . --locked --features fastembed
 mnem install --watch
 ```
 
-Needs Rust 1.89 or newer. `--features fastembed` adds the local embedding model used for
+Needs Rust 1.89 or newer. `--features fastembed` adds the local model used for
 meaning-based search.
 </details>
 
 <details>
 <summary><b>Options and older systems</b></summary>
 
-- `MNEM_VERSION=v0.3.3` picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1`
-  installs only the binary.
-- Linux with glibc 2.35 to 2.38 (Ubuntu 22.04, Debian 12) and Intel Macs get a "lite" build:
-  the same mnem, with a smaller model for meaning-based search.
+- `MNEM_VERSION=v0.3.3` picks a release, `MNEM_BIN_DIR` another folder, and
+  `MNEM_NO_SETUP=1` installs only the binary.
+- Linux with glibc 2.35 to 2.38 (Ubuntu 22.04, Debian 12) and Intel Macs get a "lite"
+  build: the same mnem, with a smaller model for meaning-based search.
 - Windows: use WSL.
-- The first run downloads the embedding model once (about 90 MB).
+- The background service downloads the search model once (about 90 MB).
 </details>
 
 ## What you get
 
-### Memory that comes back by itself
+### Answers about past work, with sources
 
-You don't call anything. When you start a session, type a prompt or the agent opens a
-file, mnem adds a few relevant memories to the context, like this:
+<p align="center"><img alt="mnem ask answering a question from memories and listing the ones it cited" src="docs/assets/ask.svg" width="88%"></p>
+
+`mnem ask` answers only from the memories it found and lists every one it cited. If they
+don't cover the question, it says so.
+
+### Memory that shows up on its own
+
+You don't call anything. When a session starts, when you type a prompt and when the agent
+opens a file, mnem adds the few memories that match:
 
 ```text
 mnem recall: past memories matching this prompt (full text: get_observations([ids]))
@@ -126,35 +157,36 @@ mnem recall: past memories matching this prompt (full text: get_observations([id
 #1 bugfix · 3d ago · Replayed Stripe webhooks no longer create duplicate orders
 ```
 
-Opening a file brings the memories about *that file*, each saying whether its edits are
-still there: `(its edited lines are still there)` or `(its edited lines are gone)`.
-Agents can also search with mnem's MCP tools (`search`, `get_observations`,
-`timeline`, `recall_file`).
+Opening a file brings the memories about that file, each noting whether its edits are
+still there. Agents can also search on their own through mnem's MCP tools, and
+`mnem remember "..."` pins a fact every agent sees at session start.
 
-### Ask about past work, with sources
-
-<p align="center"><img alt="mnem ask answering from memories, citing them" src="docs/assets/ask.svg" width="88%"></p>
-
-The answer comes only from memories it was shown, and every source it cites is listed,
-so you can check it.
-
-### See everything in the viewer
+### A live view of every agent
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/viewer-dark.png">
-    <img alt="The mnem viewer: a live feed of sessions, prompts and memories across agents" src="docs/assets/viewer-light.png" width="88%">
+    <img alt="The mnem viewer: a live feed of prompts, memories and session summaries from Claude Code, Codex and pi" src="docs/assets/viewer-light.png" width="88%">
   </picture>
 </p>
 
-A live feed of every agent's prompts, memories and session summaries, with search,
-project filters, backups and a one-click fix for any agent that isn't connected.
-(Screenshots use a made-up demo project: [docs/demo](docs/demo/make-demo.py).)
+Every agent's prompts and memories as they happen. Search them, filter by project, take
+a backup, or fix an agent that isn't connected with one click.
+(The screenshots use a made-up project: [docs/demo](docs/demo/make-demo.py).)
 
-### Build on the record
+### Which lines did an agent write?
 
-Your own tools can read the whole record through a local, read-only API, instead of
-parsing three agents' transcript formats themselves:
+<p align="center"><img alt="mnem trace writing Agent Trace records for recent commits" src="docs/assets/trace.svg" width="88%"></p>
+
+`mnem trace` writes [Agent Trace](https://agent-trace.dev) records for your commits:
+which added lines came from which agent session and model. It covers commits from before
+you installed anything, because the transcripts already hold every edit. Useful in code
+review, and for teams with rules about AI-written code.
+
+### Build your own tools on it
+
+A local, read-only API serves the whole record, so your scripts skip parsing three
+transcript formats:
 
 ```sh
 mnem api        # prints the address and token
@@ -165,69 +197,62 @@ curl -s -H "Authorization: Bearer $(cat ~/.mnem/api-token)" \
 Sessions, events, memories with their evidence, and search, paged so a tool can sync.
 See [docs/api.md](docs/api.md).
 
-### Which code did the agents write?
-
-<p align="center"><img alt="mnem trace writing Agent Trace records for commits" src="docs/assets/trace.svg" width="88%"></p>
-
-`mnem trace` writes [Agent Trace](https://agent-trace.dev) records for your commits,
-**including commits made before any tracing tool was installed**, because the
-transcripts already hold every edit.
-
 ## How it works
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-dark.svg">
-    <img alt="Agents write transcripts; mnem captures them into one local record, distils memories with evidence, and serves them back to agents, to you and to your tools" src="docs/assets/how-light.svg" width="100%">
+    <img alt="Agents write transcripts; mnem reads them into one local record, writes memories that cite their sources, and serves them back to agents, to you and to your tools" src="docs/assets/how-light.svg" width="100%">
   </picture>
 </p>
 
-1. **Capture.** Every agent appends prompts, answers, commands and edits to a transcript
-   file. mnem reads each file as it grows and commits what it read together with its
-   position, so nothing is skipped or read twice.
-2. **Distil.** After each turn, and in the background for anything missed, mnem asks your
-   model to turn the session into short memories that cite the events behind them.
-3. **Recall.** Hooks put the best memories in front of the agent at the right moments,
-   ranked by words and by meaning with a local embedding model, and never repeated
-   within a session.
+1. **Capture.** Each agent appends prompts, answers, commands and edits to a transcript
+   file. mnem reads each file as it grows and saves its place in the same database write,
+   so nothing is skipped or read twice.
+2. **Distil.** After each turn, and in the background for anything missed, your own model
+   turns the session into short memories that cite the lines behind them.
+3. **Recall.** Hooks put the best few memories in front of the agent at the right moment,
+   ranked by words and by meaning with a local model, and never repeated in a session.
 
 ## Privacy
 
-- **Stays on your machine:** the record, the memories, the embedding model, the viewer,
-  the API. There is no mnem server.
-- **Redacted before it's stored:** API keys, tokens, passwords in URLs and the like.
-- **Leaves your machine:** only redacted excerpts sent to the model *you* choose, to write
-  memories (by default your own Claude Code or Codex sign-in), and a one-time model
-  download from Hugging Face.
-- **Yours to delete:** `mnem forget` removes a memory, session or project for good;
-  `mnem uninstall` removes mnem's hooks and tools (your data stays until you delete
-  `~/.mnem`).
+Everything stays on your machine: the record, the memories, the search model, the viewer
+and the API. There is no mnem server.
+
+Secrets are removed before anything is stored: API keys, tokens, passwords in URLs.
+
+Two things leave your machine. To write memories, redacted excerpts go to the model you
+chose, by default your own Claude Code or Codex sign-in. And the background service
+downloads its search model once from Hugging Face.
+
+`mnem forget` deletes a memory, a session or a whole project for good.
+`mnem uninstall` disconnects your agents and keeps your data until you delete `~/.mnem`.
 
 ## Everyday commands
 
 | Command | What it does |
 |---|---|
-| `mnem doctor` | Is capture complete? Which agents are connected? Anything to fix? |
-| `mnem ask "…"` | Answer a question about past work, with sources |
+| `mnem doctor` | Is every session captured? Which agents are connected? Anything to fix? |
+| `mnem ask "..."` | Answer a question about past work, with sources |
 | `mnem search <words>` | Search everything captured |
-| `mnem remember "…"` | Pin a fact every agent sees at session start |
+| `mnem remember "..."` | Pin a fact every agent sees at session start |
 | `mnem forget <id>` | Delete a memory, session or project for good |
 | `mnem backup` / `mnem restore` | Verified snapshots (taken daily by default) |
 | `mnem trace` | Agent Trace records for this repository's commits |
 | `mnem api` | The record API's address and token |
 | `mnem install` / `mnem uninstall` | Connect or disconnect your agents |
 
-Every command, setting and measurement: [docs/reference.md](docs/reference.md).
+Every command, setting and measurement is in [docs/reference.md](docs/reference.md).
 
 ## How it compares
 
 | | mnem | Tools that write memories during the session |
 |---|---|---|
-| A failed hook or model call | delays a memory; the session is read again from its transcript | can drop that session's memory |
-| Where a memory came from | cites the transcript events | not kept by the tools we checked |
-| Is its code still there? | checked per memory | not tracked by the tools we checked |
-| Agents | Claude Code, Codex, pi, one shared memory | some cover more agents (up to 9) |
-| What to run | one binary | often Node, Python or a vector database |
+| A hook or model call fails | the memory waits; the session is read again from its transcript | that session's memory can be lost |
+| Where a memory came from | points to the transcript lines | not kept by the tools we checked |
+| Is its code still there? | checked for each memory | not tracked by the tools we checked |
+| Agents | Claude Code, Codex and pi, one shared memory | some cover more (up to 9) |
+| What you run | one binary | often Node, Python or a vector database |
 
 Thirteen tools compared in detail, with sources: [the comparison and roadmap](https://daefery.github.io/mnem/comparison.html).
 
@@ -236,51 +261,53 @@ Thirteen tools compared in detail, with sources: [the comparison and roadmap](ht
 <details>
 <summary><b>Will it slow my agent down?</b></summary>
 
-Hooks are budgeted at 300 ms; typical prompt recall takes about 20 ms. Memories are
-written after the turn, in the background.
+Rarely enough to notice. On the author's machine over the past two weeks, the prompt
+hook took 26 ms at the median and 167 ms for the slowest 5%. Memories are written after
+the turn, in the background.
 </details>
 
 <details>
 <summary><b>Does it use my Claude or ChatGPT plan?</b></summary>
 
-If you choose your Claude Code or Codex sign-in (the default when nothing else is set),
-writing memories uses your plan: one request per piece of a finished session (about
-16,000 characters of transcript), so a short session takes one and a long one several.
-All background requests together are capped at 100 a day; when the cap is reached,
-sessions wait for the next day and are never lost (`mnem doctor` says so). You can point
-it at any OpenAI-compatible endpoint instead.
+Yes, if you write memories with your Claude Code or Codex sign-in, which is the default.
+One request covers about 16,000 characters of a finished session, so a short session takes
+one and a long one several. All background requests together stop at 100 a day. Sessions
+past that wait for the next day; none are lost, and `mnem doctor` tells you. You can use
+any OpenAI-compatible endpoint instead.
 </details>
 
 <details>
 <summary><b>Do agents actually use the memories?</b></summary>
 
-Judges rate about two thirds of the memories mnem shows as helpful, but agents open
-fewer than 1 in 10 of them. How memories are presented is being tested right now, measured the same way;
-progress is on the [roadmap](https://daefery.github.io/mnem/comparison.html#roadmap).
+Not as often as they should, yet. Judges rate about two thirds of the memories mnem shows
+as helpful, but agents open fewer than 1 in 10. Better ways to present them are being
+tested and measured now ([roadmap](https://daefery.github.io/mnem/comparison.html#roadmap)).
+The record, the sources and `mnem ask` work either way.
 </details>
 
 <details>
 <summary><b>I already use claude-mem.</b></summary>
 
-`mnem import` brings in your claude-mem history with its ids, and mnem can recover
-sessions claude-mem never captured from the transcripts still on disk.
+`mnem import` brings in your claude-mem history with its ids. mnem can also recover
+sessions claude-mem never saved, from the transcripts still on disk. Try it first with
+the no-changes steps above.
 </details>
 
 <details>
 <summary><b>How do I remove it?</b></summary>
 
-`mnem uninstall`, then delete `~/.local/bin/mnem` and, if you want your data gone too,
+Run `mnem uninstall`, then delete `~/.local/bin/mnem`. To remove your data too, delete
 `~/.mnem`.
 </details>
 
 ## Contributing
 
-Issues and pull requests are welcome. Recall changes are measured before they ship
+Issues and pull requests are welcome. Changes to recall are measured before they ship
 (`mnem eval --gate`); see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-mnem is free software under the [GNU AGPL v3.0](LICENSE): use it, change it and share it,
-including at work. If you distribute a modified mnem, or run one as a service for
-others, share your changes under the same license. A commercial license is available
-for uses the AGPL doesn't suit.
+mnem is free software under the [GNU AGPL v3.0](LICENSE). Use it, change it and share it,
+at work too. If you distribute a modified mnem, or run one as a service for others, share
+your changes under the same license. A commercial license is available for uses the AGPL
+doesn't suit.
