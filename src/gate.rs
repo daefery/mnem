@@ -113,7 +113,7 @@ fn listed(answer: &str) -> Vec<i64> {
 pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
     for (set, how) in [
         ("recall", "mnem eval --build 40"),
-        ("vague", "write it by hand (see README)"),
+        ("vague", "write it by hand (see docs/reference.md)"),
         ("real-dev", "mnem eval --build-real 160"),
         ("recent-dev", "mnem eval --build-recent 160"),
         ("files-dev", "mnem eval --build-files 300"),

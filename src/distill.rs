@@ -179,7 +179,7 @@ pub fn not_configured(c: &crate::config::DistillConfig) -> Option<&'static str> 
         );
     }
     (c.api_key_env.is_none() && c.api_key_json.is_none()).then_some(
-        "no memories are being made: distillation has no model configured (install Claude Code or Codex and run `mnem install` again, or set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see README · Configuration)",
+        "no memories are being made: distillation has no model configured (install Claude Code or Codex and run `mnem install` again, or set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see docs/reference.md · Configuration)",
     )
 }
 
