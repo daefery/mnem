@@ -1,0 +1,7 @@
+{
+  "name": "mnem-viewer-checks",
+  "private": true,
+  "description": "Browser checks that every feature of the mnem web viewer still works",
+  "scripts": { "test": "sh run.sh" },
+  "dependencies": { "playwright-core": "1.63.0" }
+}

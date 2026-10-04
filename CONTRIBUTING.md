@@ -29,3 +29,6 @@ request. Changes without it cannot be merged.
   so when anything is behind.
 - **Tests with the change.** `cargo test --release --features fastembed` and
   `cargo clippy --all-targets` pass, and new behaviour has a test that fails without it.
+- **The viewer keeps every feature.** A change to `ui/` passes the browser checks in
+  `tests/viewer` (`cd tests/viewer && npm ci && sh run.sh`); a change meant to alter only
+  the look also leaves their fingerprint unchanged (see `tests/viewer/README.md`).

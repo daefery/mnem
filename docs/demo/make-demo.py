@@ -6,16 +6,18 @@
     mnem --db /tmp/mnem-demo.db ui --port 37800
 
 Everything here is fictional: the project (acme/shop-api), the sessions, the people.
-Times are relative to now, so the feed always reads as recent work.
+Times are relative to now, so the feed always reads as recent work. Set
+MNEM_DEMO_NOW (milliseconds since 1970) to build the same record every time.
 """
 import json
+import os
 import sqlite3
 import sys
 import time
 
 db = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mnem-demo.db"
 c = sqlite3.connect(db)
-now = int(time.time() * 1000)
+now = int(os.environ.get("MNEM_DEMO_NOW") or time.time() * 1000)
 H = 3_600_000
 PROJECT = "github.com/acme/shop-api"
 
