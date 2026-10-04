@@ -322,6 +322,37 @@ and WSL, a launchd agent with `KeepAlive` on macOS.
 From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
 `mnem restore <file> --apply [--settings]`. Automatic backups carry settings too.
 
+## Learning from a teammate's memory (merge)
+
+A teammate sends you a backup from their machine. Choose it in **Backup & move** and pick
+**Merge into my memory** (the default for a backup from another machine; for your own
+backup the default is **Replace**). From a shell:
+`mnem restore <file> --merge [--prefix ana]` shows what it would add, and `--apply`
+merges.
+
+- **Nothing of yours changes.** Every session, event, memory and pin already here stays
+  exactly as it was; theirs are added beside them, with new ids. Your settings are kept
+  (a teammate's are never taken).
+- **Shared project names get a prefix.** A project you both have, say
+  `github.com/acme/shop`, comes in as `ana/github.com/acme/shop` (the prefix defaults
+  to their machine name and can be changed in the preview). Their sessions, memories and
+  pins live there, so your own project's recall and session start never mix them in;
+  the viewer shows it as `ana/shop`. Projects only they have keep their name.
+- **Merging again adds only what is new.** The same backup twice adds nothing; a newer
+  backup from the same teammate, with the same prefix, adds their new sessions to the
+  same places (mnem remembers where each of their projects went).
+- **What you forgot stays forgotten.** A session, project, event or memory you deleted
+  with `mnem forget` is not brought back by a merge. A session that is already here
+  (the same agent session id) is left out too.
+- **Their sessions are history.** Their transcripts are on their machine, so mnem never
+  re-reads or re-distils those sessions here; their memories come with them, each still
+  citing the events behind it. Search, `mnem ask` and the viewer cover them.
+- **Safe to stop.** The current memory is saved as a verified backup first, and the merge
+  is one transaction: a failure leaves nothing half merged. The backup is checked and
+  sanitised the same way as for a replace.
+
+Into an empty mnem, a merge would be a replace, so only **Replace** is offered there.
+
 The viewer's changing actions are POSTs that need an `X-Mnem` header from the viewer's
 own origin, so another website open in the browser cannot trigger them.
 

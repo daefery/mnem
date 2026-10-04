@@ -21,6 +21,7 @@ pub mod import;
 pub mod ingest;
 pub mod install;
 pub mod mcp;
+pub mod merge;
 pub mod model;
 pub mod privacy;
 pub mod project;

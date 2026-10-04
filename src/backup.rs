@@ -433,8 +433,8 @@ pub fn verify(snapshot: &Path) -> Result<Manifest> {
 }
 
 /// Verified copy of `snapshot` outside the backups directory (so rotation can never
-/// delete it), plus its manifest. The caller removes the copy.
-fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
+/// delete it), plus its manifest. The caller removes the copy (`remove_db`).
+pub(crate) fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
     let want: Option<Manifest> = std::fs::read_to_string(manifest_path(snapshot))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok());
@@ -511,7 +511,7 @@ fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
     }
 }
 
-fn remove_db(path: &Path) {
+pub(crate) fn remove_db(path: &Path) {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }

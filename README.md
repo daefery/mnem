@@ -237,7 +237,7 @@ downloads its search model once from Hugging Face.
 | `mnem search <words>` | Search everything captured |
 | `mnem remember "..."` | Pin a fact every agent sees at session start |
 | `mnem forget <id>` | Delete a memory, session or project for good |
-| `mnem backup` / `mnem restore` | Verified snapshots (taken daily by default) |
+| `mnem backup` / `mnem restore` | Verified snapshots (taken daily by default); `--merge` adds a teammate's memory to yours |
 | `mnem trace` | Agent Trace records for this repository's commits |
 | `mnem api` | The record API's address and token |
 | `mnem install` / `mnem uninstall` | Connect or disconnect your agents |

@@ -47,6 +47,10 @@
   function shortProject(p) {
     if (!p) return "";
     if (p.startsWith("/")) return p.split("/").filter(Boolean).slice(-1)[0] || p;
+    // A teammate's project merged in under a prefix ("ana/github.com/acme/shop") shows
+    // whose it is: "ana/shop".
+    const merged = /^([^/.]+)\/(.+\..+)$/.exec(p);
+    if (merged) return `${merged[1]}/${shortProject(merged[2])}`;
     const [repo, checkout] = p.split("#");
     const name = repo.split("/").slice(-1)[0];
     return checkout ? `${name}#${checkout}` : name;
@@ -298,6 +302,9 @@
     const data = await getJSON("/api/projects");
     const sel = $("project");
     const ctx = $("context-project");
+    // Called again after a merge adds projects: keep only the fixed first options.
+    sel.replaceChildren(sel.options[0]);
+    ctx.replaceChildren(...[...ctx.options].filter((o) => !o.value));
     for (const p of data.projects) {
       sel.append(el("option", { value: p.project }, `${shortProject(p.project)} (${p.count})`));
       ctx.append(el("option", { value: p.project }, shortProject(p.project)));
@@ -610,15 +617,89 @@
     const apply = el("button", { class: "move-btn danger" }, "Replace this machine’s memory with the backup");
     const cancel = el("button", { class: "move-btn quiet" }, "Cancel");
     const result = el("p", { class: "move-help", role: "status" });
+    const replaceWarn = el("p", { class: "move-warn" },
+      "Importing replaces this machine’s memory with the backup. The current memory is saved as a backup first, and transcripts still on this machine are read again afterwards, so their sessions come back.");
+    const replaceBox = el("div", { class: "move-mode-body" }, replaceWarn, settingsNode, el("div", { class: "move-actions" }, apply));
+
+    // Merge: only when this machine already holds memory (into an empty one, a merge is a replace).
+    let mergeBox = null;
+    let modes = null;
+    if (!p.current_empty) {
+      const prefix = el("input", { type: "text", class: "move-prefix", value: p.default_prefix, maxlength: "40",
+        spellcheck: "false", "aria-label": "Prefix for shared project names" });
+      const plan = el("div", { class: "move-plan", role: "status" }, "Checking what the backup adds…");
+      const doMerge = el("button", { class: "move-btn primary" }, "Add the backup’s memory to mine");
+      doMerge.disabled = true;
+      mergeBox = el("div", { class: "move-mode-body", hidden: true },
+        el("p", { class: "move-help" },
+          "Your memory stays exactly as it is; the backup’s sessions and memories are added beside it. Projects you both have get a prefix on their side, so the two never mix. Your settings are kept."),
+        el("label", { class: "move-prefix-row" }, el("span", {}, "Prefix for shared projects"), prefix),
+        plan,
+        el("div", { class: "move-actions" }, doMerge));
+      let seq = 0;
+      const refresh = async () => {
+        const mine = ++seq;
+        doMerge.disabled = true;
+        plan.classList.remove("error");
+        plan.textContent = "Checking what the backup adds…";
+        try {
+          const r = await postJSON(`/api/import/merge-preview?file=${encodeURIComponent(p.file)}&prefix=${encodeURIComponent(prefix.value)}`);
+          if (mine !== seq) return;
+          plan.replaceChildren(...planNodes(r.plan));
+          doMerge.disabled = r.plan.sessions + r.plan.memories + r.plan.pins === 0;
+        } catch (e) {
+          if (mine !== seq) return;
+          plan.classList.add("error");
+          plan.textContent = e.message;
+        }
+      };
+      let timer = null;
+      prefix.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(refresh, 400); });
+      doMerge.addEventListener("click", async () => {
+        doMerge.disabled = cancel.disabled = prefix.disabled = true;
+        result.classList.remove("error");
+        result.textContent = "Saving the current memory, then adding the backup’s…";
+        try {
+          const r = await postJSON(`/api/import/apply?file=${encodeURIComponent(p.file)}&mode=merge&prefix=${encodeURIComponent(prefix.value)}`);
+          const m = r.merged;
+          result.textContent = `Added ${fmtNum(m.sessions)} sessions and ${fmtNum(m.memories + m.pins)} memories. This machine now holds ${countsText(r.current)}.`;
+          reset();
+          loadHealth();
+          loadProjects();
+        } catch (e) {
+          result.classList.add("error");
+          result.textContent = `Merge failed, nothing changed: ${e.message}`;
+          doMerge.disabled = cancel.disabled = prefix.disabled = false;
+        }
+      });
+      const choice = (value, label, help, checked) => {
+        const input = el("input", { type: "radio", name: "move-mode", value });
+        input.checked = checked;
+        return el("label", { class: "move-mode" }, input, el("span", {}, el("b", {}, label), el("small", {}, help)));
+      };
+      // A teammate's backup defaults to merge; your own (same machine name) to replace.
+      const startMerge = !p.same_machine;
+      modes = el("div", { class: "move-modes", role: "radiogroup", "aria-label": "How to import" },
+        choice("merge", "Merge into my memory", "Keep everything here and add theirs, for learning from a teammate", startMerge),
+        choice("replace", "Replace my memory", "Make this machine a copy of the backup, for moving to a new machine", !startMerge));
+      const show = (mode) => {
+        mergeBox.hidden = mode !== "merge";
+        replaceBox.hidden = mode !== "replace";
+        if (mode === "merge" && !mergeBox.dataset.loaded) { mergeBox.dataset.loaded = "1"; refresh(); }
+      };
+      modes.addEventListener("change", (e) => show(e.target.value));
+      queueMicrotask(() => show(startMerge ? "merge" : "replace"));
+    }
+
     preview.replaceChildren(
       el("div", { class: "move-compare" },
         el("div", {}, el("b", {}, `Backup${o.host ? ` from ${o.host}` : ""}`),
           o.taken_at ? `${fmtDate(o.taken_at)} · ` : "", countsText(p.backup)),
         el("div", {}, el("b", {}, `This machine now (${p.current.host})`), countsText(p.current))),
-      el("p", { class: "move-warn" },
-        "Importing replaces this machine’s memory with the backup. The current memory is saved as a backup first, and transcripts still on this machine are read again afterwards, so their sessions come back."),
-      settingsNode,
-      el("div", { class: "move-actions" }, apply, cancel),
+      modes,
+      mergeBox,
+      replaceBox,
+      el("div", { class: "move-actions" }, cancel),
       result,
     );
     preview.hidden = false;
@@ -660,6 +741,25 @@
         apply.disabled = cancel.disabled = !!changed;
       }
     });
+  }
+
+  // What a merge adds, in plain lines.
+  function planNodes(plan) {
+    const lines = [];
+    const added = `Adds ${fmtNum(plan.sessions)} sessions, ${fmtNum(plan.events)} events and ${fmtNum(plan.memories)} memories`
+      + (plan.pins ? `, plus ${fmtNum(plan.pins)} pinned facts` : "") + ".";
+    lines.push(el("p", {}, plan.sessions + plan.memories + plan.pins ? added : "Nothing new: everything in this backup is already here."));
+    if (plan.renamed.length) {
+      lines.push(el("p", {}, `${plan.renamed.length === 1 ? "A project you both have is" : `${plan.renamed.length} projects you both have are`} added under a new name:`));
+      lines.push(el("ul", {}, ...plan.renamed.slice(0, 8).map(([from, to]) =>
+        el("li", {}, el("code", {}, shortProject(from)), " → ", el("code", { title: to }, to)))));
+      if (plan.renamed.length > 8) lines.push(el("p", {}, `and ${plan.renamed.length - 8} more.`));
+    }
+    if (plan.skipped_sessions || plan.skipped_memories) {
+      lines.push(el("p", { class: "move-help" },
+        `Left out: ${fmtNum(plan.skipped_sessions)} sessions and ${fmtNum(plan.skipped_memories)} memories already here or ones you forgot.`));
+    }
+    return lines;
   }
 
   async function restartMnem(button, result) {

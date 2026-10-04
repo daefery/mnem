@@ -586,15 +586,27 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                 return Ok(Response::error("400 Bad Request", format!("{e:#}")));
             }
             match crate::backup::check_import(&dir.join(&name)) {
-                Ok((m, origin)) => Response::json(&json!({
-                    "settings": crate::backup::review_settings(&dir.join(&name)).ok().flatten(),
-                    "file": name,
-                    "backup": { "sessions": m.sessions, "events": m.events, "memories": m.memories,
-                                "bytes": m.bytes, "schema": m.schema_version },
-                    "origin": { "host": origin.host, "taken_at": origin.taken_at,
-                                "version": origin.version, "has_settings": origin.config.is_some() },
-                    "current": counts(&open(db_path)?, db_path)?,
-                })),
+                Ok((m, origin)) => {
+                    let conn = open(db_path)?;
+                    let empty = crate::merge::is_empty(&conn)?;
+                    let same_machine = origin
+                        .host
+                        .as_deref()
+                        .is_some_and(|h| h == crate::backup::hostname());
+                    Response::json(&json!({
+                        "settings": crate::backup::review_settings(&dir.join(&name)).ok().flatten(),
+                        "file": name,
+                        "backup": { "sessions": m.sessions, "events": m.events, "memories": m.memories,
+                                    "bytes": m.bytes, "schema": m.schema_version },
+                        "origin": { "host": origin.host, "taken_at": origin.taken_at,
+                                    "version": origin.version, "has_settings": origin.config.is_some() },
+                        "current": counts(&conn, db_path)?,
+                        // Nothing here to keep: a merge would be a replace, so only replace is offered.
+                        "current_empty": empty,
+                        "same_machine": same_machine,
+                        "default_prefix": crate::merge::default_prefix(origin.host.as_deref()),
+                    }))
+                }
                 Err(e) => {
                     let _ = std::fs::remove_file(dir.join(&name));
                     Response::error("422 Unprocessable Content", format!("{e:#}"))
@@ -620,6 +632,32 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                     false,
                     "the upload is gone; upload it again".into(),
                 ));
+            }
+            // Merge adds the backup's history to this memory; nothing here changes, and the
+            // settings stay this machine's (a teammate's settings are never taken).
+            if q.get("mode").map(String::as_str) == Some("merge") {
+                let prefix = q.get("prefix").map(String::as_str).unwrap_or("");
+                let mut conn = db::open(db_path)?;
+                if crate::merge::is_empty(&conn)? {
+                    return Ok(fail(
+                        "409 Conflict",
+                        false,
+                        "this machine holds no memory yet; use replace".into(),
+                    ));
+                }
+                return Ok(
+                    match crate::merge::merge(&file, &mut conn, &crate::backup::dir(), prefix) {
+                        Ok(plan) => {
+                            let _ = std::fs::remove_file(&file);
+                            Response::json(&json!({
+                                "changed": true,
+                                "merged": plan,
+                                "current": counts(&conn, db_path)?,
+                            }))
+                        }
+                        Err(e) => fail("500 Internal Server Error", false, format!("{e:#}")),
+                    },
+                );
             }
             let want_settings = q.get("settings").map(String::as_str) == Some("1");
             // Settings are checked before anything changes.
@@ -680,6 +718,24 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                 "can_restart": crate::service::supervised_with_restart(),
                 "current": counts(&conn, db_path)?,
             }))
+        }
+        // What merging the upload would add, with a prefix for shared project names.
+        "/api/import/merge-preview" => {
+            let Some(name) = q.get("file").and_then(|f| safe_name(f, "upload-")) else {
+                return Ok(Response::error("400 Bad Request", "no such upload"));
+            };
+            let file = incoming().join(name);
+            if !file.is_file() {
+                return Ok(Response::error(
+                    "404 Not Found",
+                    "the upload is gone; upload it again",
+                ));
+            }
+            let prefix = q.get("prefix").map(String::as_str).unwrap_or("");
+            match crate::merge::preview(&file, &open(db_path)?, prefix) {
+                Ok(p) => Response::json(&json!({ "plan": p })),
+                Err(e) => Response::error("422 Unprocessable Content", format!("{e:#}")),
+            }
         }
         "/api/import/discard" => {
             if let Some(name) = q.get("file").and_then(|f| safe_name(f, "upload-")) {

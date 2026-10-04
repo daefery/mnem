@@ -1010,6 +1010,60 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .move-warn { margin: 0; color: var(--ink); }
 
+/* Replace or merge: two cards, then the chosen mode's details. */
+.move-modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+
+.move-preview label.move-mode {
+  gap: 10px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.move-mode:has(input:checked) { border-color: var(--accent-line); background: var(--accent-soft); }
+.move-mode input { margin-top: 3px; accent-color: var(--accent); }
+.move-mode span { display: flex; flex-direction: column; gap: 3px; }
+.move-mode b { color: var(--ink); font-size: 13.5px; }
+.move-mode small { color: var(--ink-2); font-size: 12.5px; line-height: 1.45; }
+
+.move-mode-body { display: flex; flex-direction: column; gap: 12px; }
+.move-mode-body[hidden] { display: none; }
+
+.move-preview label.move-prefix-row { align-items: center; gap: 10px; font-size: 13.5px; color: var(--ink-2); }
+
+.move-prefix {
+  width: 14em;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-ctl);
+}
+
+.move-prefix:focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; border-color: var(--accent); }
+
+.move-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.move-plan p { margin: 0; }
+.move-plan ul { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 3px; }
+.move-plan code { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
+.move-plan.error { color: var(--danger); }
+
 .move-preview[hidden], .move-progress[hidden], .mnem-agents[hidden] { display: none; }
 
 /* ------------------------------------------------------------ scrollbars */

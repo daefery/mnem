@@ -183,7 +183,8 @@ enum Cmd {
     },
     /// List snapshots with their row counts
     Backups,
-    /// Check a snapshot restores cleanly; with --apply, replace the live database with it
+    /// Check a snapshot restores cleanly; with --apply, replace the live database with it;
+    /// with --merge, add a teammate's backup to this memory instead (nothing here changes)
     Restore {
         snapshot: PathBuf,
         #[arg(long)]
@@ -192,6 +193,14 @@ enum Cmd {
         /// kept as config.json.bak-<time>
         #[arg(long)]
         settings: bool,
+        /// Add the backup's sessions and memories to this memory; every row here stays as
+        /// it is. Shows what it would add unless --apply is given too
+        #[arg(long, conflicts_with = "settings")]
+        merge: bool,
+        /// With --merge: prefix for project names both sides use (default: the backup's
+        /// machine name), so theirs become <prefix>/<name>
+        #[arg(long, requires = "merge")]
+        prefix: Option<String>,
     },
     /// Record the git working tree for a session (the pi extension calls this per turn)
     Snapshot {
@@ -1001,7 +1010,50 @@ fn main() -> Result<()> {
             snapshot,
             apply,
             settings,
+            merge,
+            prefix,
         } => {
+            if merge {
+                let (_, origin) = backup::check_import(&snapshot)?;
+                let prefix =
+                    prefix.unwrap_or_else(|| mnem::merge::default_prefix(origin.host.as_deref()));
+                if mnem::merge::is_empty(&conn)? {
+                    anyhow::bail!(
+                        "this memory is empty, so there is nothing to merge into; use --apply without --merge"
+                    );
+                }
+                let p = if apply {
+                    mnem::merge::merge(&snapshot, &mut conn, &backup::dir(), &prefix)?
+                } else {
+                    mnem::merge::preview(&snapshot, &conn, &prefix)?
+                };
+                println!(
+                    "{} {} sessions, {} events, {} memories and {} pinned facts{}",
+                    if apply { "added" } else { "would add" },
+                    p.sessions,
+                    p.events,
+                    p.memories,
+                    p.pins,
+                    origin
+                        .host
+                        .as_deref()
+                        .map(|h| format!(" from {h}"))
+                        .unwrap_or_default()
+                );
+                for (from, to) in &p.renamed {
+                    println!("  {from} -> {to}");
+                }
+                if p.skipped_sessions + p.skipped_memories > 0 {
+                    println!(
+                        "  left out: {} sessions and {} memories already here or forgotten",
+                        p.skipped_sessions, p.skipped_memories
+                    );
+                }
+                if !apply {
+                    println!("nothing changed; add --apply to merge");
+                }
+                return Ok(());
+            }
             if apply {
                 let (_, origin) = backup::check_import(&snapshot)?;
                 if settings

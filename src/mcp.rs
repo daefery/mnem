@@ -1093,6 +1093,16 @@ fn event_detail(conn: &Connection, id: i64) -> Result<String> {
 }
 
 fn short(project: &str) -> String {
+    // A teammate's project merged in under a prefix keeps the prefix: "ana/acme/shop".
+    if let Some((prefix, rest)) = project.split_once('/')
+        && !prefix.contains('.')
+        && rest
+            .split('/')
+            .next()
+            .is_some_and(|host| host.contains('.'))
+    {
+        return format!("{prefix}/{}", short(rest));
+    }
     project
         .rsplit('/')
         .take(2)
@@ -1105,6 +1115,17 @@ fn short(project: &str) -> String {
 
 fn squash(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[cfg(test)]
+mod short_tests {
+    #[test]
+    fn merged_projects_keep_their_prefix() {
+        assert_eq!(super::short("github.com/acme/shop"), "acme/shop");
+        assert_eq!(super::short("ana/github.com/acme/shop"), "ana/acme/shop");
+        assert_eq!(super::short("/home/me/code"), "me/code");
+        assert_eq!(super::short("automation-research"), "automation-research");
+    }
 }
 
 #[cfg(test)]
