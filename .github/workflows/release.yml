@@ -87,5 +87,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat dist/*.sha256 > dist/checksums.txt
+          # Only the highest version is "latest" (what install.sh fetches by default):
+          # rebuilding an older tag must not take that over.
+          git fetch -q --tags
+          highest=$(git tag -l 'v*' | sort -V | tail -1)
+          latest=false
+          [ "$GITHUB_REF_NAME" = "$highest" ] && latest=true
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt install.sh \
-            --title "mnem $GITHUB_REF_NAME" --generate-notes
+            --title "mnem $GITHUB_REF_NAME" --generate-notes --latest=$latest
