@@ -1,7 +1,7 @@
 {
   "name": "mnem",
   "displayName": "mnem",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Local-first memory for coding agents: one complete record of every Claude Code, Codex and pi session, read from the transcripts they write, with memories that cite their evidence and know whether their code survived.",
   "author": { "name": "Fery", "url": "https://github.com/daefery" },
   "homepage": "https://github.com/daefery/mnem",

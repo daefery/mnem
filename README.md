@@ -70,6 +70,10 @@ mnem doctor        # ends with "status: OK"
 
 and open the viewer at **http://127.0.0.1:37777**.
 
+> **Using Codex?** Codex runs no hook until you trust it. Open Codex once, type `/hooks`,
+> review mnem's three hooks and trust them; until then Codex sessions are still recorded,
+> but get no memories back. `mnem doctor` reminds you while any is untrusted.
+
 <details>
 <summary><b>Or as a Claude Code plugin</b></summary>
 
@@ -99,7 +103,7 @@ meaning-based search.
 <details>
 <summary><b>Options and older systems</b></summary>
 
-- `MNEM_VERSION=v0.3.2` picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1`
+- `MNEM_VERSION=v0.3.3` picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1`
   installs only the binary.
 - Linux with glibc 2.35 to 2.38 (Ubuntu 22.04, Debian 12) and Intel Macs get a "lite" build:
   the same mnem, with a smaller model for meaning-based search.
