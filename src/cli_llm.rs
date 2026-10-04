@@ -45,6 +45,14 @@ impl Cli {
     }
 
     /// The model chain when the settings name none (see the module note for why).
+    /// How a person signs this command in.
+    pub fn login_hint(self) -> &'static str {
+        match self {
+            Cli::Claude => "open Claude Code and type /login",
+            Cli::Codex => "run `codex login`",
+        }
+    }
+
     pub fn default_chain(self) -> &'static [&'static str] {
         match self {
             Cli::Claude => &["sonnet"],
@@ -265,12 +273,59 @@ fn run(
     match cli.reply(&stdout, out) {
         Ok(text) => Ok(text),
         // A failed run explains itself on stderr (or, for claude, in its envelope).
-        Err(_) if !status.success() => Err(classify_message(if stderr.trim().is_empty() {
-            &stdout
-        } else {
-            &stderr
-        })),
+        Err(_) if !status.success() => Err(
+            match classify_message(&failure_text(cli, &stdout, &stderr)) {
+                // Say how to sign in, not only that a request was refused.
+                Failure::Endpoint(m) if m.starts_with("not signed in") => {
+                    Failure::Endpoint(format!(
+                        "{} is not signed in: {} ({})",
+                        cli.command(),
+                        cli.login_hint(),
+                        m.trim_start_matches("not signed in: ")
+                    ))
+                }
+                f => f,
+            },
+        ),
         Err(f) => Err(f),
+    }
+}
+
+/// The part of a failed run's output that is the command's own complaint. codex echoes
+/// the whole prompt to stderr, transcript included, so a session that talked about
+/// "429" or "/login" would read as a quota or sign-in failure: only its `ERROR:` lines
+/// (with the server's message pulled out of their JSON) are its own words.
+fn failure_text(cli: Cli, stdout: &str, stderr: &str) -> String {
+    let all = if stderr.trim().is_empty() {
+        stdout
+    } else {
+        stderr
+    };
+    if cli != Cli::Codex {
+        return all.to_string();
+    }
+    let errors: Vec<String> = all
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("ERROR:"))
+        // Progress notices, not the cause ("Reconnecting... 2/5").
+        .filter(|e| !e.trim_start().starts_with("Reconnecting"))
+        .map(|e| {
+            serde_json::from_str::<Value>(e.trim())
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/error/message")
+                        .or_else(|| v.get("message"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| e.trim().to_string())
+        })
+        .collect();
+    if errors.is_empty() {
+        // No ERROR line: say so rather than guess from the echoed prompt.
+        "codex failed without an error message".to_string()
+    } else {
+        errors.join("\n")
     }
 }
 
@@ -334,6 +389,37 @@ mod tests {
         assert!(
             matches!(classify_message("connection reset"), Failure::NextModel(m, _) if m == 5 * 60_000)
         );
+    }
+
+    #[test]
+    fn a_codex_failure_is_read_from_its_error_lines_not_the_echoed_prompt() {
+        // What codex 0.157 prints on stderr for a model a ChatGPT plan does not offer,
+        // after echoing a prompt that talks about 429s and logging in.
+        let stderr = "OpenAI Codex v0.157.1\n--------\nmodel: gpt-x\n--------\nuser\nThe retry loop now backs off on 429 and the quota; run /login if unauthorized.\n\nwarning: Codex could not find bubblewrap on PATH.\nERROR: {\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-x' model is not supported when using Codex with a ChatGPT account.\"}}\n";
+        let text = failure_text(Cli::Codex, "", stderr);
+        assert!(
+            text.starts_with("The 'gpt-x' model is not supported"),
+            "{text}"
+        );
+        assert!(
+            matches!(classify_message(&text), Failure::NextModel(m, ref s) if m == 6 * 60 * 60_000 && s.starts_with("model unavailable")),
+            "{:?}",
+            classify_message(&text)
+        );
+        // A real sign-out (codex 0.157, no auth.json) is still a sign-out, through its
+        // reconnect noise.
+        let out = "user\nwe hit a 429 quota\nERROR: Reconnecting... 5/5\nERROR: unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses\n";
+        let text = failure_text(Cli::Codex, "", out);
+        assert!(text.starts_with("unexpected status 401"), "{text}");
+        assert!(matches!(classify_message(&text), Failure::Endpoint(_)));
+        // No ERROR line: nothing in the echoed prompt is taken for the cause.
+        let silent = "user\nwe hit a 429 rate limit yesterday\n";
+        assert!(matches!(
+            classify_message(&failure_text(Cli::Codex, "", silent)),
+            Failure::NextModel(m, _) if m == 5 * 60_000
+        ));
+        // claude's message is its whole output, as before.
+        assert_eq!(failure_text(Cli::Claude, "x", "usage limit"), "usage limit");
     }
 
     #[test]
