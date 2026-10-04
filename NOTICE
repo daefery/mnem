@@ -6,9 +6,8 @@ A commercial licence for uses the AGPL does not suit is available from the autho
 
 This product includes third-party material:
 
-- The web viewer stylesheet (ui/style.css) and summary section icons
-  (ui/icons/icon-thick-*.svg) are derived from Claude-Mem
+- The summary section icons (ui/icons/icon-thick-*.svg) come from Claude-Mem
   (https://github.com/thedotmack/claude-mem), Copyright 2026 Alex Newman,
-  licensed under the Apache License, Version 2.0. The stylesheet was modified
-  for mnem (pi source badge, search box, health pill; trimmed to the rules the
-  viewer uses, without the web font, blur or entrance animations).
+  licensed under the Apache License, Version 2.0. The web viewer's markup keeps
+  Claude-Mem's class names; its stylesheet (ui/style.css) was rewritten for mnem
+  on 4 October 2026 and no longer derives from Claude-Mem's.
