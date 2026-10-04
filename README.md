@@ -223,7 +223,7 @@ Every command, setting and measurement: [docs/reference.md](docs/reference.md).
 | Agents | Claude Code, Codex, pi, one shared memory | some cover more agents (up to 9) |
 | What to run | one binary | often Node, Python or a vector database |
 
-Thirteen tools compared in detail, with sources: [docs/comparison.html](docs/comparison.html).
+Thirteen tools compared in detail, with sources: [the comparison and roadmap](https://daefery.github.io/mnem/comparison.html).
 
 ## FAQ
 
@@ -249,7 +249,7 @@ OpenAI-compatible endpoint instead.
 
 Judges rate about two thirds of the memories mnem shows as helpful, but agents open
 fewer than 1 in 10 of them. How memories are presented is being tested right now, measured the same way;
-progress is on the [roadmap](docs/comparison.html).
+progress is on the [roadmap](https://daefery.github.io/mnem/comparison.html#roadmap).
 </details>
 
 <details>
