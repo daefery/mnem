@@ -178,11 +178,15 @@ something since, a short "meanwhile" update.
   an unavailable one (403/404) for 6 h, a failing one (5xx, timeout) for 5 min. With
   `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
   first. `mnem models` shows the live order and cooldowns.
-- `distill.backfill_days` (default 7) / `distill.daily_calls` (default 300; 0 = off):
-  every 5 minutes, on its own thread so capture never waits on a model, the watcher
+- `distill.backfill_days` (default 7) / `distill.daily_calls` (default 300; 0 = backfill
+  off): every 5 minutes, on its own thread so capture never waits on a model, the watcher
   distils the newest idle sessions of the last 2 days, then the ones that pass missed,
-  oldest first, back to `backfill_days`, while all distillation in the last 24 hours has
-  sent fewer than `daily_calls` requests (fallbacks to other models count). Backfill
+  oldest first, back to `backfill_days`. Every background request counts toward
+  `daily_calls` over the last 24 hours: the per-turn Stop hook, the watcher's pass over
+  recent sessions and backfill (fallbacks to other models count too). At the limit, work
+  waits undistilled, never lost, until the window frees, and `mnem doctor` says so. With
+  `daily_calls` 0, backfill is off and the other two run unlimited. A `mnem distill` you
+  run yourself is not limited. Backfill
   covers sessions from `backfill_days` before the watcher first ran; older ones wait for
   `mnem distill --since-days 30 --limit 1000 --max-calls 200` (newest first; repeat
   until done, `--dry-run` shows the cost). A session whose last chunk is too small to

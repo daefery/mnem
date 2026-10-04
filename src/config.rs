@@ -92,7 +92,9 @@ pub struct DistillConfig {
     /// The watcher also distils sessions it missed, oldest first, up to this many days
     /// back. Default 7.
     pub backfill_days: Option<i64>,
-    /// At most this many backfill calls per 24 hours. Default 300; 0 turns backfill off.
+    /// At most this many requests per 24 hours by all background distillation (Stop hook,
+    /// watcher, backfill). Default 300 (`mnem install` sets 100 for a sign-in); 0 turns
+    /// backfill off and leaves the rest unlimited. A manual `mnem distill` is not limited.
     pub daily_calls: Option<usize>,
     /// Never use models from these providers (the endpoint's `owned_by`, e.g. "antigravity").
     #[serde(default)]

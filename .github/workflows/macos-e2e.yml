@@ -1,0 +1,108 @@
+# A first run on a real Mac, as a new user has it: install, the launchd service starts,
+# a Claude Code session is captured by the service alone, the viewer serves it, the
+# service comes back after it is killed, and uninstall removes it. Run by hand (Actions
+# tab, or `gh workflow run macos-e2e.yml`) before a release that touches install,
+# the service or capture; also weekly, so a macOS change is caught early.
+name: macos-e2e
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  first-run:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14 # Apple Silicon, full build (what install.sh gives M-series Macs)
+            features: --features fastembed
+          - os: macos-14 # Apple Silicon, lite build (the build Intel Macs get)
+            features: ""
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release ${{ matrix.features }}
+
+      - name: A home with Claude Code history
+        run: |
+          mkdir -p "$HOME/.local/bin" "$HOME/.claude/projects/-tmp-shop"
+          cp target/release/mnem "$HOME/.local/bin/mnem"
+          echo '{}' > "$HOME/.claude/settings.json"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: mnem install --watch (what install.sh runs)
+        run: |
+          mnem install --watch | tee install.log
+          grep -q "Claude Code" install.log
+          test -f "$HOME/Library/LaunchAgents/dev.mnem.watch.plist"
+          plutil -lint "$HOME/Library/LaunchAgents/dev.mnem.watch.plist"
+
+      - name: The launchd service is running
+        run: |
+          for i in $(seq 1 30); do
+            launchctl print "gui/$(id -u)/dev.mnem.watch" | grep -q "state = running" && break
+            sleep 1
+          done
+          launchctl print "gui/$(id -u)/dev.mnem.watch" | grep -E "state|pid|last exit" || true
+          launchctl print "gui/$(id -u)/dev.mnem.watch" | grep -q "state = running"
+
+      - name: A new session is captured by the service alone
+        run: |
+          # Written after the service started: only its sweep can pick this up.
+          cp tests/fixtures/claude/session.jsonl "$HOME/.claude/projects/-tmp-shop/s-mac.jsonl"
+          for i in $(seq 1 60); do
+            mnem doctor | grep -qE "claude +1 sessions" && break
+            sleep 2
+          done
+          mnem doctor | tee doctor.log
+          grep -qE "claude +1 sessions" doctor.log
+          ! grep -q "watch service is not running" doctor.log
+          ! grep -q "has never reported" doctor.log
+
+      - name: The service serves the viewer and the feed
+        run: |
+          curl -fsS http://127.0.0.1:37777/ | grep -q "<title>"
+          curl -fsS "http://127.0.0.1:37777/api/feed?limit=5" | grep -q '"platform_source":"claude"'
+
+      - name: The service comes back after it is killed
+        run: |
+          pid=$(launchctl print "gui/$(id -u)/dev.mnem.watch" | awk '/pid =/ {print $3; exit}')
+          kill "$pid"
+          for i in $(seq 1 40); do
+            new=$(launchctl print "gui/$(id -u)/dev.mnem.watch" | awk '/pid =/ {print $3; exit}')
+            [ -n "$new" ] && [ "$new" != "$pid" ] && break
+            sleep 1
+          done
+          echo "pid $pid -> $new"
+          [ -n "$new" ] && [ "$new" != "$pid" ]
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:37777/ >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:37777/ >/dev/null
+
+      - name: A hook answers fast while the service runs
+        run: |
+          start=$(python3 -c 'import time; print(time.time())')
+          echo '{"session_id":"mac-1","cwd":"/tmp/shop","hook_event_name":"SessionStart","source":"startup"}' \
+            | mnem hook claude session-start | python3 -c 'import json,sys; json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]'
+          python3 -c "import time; ms=(time.time()-$start)*1000; print(f'session-start {ms:.0f} ms'); assert ms < 3000"
+
+      - name: Uninstall removes the service and keeps the data
+        run: |
+          mnem uninstall
+          ! launchctl print "gui/$(id -u)/dev.mnem.watch" 2>/dev/null
+          test ! -f "$HOME/Library/LaunchAgents/dev.mnem.watch.plist"
+          test -f "$HOME/.mnem/mnem.db"
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          tail -50 "$HOME/.mnem/watch.log" 2>/dev/null || true
+          tail -50 "$HOME/.mnem/hook.log" 2>/dev/null || true
+          launchctl print "gui/$(id -u)/dev.mnem.watch" 2>&1 | head -40 || true

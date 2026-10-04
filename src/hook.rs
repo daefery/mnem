@@ -134,6 +134,11 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
         ..Default::default()
     };
     let mut busy = false;
+    // A lock wait counts against the budget too: while mnem-watch holds the database,
+    // a write would otherwise wait the connection's full timeout past the deadline.
+    let timeout: i64 = conn
+        .pragma_query_value(None, "busy_timeout", |r| r.get(0))
+        .unwrap_or(500);
     for (_, len, unread, src) in changed {
         // After one lock timeout, further writes would wait again; leave them to later.
         if busy || Instant::now() > deadline || unread > HOOK_MAX_UNREAD {
@@ -142,7 +147,11 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
             f.bytes_behind += unread.min(len);
             continue;
         }
-        match ingest::ingest_file(conn, &src, &mut resolver) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        conn.busy_timeout(left.min(Duration::from_millis(timeout.max(0) as u64)))?;
+        let ingested = ingest::ingest_file(conn, &src, &mut resolver);
+        conn.busy_timeout(Duration::from_millis(timeout.max(0) as u64))?;
+        match ingested {
             Ok(o) if o.status == Status::CaughtUp => {}
             Ok(_) => f.files_behind += 1,
             Err(e) => {
@@ -274,16 +283,24 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             ctx.push_str(&format!("\n---\n{footer}\n"));
             let notice = (!alerts.is_empty()).then(|| format!("mnem: {}", alerts.join(" | ")));
             emit_with("SessionStart", &ctx, notice.as_deref());
+            // The agent waits for this process to exit: both records in one write, so a
+            // busy database is waited for once, not once per record.
             if let Some(s) = &session
-                && let Err(e) =
-                    crate::uptake::offered(conn, s, &crate::uptake::ids_in(&ctx), "start")
+                && let Err(e) = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .and_then(|tx| {
+                        if let Err(e) =
+                            crate::uptake::offered(&tx, s, &crate::uptake::ids_in(&ctx), "start")
+                        {
+                            log(&format!("uptake: {e:#}"));
+                        }
+                        if let Err(e) = set_watermark(&tx, s) {
+                            log(&format!("watermark: {e:#}"));
+                        }
+                        tx.commit()
+                    })
             {
-                log(&format!("uptake: {e:#}"));
-            }
-            if let Some(s) = &session
-                && let Err(e) = set_watermark(conn, s)
-            {
-                log(&format!("watermark: {e:#}"));
+                log(&format!("session-start records: {e:#}"));
             }
         }
         "prompt" => {
@@ -363,6 +380,7 @@ fn spawn_distill(session: &str) {
         session,
         "--active",
         "--quiet",
+        "--background",
         "--limit",
         "1",
     ]);

@@ -683,6 +683,13 @@ mod chain_tests {
     }
 
     #[test]
+    fn the_watchers_recent_pass_is_under_the_daily_limit() {
+        // The default config: daily_calls unset, so the default applies.
+        assert_eq!(recent_pass().budget, Some(DAILY_CALLS));
+        assert_eq!(recent_pass().source, "watch");
+    }
+
+    #[test]
     fn fallbacks_stop_at_the_request_budget() {
         // Every request fails with 503, so each model falls through to the next.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -957,7 +964,9 @@ pub struct Options {
     /// Dry run: print each digest.
     pub verbose: bool,
     /// Stop once all distillation in the last 24 hours has sent this many requests.
-    /// Checked under the distill lock before every call.
+    /// Checked under the distill lock before every call. Background passes (the watcher,
+    /// the per-turn Stop hook) use `daily_budget()`; only a person running `mnem distill`
+    /// by hand goes without one.
     pub budget: Option<usize>,
 }
 
@@ -986,6 +995,31 @@ const SMALL_SETTLES_AFTER_MS: i64 = 86_400_000;
 pub const BACKFILL_DAYS: i64 = 7;
 pub const DAILY_CALLS: usize = 300;
 const DAY_MS: i64 = 86_400_000;
+
+/// Requests all background distillation may send in 24 hours (`distill.daily_calls`).
+/// The per-turn Stop hook, the watcher's pass over recent sessions and its backfill all
+/// stop here; work left over waits, undistilled but never lost, until the window frees.
+pub fn daily_budget() -> usize {
+    crate::config::CONFIG
+        .distill
+        .daily_calls
+        .unwrap_or(DAILY_CALLS)
+}
+
+/// The watcher's pass over sessions of the last 2 days, under the daily limit.
+fn recent_pass() -> Options {
+    Options {
+        max_calls: Some(10),
+        budget: recent_budget(),
+        ..Options::new("watch", 2, 5)
+    }
+}
+
+/// The limit for the Stop hook and the watcher's recent-session pass. `daily_calls = 0`
+/// means "no backfill", as documented, not "no memories": those passes stay unlimited.
+pub fn recent_budget() -> Option<usize> {
+    Some(daily_budget()).filter(|&b| b > 0)
+}
 
 /// Where the watcher's backfill starts: `backfill_days` before it first ran. Sessions
 /// older than that were never promised and wait for a deliberate `mnem distill`.
@@ -1117,16 +1151,13 @@ fn record_call(
 }
 
 /// One watcher pass: the newest idle sessions of the last 2 days for freshness, then
-/// backfill, oldest first, back to `backfill_days`, a few calls at a time and only while
-/// all distillation in the last 24 hours stays under `daily_calls`. Runs on its own
+/// backfill, oldest first, back to `backfill_days`, a few calls at a time. Both stop
+/// once all distillation in the last 24 hours reaches `daily_calls`. Runs on its own
 /// thread and connection, so slow model calls never hold up transcript capture.
 pub fn watch_pass(conn: &mut Connection) {
     let cfg = &crate::config::CONFIG.distill;
-    let budget = cfg.daily_calls.unwrap_or(DAILY_CALLS);
-    let mut passes = vec![Options {
-        max_calls: Some(10),
-        ..Options::new("watch", 2, 5)
-    }];
+    let budget = daily_budget();
+    let mut passes = vec![recent_pass()];
     if budget > 0 {
         match backfill_since(conn) {
             Ok(since) => passes.push(Options {

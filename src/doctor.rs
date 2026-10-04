@@ -163,8 +163,22 @@ pub fn run(conn: &Connection) -> Result<bool> {
     )?;
     if crate::config::CONFIG.semantic.enabled == Some(false) {
         println!("semantic: off (config)");
-    } else if vectors == 0 {
+    } else if vectors == 0 && memories > 0 {
         println!("semantic: off, run `mnem embed` to download {model} and embed memories");
+    } else if vectors == 0 {
+        // No memories yet: nothing to embed. Say whether the model is ready for them.
+        if crate::embed::downloaded() {
+            println!("semantic: {model} ready; memories are embedded as they are made");
+        } else {
+            let size = if model.starts_with("fastembed:") {
+                "about 90 MB"
+            } else {
+                "about 30 MB"
+            };
+            println!(
+                "semantic: {model} downloads once ({size}) when mnem-watch starts; or run `mnem embed`"
+            );
+        }
     } else {
         println!(
             "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
@@ -191,6 +205,12 @@ pub fn run(conn: &Connection) -> Result<bool> {
             "distill: {} pending · {} of {} requests used in 24 h · {backfill}",
             b.pending, b.requests_day, b.budget
         );
+        if b.budget > 0 && b.requests_day >= b.budget && b.pending > 0 {
+            println!(
+                "  daily limit reached: {} session(s) wait, nothing is lost; they are distilled as the 24-hour window frees (raise distill.daily_calls to go faster)",
+                b.pending
+            );
+        }
         if b.before_backfill > 0 {
             println!(
                 "  {} session(s) of the last 30 days were never distilled (from before backfill)",

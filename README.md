@@ -240,8 +240,9 @@ written after the turn, in the background.
 If you choose your Claude Code or Codex sign-in (the default when nothing else is set),
 writing memories uses your plan: one request per piece of a finished session (about
 16,000 characters of transcript), so a short session takes one and a long one several.
-Catching up older sessions is capped at 100 requests a day. You can point it at any
-OpenAI-compatible endpoint instead.
+All background requests together are capped at 100 a day; when the cap is reached,
+sessions wait for the next day and are never lost (`mnem doctor` says so). You can point
+it at any OpenAI-compatible endpoint instead.
 </details>
 
 <details>

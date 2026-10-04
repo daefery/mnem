@@ -149,6 +149,9 @@ enum Cmd {
         verbose: bool,
         #[arg(long)]
         quiet: bool,
+        /// Sent in the background (the Stop hook): stays within distill.daily_calls
+        #[arg(long, hide = true)]
+        background: bool,
     },
     /// Keep capture and distillation current in the background (runs as a user service)
     Watch {
@@ -451,6 +454,10 @@ fn main() -> Result<()> {
             if let Err(e) = hook::run(&mut conn, agent, &event) {
                 hook::log(&format!("{} {event}: {e:#}", agent.as_str()));
             }
+            // The agent waits for this process to exit, not only for its output. The
+            // timing row is a statistic: while mnem-watch holds the database, drop it
+            // rather than keep the agent waiting for the lock.
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(20));
             let _ = mnem::uptake::hook_run(&conn, agent.as_str(), &event, t.elapsed().as_millis());
             hook::log(&format!(
                 "{} {event} took {} ms",
@@ -1159,6 +1166,7 @@ fn main() -> Result<()> {
             max_calls,
             verbose,
             quiet,
+            background,
         } => {
             let not_before = if aged_out {
                 Some(anyhow::Context::context(
@@ -1184,6 +1192,11 @@ fn main() -> Result<()> {
                     not_before,
                     max_calls,
                     verbose,
+                    budget: if background {
+                        distill::recent_budget()
+                    } else {
+                        None
+                    },
                     ..distill::Options::new(
                         "manual",
                         not_before.map_or(since_days, |t| {

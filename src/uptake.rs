@@ -15,7 +15,8 @@ use std::collections::HashMap;
 
 pub const SOURCES: &[&str] = &["start", "prompt", "file"];
 
-/// Record that `ids` were put in front of `session`'s agent.
+/// Record that `ids` were put in front of `session`'s agent. Callers in a hook wrap this
+/// in their own transaction, so all rows wait for a busy database once.
 pub fn offered(conn: &Connection, session: &str, ids: &[i64], source: &str) -> Result<()> {
     let now = crate::db::now_ms();
     let mut st = conn.prepare_cached(

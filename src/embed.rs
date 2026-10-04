@@ -51,6 +51,18 @@ fn model_dir(name: &str) -> PathBuf {
     db::data_dir().join("models").join(name.replace('/', "--"))
 }
 
+/// Whether the configured model's files are on this machine, without loading it (for
+/// doctor: "downloaded, no memories yet" is not "run `mnem embed`").
+pub fn downloaded() -> bool {
+    let name = model_name();
+    #[cfg(feature = "fastembed")]
+    if let Some(m) = name.strip_prefix("fastembed:") {
+        return fastembed_info(m).is_some_and(|info| onnx_assets(&info).is_ok());
+    }
+    let dir = model_dir(&name);
+    FILES.iter().all(|f| dir.join(f).is_file())
+}
+
 /// Download the model's three files from Hugging Face into ~/.mnem/models once.
 /// ONNX models (fastembed:...) download themselves when first loaded.
 pub fn fetch(name: &str) -> Result<PathBuf> {
