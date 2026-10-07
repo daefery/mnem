@@ -1216,7 +1216,10 @@ mod tests {
         // Nothing recorded on an empty record says so, with the scope it searched.
         let r = handle(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ask","arguments":{"question":"what did we do on 2026-01-01","all":true}}}"#).unwrap();
         let text = r["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("looked in every project, at on (2026-01-01)"), "{text}");
+        assert!(
+            text.contains("looked in every project, at on (2026-01-01)"),
+            "{text}"
+        );
         assert!(text.contains("Nothing recorded"), "{text}");
     }
 

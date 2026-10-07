@@ -329,7 +329,7 @@ pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<S
                     .filter(|s| reports_on(&s.text, s.at).is_none_or(|day| in_window(day, w)))
             };
             out.extend(said(matching_events(conn, question, scope)?));
-            out.extend(window_memories(conn, scope, w)?);
+            out.extend(window_memories(conn, question, scope, w)?);
             out.extend(said(window_prompts(conn, scope, w)?));
         }
         None => {
@@ -556,26 +556,54 @@ const WEIGHT: &str = "CASE WHEN m.kind != 'summary' AND (lower(m.title) LIKE '%s
                            WHEN m.type IN ('change', 'refactor') THEN 3 ELSE 4 END";
 
 /// Memories about what happened in `w`: distilled from events in the window, in sessions
-/// that are not another agent's script. When more happened than fits, the most telling
+/// that are not another agent's script. Imported claude-mem memories count by when they
+/// were written (claude-mem wrote them as the session ran: within 6 minutes of its last
+/// event at the median, an hour at p90), so days before mnem distilled are answerable. When more happened than fits, the most telling
 /// kinds are kept, spread over the whole window so a busy afternoon cannot crowd out the
 /// morning; they are given in the order they happened.
-fn window_memories(conn: &Connection, scope: &Scope, w: &Window) -> Result<Vec<Source>> {
+fn window_memories(
+    conn: &Connection,
+    question: &str,
+    scope: &Scope,
+    w: &Window,
+) -> Result<Vec<Source>> {
     let (filter, mut args) = scope_filter(scope);
     let sql = format!(
         "SELECT m.id, {WEIGHT}, {HAPPENED} FROM memories m
-          WHERE {filter} AND m.origin = 'mnem'
+          WHERE {filter} AND m.kind != 'pinned'
             AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = m.session_id)
             AND {HAPPENED} >= ? AND {HAPPENED} < ?"
     );
     args.push(Box::new(w.start));
     args.push(Box::new(w.end));
     let mut st = conn.prepare(&sql.replacen("SELECT m.id,", "SELECT m.project, m.id,", 1))?;
-    let rows: Vec<(String, (i64, i64, i64))> = st
+    let mut rows: Vec<(String, (i64, i64, i64))> = st
         .query_map(
             rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
             |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))),
         )?
         .collect::<rusqlite::Result<_>>()?;
+    // A question that names a topic ("for marcom automation") is about that work: the
+    // window's memories on the topic are kept, so a busy day of other work cannot crowd
+    // it out. When none match, the whole window, as for "what did we do yesterday".
+    // Words that say what happened ("ship", "work") or name the project already chosen
+    // are not a topic.
+    let topic: Vec<String> = topic_words(question)
+        .into_iter()
+        .filter(|t| !WORK_WORDS.contains(&t.as_str()))
+        .filter(|t| {
+            scope
+                .project
+                .as_deref()
+                .is_none_or(|p| !project_names(p).contains(t))
+        })
+        .collect();
+    if !topic.is_empty() {
+        let on: std::collections::HashSet<i64> = on_topic(conn, &topic, &rows)?;
+        if !on.is_empty() {
+            rows.retain(|r| on.contains(&r.1.0));
+        }
+    }
     let kept = share(rows.clone(), WINDOW_SOURCES);
     // The most telling of them in full; the rest by title, which is what an outcome says.
     let full: std::collections::HashSet<i64> = {
@@ -595,6 +623,55 @@ fn window_memories(conn: &Connection, scope: &Scope, w: &Window) -> Result<Vec<S
             if shipped.contains(&id) {
                 s.kind = format!("{} (shipped)", s.kind);
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Verbs and nouns of a question about work done that say nothing about which work.
+const WORK_WORDS: [&str; 22] = [
+    "ship", "shipped", "work", "worked", "working", "build", "built", "fix", "fixed", "change",
+    "changed", "happen", "happened", "update", "updates", "progress", "recap", "daily", "today",
+    "kerjakan", "ngapain", "lakukan",
+];
+
+/// The names a project goes by in a question: its last path part and its thread name.
+fn project_names(project: &str) -> Vec<String> {
+    let (repo, thread) = project.split_once('#').unwrap_or((project, ""));
+    let mut n = vec![
+        repo.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(repo)
+            .to_lowercase(),
+    ];
+    if !thread.is_empty() {
+        n.push(thread.to_lowercase());
+    }
+    n
+}
+
+/// Of `rows`, the memories whose title or text holds one of the topic `words` (any one:
+/// the window already bounds them to a day or a week).
+fn on_topic(
+    conn: &Connection,
+    words: &[String],
+    rows: &[(String, (i64, i64, i64))],
+) -> Result<std::collections::HashSet<i64>> {
+    let q = words
+        .iter()
+        .take(8)
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let ids: std::collections::HashSet<i64> = rows.iter().map(|r| r.1.0).collect();
+    let mut st =
+        conn.prepare_cached("SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1")?;
+    let mut out = std::collections::HashSet::new();
+    for id in st.query_map([q], |r| r.get::<_, i64>(0))? {
+        let id = id?;
+        if ids.contains(&id) {
+            out.insert(id);
         }
     }
     Ok(out)
@@ -1373,6 +1450,62 @@ mod tests {
         assert_eq!(got, [100, 2, 103, 3, 106, 1]);
         // When everything fits, everything comes, in time order.
         assert_eq!(spread(vec![(7, 3, 2), (8, 0, 1)], 6), [8, 7]);
+    }
+
+    #[test]
+    fn a_topic_in_a_time_question_keeps_that_work_and_a_project_name_is_not_a_topic() {
+        let c = db();
+        let day = 100 * 24 * H;
+        work(
+            &c,
+            1,
+            "pi:a-1-x",
+            "github.com/o/mnem",
+            day + 9 * H,
+            day + 9 * H,
+            "marcom draft approve shipped",
+        );
+        work(
+            &c,
+            2,
+            "pi:b-2-x",
+            "github.com/o/mnem",
+            day + 10 * H,
+            day + 10 * H,
+            "backup merge released",
+        );
+        c.execute(
+            "INSERT INTO memories_fts(memories_fts) VALUES ('rebuild')",
+            [],
+        )
+        .unwrap();
+        let w = Window {
+            start: day,
+            end: day + 24 * H,
+            label: "yesterday".into(),
+        };
+        let scope = Scope {
+            project: Some("github.com/o/mnem".into()),
+            window: Some(w),
+            before: None,
+        };
+        let mems = |q: &str| -> Vec<String> {
+            sources(&c, q, &scope)
+                .unwrap()
+                .iter()
+                .filter(|s| matches!(s.id, Ref::Memory(_)))
+                .map(|s| s.id.tag())
+                .collect()
+        };
+        // "marcom" is the topic: only that work.
+        assert_eq!(mems("what did we ship yesterday for marcom?"), ["#1"]);
+        // The project's own name and "ship" are not topics: everything that day.
+        assert_eq!(mems("what did we ship on mnem yesterday?"), ["#1", "#2"]);
+        // A topic nothing matches leaves the whole day.
+        assert_eq!(
+            mems("what did we do yesterday about kubernetes?"),
+            ["#1", "#2"]
+        );
     }
 
     #[test]
