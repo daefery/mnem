@@ -297,6 +297,10 @@ enum Cmd {
         /// Print this build's gate metrics as JSON (used by --gate)
         #[arg(long, hide = true)]
         gate_metrics: bool,
+        /// Score `mnem ask` on real past-work questions: history-dev (tune on it) or
+        /// history-test (look once per change, never tune on it)
+        #[arg(long)]
+        history: Option<String>,
     },
     /// The record API for other tools: its address, token and an example request
     Api,
@@ -312,10 +316,13 @@ enum Cmd {
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Ask about past agent work; answered from memories, with sources you can check
+    /// Ask about past agent work; answered from memories, with sources you can check.
+    /// A question about a time ("what did we do yesterday", "on 4 October", "kemarin")
+    /// is answered from what happened then, in every project unless one is named
     Ask {
         question: Vec<String>,
-        /// Project id (default: the current directory's; --all for every project)
+        /// Project id (default: the current directory's, or every project for a question
+        /// about a time; --all for every project)
         #[arg(long)]
         project: Option<String>,
         /// Search every project
@@ -324,6 +331,17 @@ enum Cmd {
         /// Only list the sources, without asking a model
         #[arg(long)]
         sources: bool,
+        /// Look at this time instead of the one the question names (YYYY-MM-DD, or with a
+        /// time); with --until, a range
+        #[arg(long)]
+        since: Option<String>,
+        /// End of the --since range (YYYY-MM-DD, inclusive)
+        #[arg(long)]
+        until: Option<String>,
+        /// Answer as of this moment: nothing written later is a source (replaying a past
+        /// question; YYYY-MM-DDTHH:MM:SS+07:00)
+        #[arg(long)]
+        as_of: Option<String>,
     },
     /// List pinned facts (forget one with `mnem forget <id>`)
     Pins,
@@ -559,39 +577,66 @@ fn main() -> Result<()> {
             project,
             all,
             sources,
+            since,
+            until,
+            as_of,
         } => {
             let question = question.join(" ");
             anyhow::ensure!(
                 !question.trim().is_empty(),
                 "ask a question, for example: mnem ask why did we drop the merge button"
             );
-            let project = if all {
-                None
-            } else {
-                let cwd = std::env::current_dir()
-                    .ok()
-                    .map(|p| p.to_string_lossy().into_owned());
-                project.or_else(|| hook::project_for(&conn, None, cwd.as_deref()))
-            };
-            let mut found = mnem::ask::sources(&conn, &question, project.as_deref())?;
+            let cwd = std::env::current_dir()
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned());
+            let here = hook::project_for(&conn, None, cwd.as_deref());
+            let scope = mnem::ask::resolve(
+                &question,
+                mnem::ask::Asked {
+                    project,
+                    all,
+                    here,
+                    projects: mnem::ask::projects(&conn)?,
+                    since,
+                    until,
+                    as_of,
+                    now: db::now_ms(),
+                    offset_min: mnem::when::local_offset_min(),
+                },
+            )?;
+            println!("({})\n", mnem::ask::describe(&scope));
+            let mut found = mnem::ask::sources(&conn, &question, &scope)?;
             if found.is_empty() {
                 println!(
-                    "No memories match that in {}.{}",
-                    project.as_deref().unwrap_or("any project"),
-                    if project.is_some() { " Try --all." } else { "" }
+                    "Nothing recorded for that{}.{}",
+                    if scope.window.is_some() {
+                        " in that time"
+                    } else {
+                        ""
+                    },
+                    if scope.project.is_some() {
+                        " Try --all."
+                    } else {
+                        ""
+                    }
                 );
                 return Ok(());
             }
             mnem::ask::add_code_state(&conn, &mut found);
-            let now = db::now_ms();
-            let print_sources = |cited: &[i64]| {
+            let now = scope.before.unwrap_or_else(db::now_ms);
+            let print_sources = |cited: &[mnem::ask::Ref]| {
                 for s in &found {
                     let mark = if cited.contains(&s.id) { "*" } else { " " };
                     println!(
-                        "{mark} #{} {} · {} ago · {}",
-                        s.id,
+                        "{mark} {} {} · {} ago · {}{}",
+                        s.id.tag(),
                         s.kind,
-                        mnem::context::ago(now - s.created_at),
+                        mnem::context::ago(now - s.at),
+                        if scope.project.is_none() {
+                            format!("{} · ", s.project)
+                        } else {
+                            String::new()
+                        },
                         mnem::text::head(&s.title, 100)
                     );
                     if let Some(code) = &s.code {
@@ -609,7 +654,7 @@ fn main() -> Result<()> {
             }
             let llm = distill::Llm::from_config()?;
             llm.load_cooldowns(&conn);
-            match mnem::ask::answer(&llm, &question, &found) {
+            match mnem::ask::answer(&llm, &question, &scope, &found) {
                 Ok((text, cited)) => {
                     println!("{text}\n");
                     println!("Sources (* cited; full text: mnem search or get_observations):");
@@ -732,7 +777,25 @@ fn main() -> Result<()> {
             titles,
             retitle,
             gate_metrics,
+            history,
         } => {
+            if let Some(name) = history {
+                let cases = mnem::history_eval::load(&mnem::eval::set_path(&name))?;
+                let llm = distill::Llm::from_config()?;
+                llm.load_cooldowns(&conn);
+                // Another model family grades, so the answerer never marks its own work.
+                let judge = distill::Llm::from_config()?.only(
+                    judge_model
+                        .as_deref()
+                        .unwrap_or(mnem::history_eval::JUDGE_MODEL),
+                );
+                let outcomes =
+                    mnem::history_eval::run(&conn, &llm, &judge, &cases, mnem::history_eval::RUNS)?;
+                llm.save_cooldowns(&conn)?;
+                println!("{name}: {} cases", outcomes.len());
+                print!("{}", mnem::history_eval::report(&outcomes));
+                return Ok(());
+            }
             if let Some(n) = titles {
                 let compare = mnem::eval::set_path("titles-compare");
                 let (out, (cases, old, new)) = if retitle {

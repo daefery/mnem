@@ -16,6 +16,7 @@ pub mod forget;
 pub mod gate;
 pub mod gitstate;
 pub mod health;
+pub mod history_eval;
 pub mod hook;
 pub mod import;
 pub mod ingest;
