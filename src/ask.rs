@@ -35,16 +35,18 @@ const SYSTEM: &str = r##"You answer a developer's question about their own past 
 using only the sources given: memories (notes distilled from their agent sessions, id like #123) and
 events (what the developer typed in those sessions, id like E456). Some memories include "asked:", what
 the developer typed in that session: the most direct evidence of why something was done.
-Rules: answer in 1-8 short sentences or bullets (a time question may use one bullet per project),
-plain words, concrete names and values. Cite the sources
+Rules: answer in 1-8 short sentences or bullets (a question about a time may use more, one per
+project or per thing done), plain words, concrete names and values. Cite the sources
 you used right after the claim they support, like [#123] or [E456]. State a reason, cause or motive only
 when a source states it; never infer one from a later suggestion, follow-up or next step. Give times
 as dates (each source shows its date), never only a clock time or "earlier": when something started,
 was decided or shipped, say on which date. A source marked "pinned by you" is the developer's own
 standing rule or fact: say it is their rule and since when. Keep each source's own
 specifics: which system, size, version or number it names. When the question asks about a time
-("yesterday", a date), use only sources dated in that window; give one bullet per project, named,
-listing its main outcomes by name (up to 5 each), so no project's work is left out or blurred. Say "in progress" or "partly done" when the sources do not show it finished; never
+("yesterday", a date), use only sources dated in that window. Over several projects, give one
+bullet per project, named, listing its main outcomes by name (those marked "(shipped)" first), so no
+project's work is left out or blurred. In one project, list every distinct thing that shipped or
+was done, each by name; do not merge separate things into one line. Say "in progress" or "partly done" when the sources do not show it finished; never
 call work done or shipped unless a source says so. If a decision is not recorded, say it is not
 recorded. If the sources do not answer the question, say so in one sentence instead of guessing; then
 cite nothing. Never cite an id that was not given.
@@ -319,8 +321,14 @@ pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<S
     match &scope.window {
         Some(w) => {
             // What was said then about the question's topic comes first ("the Done field
-            // on 15 September"), then the window's activity.
-            out.extend(matching_events(conn, question, scope)?);
+            // on 15 September"), then the window's activity. A reply that reports on
+            // another day ("here's the update for 22 September") is about that day, not
+            // the one it was written on.
+            out.extend(
+                matching_events(conn, question, scope)?
+                    .into_iter()
+                    .filter(|s| reports_on(&s.text, s.at).is_none_or(|day| in_window(day, w))),
+            );
             out.extend(window_memories(conn, scope, w)?);
             out.extend(window_prompts(conn, scope, w)?);
         }
@@ -534,11 +542,18 @@ const HAPPENED: &str = "coalesce(
                        AS INTEGER)),
     m.created_at)";
 
-/// What a piece of work came to, most telling first: outcomes and decisions, then what a
-/// session set out to do (its summary), then what was found along the way.
-const WEIGHT: &str = "CASE WHEN m.type IN ('feature', 'bugfix', 'decision') THEN 0
-                           WHEN m.kind = 'summary' THEN 1
-                           WHEN m.type IN ('change', 'refactor') THEN 2 ELSE 3 END";
+/// What a piece of work came to, most telling first: what reached users (a title that
+/// says it shipped, was released or merged, or names a version), then other outcomes and
+/// decisions, then what a session set out to do (its summary), then what was found along
+/// the way.
+const WEIGHT: &str = "CASE WHEN m.kind != 'summary' AND (lower(m.title) LIKE '%shipped%'
+                                OR lower(m.title) LIKE '%released%' OR lower(m.title) LIKE '%merged%'
+                                OR lower(m.title) LIKE '%is live%' OR m.title GLOB '*v[0-9].[0-9]*')
+                                AND lower(m.title) NOT LIKE '%locally%' AND lower(m.title) NOT LIKE '%draft%'
+                                AND lower(m.title) NOT LIKE '%not merged%' AND lower(m.title) NOT LIKE '%unmerged%' THEN 0
+                           WHEN m.type IN ('feature', 'bugfix', 'decision') THEN 1
+                           WHEN m.kind = 'summary' THEN 2
+                           WHEN m.type IN ('change', 'refactor') THEN 3 ELSE 4 END";
 
 /// Memories about what happened in `w`: distilled from events in the window, in sessions
 /// that are not another agent's script. When more happened than fits, the most telling
@@ -569,12 +584,17 @@ fn window_memories(conn: &Connection, scope: &Scope, w: &Window) -> Result<Vec<S
         best.sort_by_key(|r| (r.1.1, -r.1.2));
         best.iter().take(WINDOW_FULL).map(|r| r.1.0).collect()
     };
+    let shipped: std::collections::HashSet<i64> =
+        rows.iter().filter(|r| r.1.1 == 0).map(|r| r.1.0).collect();
     let mut out = memory_sources(conn, &kept)?;
     for s in &mut out {
-        if let Ref::Memory(id) = s.id
-            && !full.contains(&id)
-        {
-            s.text = s.title.clone();
+        if let Ref::Memory(id) = s.id {
+            if !full.contains(&id) {
+                s.text = s.title.clone();
+            }
+            if shipped.contains(&id) {
+                s.kind = format!("{} (shipped)", s.kind);
+            }
         }
     }
     Ok(out)
@@ -629,6 +649,34 @@ fn spread(mut rows: Vec<(i64, i64, i64)>, n: usize) -> Vec<i64> {
     }
     rows.sort_by_key(|r| (r.2, r.0));
     rows.into_iter().map(|r| r.0).collect()
+}
+
+/// The day a message says it reports on, when it says so near its start: "update for 22
+/// September", "the update for yesterday, 23 September", "daily update, Tue 23 Sep". As
+/// local midnight (epoch ms) of that day, resolved against the message's own time `at`.
+fn reports_on(text: &str, at: i64) -> Option<i64> {
+    let head: String = text.chars().take(240).collect::<String>().to_lowercase();
+    let i = [
+        "update", "recap", "summary", "report", "standup", "stand-up",
+    ]
+    .iter()
+    .filter_map(|w| head.find(w))
+    .min()?;
+    let tail = &head[i..];
+    let offset = crate::when::local_offset_min();
+    // A named date wins over "yesterday" ("the update for yesterday, 23 September").
+    let named = crate::when::window(&tail.replace("yesterday", ""), at, offset)
+        .filter(|w| w.label.starts_with("on "));
+    named
+        .or_else(|| {
+            crate::when::window(tail, at, offset).filter(|w| w.label.starts_with("yesterday"))
+        })
+        .map(|w| w.start)
+}
+
+/// Whether the local day starting at `day` overlaps `w`.
+fn in_window(day: i64, w: &Window) -> bool {
+    day + 86_400_000 > w.start && day < w.end
 }
 
 /// What the developer typed in `w` (main conversations, not another agent's script,
@@ -1007,6 +1055,44 @@ mod tests {
             sources(&c, "what did we put in the Done field for marcom", &early)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_recap_is_about_the_day_it_names_not_the_day_it_was_written() {
+        let ms = |s: &str| crate::text::parse_ts(s).unwrap();
+        let off = crate::when::local_offset_min() * 60_000;
+        let local_midnight = |s: &str| ms(&format!("{s}T00:00:00Z")) - off;
+        let written = ms("2026-09-23T01:21:00Z");
+        assert_eq!(
+            reports_on(
+                "Captain, here's the user-management update for 22 September, ready to paste",
+                written
+            ),
+            Some(local_midnight("2026-09-22"))
+        );
+        assert_eq!(
+            reports_on(
+                "Captain, here's the update for yesterday, 23 September (Jakarta time).",
+                ms("2026-09-24T01:01:00Z")
+            ),
+            Some(local_midnight("2026-09-23"))
+        );
+        assert_eq!(
+            reports_on(
+                "**Marcom automation: daily update, Tue 23 Sep 2026**",
+                ms("2026-09-24T01:01:00Z")
+            ),
+            Some(local_midnight("2026-09-23"))
+        );
+        // Ordinary replies name no day they report on.
+        assert_eq!(
+            reports_on("The plan is in, and it carries one finding.", written),
+            None
+        );
+        assert_eq!(
+            reports_on("I will report back tomorrow with the numbers.", written),
+            None
         );
     }
 
