@@ -15,8 +15,10 @@ use std::io::{BufRead, Write};
 
 const INSTRUCTIONS: &str = "mnem is this machine's memory of past work: decisions, bugs, fixes and what was tried, \
 captured from every Claude Code, Codex and pi session. Use it when:
-- the user points at earlier work (\"like last time\", \"that bug\", \"why did we\", \"what did we decide\"), or \
-you are unsure whether a design question was already settled in this project: search(query, project). Not for \
+- the user asks about earlier work (\"why did we\", \"what did we decide\", \"what did we do yesterday\", \"like \
+last time\"): ask(question) answers from the record with sources; use it before reconstructing history from git \
+log, notes or tickets. To look something up yourself, or when unsure whether a design question was already \
+settled in this project: search(query, project). Not for \
 general programming knowledge or for what this conversation already shows; refine a search instead of repeating it;
 - a memory shown to you (at session start, with a prompt, or when a file was opened) looks relevant to the task: \
 get_observations([ids]) gives its full text and, when available, the transcript evidence behind it; titles alone \
@@ -134,6 +136,9 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         "dateEnd",
         "orderBy",
         "cwd",
+        "question",
+        "since",
+        "until",
     ];
     let numbers: &[&str] = &["limit", "offset", "depth_before", "depth_after"];
     let known: &[&str] = match name {
@@ -154,6 +159,7 @@ fn validate(name: &str, a: &Value) -> std::result::Result<(), String> {
         "session_start_context" => &["project", "cwd"],
         "recall_file" => &["path", "cwd", "limit", "session"],
         "remember" => &["fact", "scope", "project"],
+        "ask" => &["question", "project", "all", "since", "until", "cwd"],
         _ => return Err(format!("unknown tool: {name}")),
     };
     for (k, v) in a.as_object().into_iter().flatten() {
@@ -210,6 +216,17 @@ fn tools() -> Value {
                 "dateEnd": { "type": "string", "description": "ISO date upper bound" },
                 "offset": { "type": "number", "description": "Pagination offset" },
                 "orderBy": { "type": "string", "description": "relevance (default), date_desc or date_asc" }
+            }}
+        },
+        {
+            "name": "ask",
+            "description": "Answer a question about past work from the record, with sources: why something was decided, what was done on a day or in a week (\"what did we do yesterday\", \"what shipped on 4 October\"), what was tried. Reads time words itself and, for a question about a time, looks in every project unless one is named; says when nothing is recorded. Use it before reconstructing history from git log, notes or tickets.",
+            "inputSchema": { "type": "object", "required": ["question"], "properties": {
+                "question": { "type": "string", "description": "The question in plain words, as the user asked it (English or Indonesian)" },
+                "project": { "type": "string", "description": "Project id (default: this directory's; a question about a time looks in every project)" },
+                "all": { "type": "boolean", "description": "Search every project" },
+                "since": { "type": "string", "description": "YYYY-MM-DD: look at this time instead of the one the question names" },
+                "until": { "type": "string", "description": "YYYY-MM-DD, end of since (inclusive)" }
             }}
         },
         {
@@ -295,6 +312,31 @@ pub fn call(conn: &Connection, name: &str, a: &Value) -> Result<String> {
         "timeline" => timeline(conn, a),
         "get_observations" => get(conn, a),
         "recall_file" => recall_file(conn, a),
+        "ask" => {
+            let question = str_arg(a, "question")
+                .filter(|q| !q.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("question is required"))?;
+            let cwd = str_arg(a, "cwd").map(str::to_string).or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.to_string_lossy().into_owned())
+            });
+            crate::ask::answer_text(
+                conn,
+                question,
+                crate::ask::Asked {
+                    project: str_arg(a, "project").map(str::to_string),
+                    all: a["all"].as_bool().unwrap_or(false),
+                    here: hook::project_for(conn, None, cwd.as_deref()),
+                    projects: crate::ask::projects(conn)?,
+                    since: str_arg(a, "since").map(str::to_string),
+                    until: str_arg(a, "until").map(str::to_string),
+                    as_of: None,
+                    now: crate::db::now_ms(),
+                    offset_min: crate::when::local_offset_min(),
+                },
+            )
+        }
         "remember" => {
             let fact = str_arg(a, "fact").ok_or_else(|| anyhow::anyhow!("fact is required"))?;
             let project = if str_arg(a, "scope") == Some("global") {
@@ -1152,6 +1194,30 @@ mod tests {
         assert_eq!(r["error"]["code"], -32602);
         let r = handle(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search","arguments":{"query":"x","limit":-1}}}"#).unwrap();
         assert_eq!(r["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn ask_is_offered_and_checks_its_arguments() {
+        let c = conn();
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).unwrap();
+        let ask = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "ask")
+            .expect("ask is listed");
+        assert_eq!(ask["inputSchema"]["required"][0], "question");
+        // A question that is not text is refused before anything runs.
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask","arguments":{"question":7}}}"#).unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        // A bad date is the tool's error, not a crash.
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ask","arguments":{"question":"what did we do","since":"soon"}}}"#).unwrap();
+        assert_eq!(r["result"]["isError"], true);
+        // Nothing recorded on an empty record says so, with the scope it searched.
+        let r = handle(&c, r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ask","arguments":{"question":"what did we do on 2026-01-01","all":true}}}"#).unwrap();
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("looked in every project, at on (2026-01-01)"), "{text}");
+        assert!(text.contains("Nothing recorded"), "{text}");
     }
 
     #[test]

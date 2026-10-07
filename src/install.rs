@@ -711,6 +711,7 @@ export default function (pi: ExtensionAPI) {
 			parameters,
 			async execute(_id, params, signal, _onUpdate, ctx) {
 				const args: any = { ...(params ?? {}) };
+				if (name === "ask" && !args.cwd) args.cwd = ctx.cwd;
 				if (name === "recall_file") {
 					if (!args.cwd) args.cwd = ctx.cwd;
 					if (session) args.session = session;
@@ -727,6 +728,15 @@ export default function (pi: ExtensionAPI) {
 			type: Type.Optional(Type.String({ description: "observations | sessions | prompts | events" })),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 20)" })),
 		}), "mnem_search: search past work (decisions, bugs, fixes) when the user refers to earlier work"),
+	);
+	pi.registerTool(
+		tool("ask", "Answer a question about past work from the record, with sources: why something was decided, what was done on a day or in a week (\"what did we do yesterday\", \"what shipped on 4 October\"), what was tried. Reads time words itself and, for a question about a time, looks in every project unless one is named; says when nothing is recorded. Use it before reconstructing history from git log, notes or tickets.", Type.Object({
+			question: Type.String({ description: "The question in plain words, as the user asked it (English or Indonesian)" }),
+			project: Type.Optional(Type.String({ description: "Project id (default: this directory's; a question about a time looks in every project)" })),
+			all: Type.Optional(Type.Boolean({ description: "Search every project" })),
+			since: Type.Optional(Type.String({ description: "YYYY-MM-DD: look at this time instead of the one the question names" })),
+			until: Type.Optional(Type.String({ description: "YYYY-MM-DD, end of since (inclusive)" })),
+		}), "mnem_ask: answer a question about past work (why, what was done when) from the record, with sources"),
 	);
 	pi.registerTool(
 		tool("timeline", "What happened around one memory (\"58645\") or transcript event (\"E123\"). Rarely needed: use when you must reconstruct a sequence (what led to a bug, what was tried before a fix).", Type.Object({

@@ -766,6 +766,81 @@ fn memory_sources(conn: &Connection, ids: &[i64]) -> Result<Vec<Source>> {
     Ok(out)
 }
 
+/// `question` answered as one text, for tools (MCP, pi): the scope searched, the answer
+/// with its citations when a model is configured (else none), and the sources with ids.
+/// Where else the topic is recorded is said when one project held nothing on it.
+pub fn answer_text(conn: &Connection, question: &str, a: Asked) -> Result<String> {
+    let scope = resolve(question, a)?;
+    let mut found = sources(conn, question, &scope)?;
+    let mut w = format!("({})\n\n", describe(&scope));
+    let elsewhere = match &scope.project {
+        Some(_) => elsewhere(conn, question, &scope)?,
+        None => Vec::new(),
+    };
+    let pointer = |w: &mut String| {
+        if !elsewhere.is_empty() {
+            w.push_str(
+                "\nAlso recorded in other projects (ask again with project set to one of them):\n",
+            );
+            for (p, n) in &elsewhere {
+                w.push_str(&format!("  {p} ({n} memories)\n"));
+            }
+        }
+    };
+    if found.is_empty() {
+        w.push_str("Nothing recorded for that.\n");
+        pointer(&mut w);
+        return Ok(w);
+    }
+    add_code_state(conn, &mut found);
+    let cited = match crate::distill::not_configured(&crate::config::CONFIG.distill) {
+        Some(_) => Vec::new(),
+        None => {
+            let llm = Llm::from_config()?;
+            llm.load_cooldowns(conn);
+            let r = answer(&llm, question, &scope, &found);
+            let _ = llm.save_cooldowns(conn);
+            match r {
+                Ok((text, cited)) => {
+                    w.push_str(&text);
+                    w.push_str("\n\n");
+                    cited
+                }
+                Err(e) => {
+                    w.push_str(&format!("(no answer: {e:#}; the sources are below)\n\n"));
+                    Vec::new()
+                }
+            }
+        }
+    };
+    w.push_str("Sources (* cited; full text: get_observations with these ids):\n");
+    for s in found.iter().take(40) {
+        w.push_str(&format!(
+            "{} {} {} · {} · {}{}\n",
+            if cited.contains(&s.id) { "*" } else { " " },
+            s.id.tag(),
+            s.kind,
+            day(s.at),
+            if scope.project.is_none() {
+                format!("{} · ", s.project)
+            } else {
+                String::new()
+            },
+            crate::text::head(&s.title, 100)
+        ));
+        if let Some(code) = &s.code {
+            w.push_str(&format!("      {code}\n"));
+        }
+    }
+    if found.len() > 40 {
+        w.push_str(&format!("  +{} more\n", found.len() - 40));
+    }
+    if cited.is_empty() {
+        pointer(&mut w);
+    }
+    Ok(w)
+}
+
 /// Memory sources whose code state is checked, at most: each check reads git, and a
 /// window's long tail of titles does not need it.
 const CODE_STATE: usize = 12;
