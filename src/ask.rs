@@ -324,13 +324,13 @@ pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<S
             // on 15 September"), then the window's activity. A reply that reports on
             // another day ("here's the update for 22 September") is about that day, not
             // the one it was written on.
-            out.extend(
-                matching_events(conn, question, scope)?
-                    .into_iter()
-                    .filter(|s| reports_on(&s.text, s.at).is_none_or(|day| in_window(day, w))),
-            );
+            let said = |v: Vec<Source>| {
+                v.into_iter()
+                    .filter(|s| reports_on(&s.text, s.at).is_none_or(|day| in_window(day, w)))
+            };
+            out.extend(said(matching_events(conn, question, scope)?));
             out.extend(window_memories(conn, scope, w)?);
-            out.extend(window_prompts(conn, scope, w)?);
+            out.extend(said(window_prompts(conn, scope, w)?));
         }
         None => {
             out.extend(best_memories(conn, question, scope)?);
@@ -656,8 +656,11 @@ fn spread(mut rows: Vec<(i64, i64, i64)>, n: usize) -> Vec<i64> {
 /// local midnight (epoch ms) of that day, resolved against the message's own time `at`.
 fn reports_on(text: &str, at: i64) -> Option<i64> {
     let head: String = text.chars().take(240).collect::<String>().to_lowercase();
+    // Words that introduce an account of work done ("update for", "✅ Done — ... (22 Sep)",
+    // "shipped on"), whether an agent wrote it or the developer pasted one.
     let i = [
-        "update", "recap", "summary", "report", "standup", "stand-up",
+        "update", "recap", "summary", "report", "standup", "stand-up", "done", "shipped",
+        "progress",
     ]
     .iter()
     .filter_map(|w| head.find(w))
@@ -1084,6 +1087,14 @@ mod tests {
                 ms("2026-09-24T01:01:00Z")
             ),
             Some(local_midnight("2026-09-23"))
+        );
+        // A pasted update counts too, whoever typed it.
+        assert_eq!(
+            reports_on(
+                "make the format like this:\n\n✅ Done — user management (22 Sep)\n\n- C2.8",
+                written
+            ),
+            Some(local_midnight("2026-09-22"))
         );
         // Ordinary replies name no day they report on.
         assert_eq!(
