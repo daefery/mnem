@@ -142,6 +142,18 @@ pub fn run(
             let ms = t.elapsed().as_millis();
             let (points, violates, abstains) = mark(judge, &mut cache, c, &answer)?;
             let got = points.iter().filter(|p| **p).count();
+            // Every run's answer and marks, so a failure can be read, not guessed at.
+            let mut log = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(crate::eval::set_path("history-runs"))?;
+            writeln!(
+                log,
+                "{}",
+                json!({ "case": c.id, "answer": answer, "points": points, "violates": violates,
+                        "abstains": abstains, "cited": cited.iter().map(Ref::tag).collect::<Vec<_>>(),
+                        "sources": sources.len() })
+            )?;
             let pass = passes(
                 &c.class,
                 got == points.len(),

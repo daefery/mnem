@@ -606,20 +606,37 @@ fn main() -> Result<()> {
             )?;
             println!("({})\n", mnem::ask::describe(&scope));
             let mut found = mnem::ask::sources(&conn, &question, &scope)?;
+            // Where else the topic is recorded, when one project was searched: said, never
+            // searched on the asker's behalf.
+            let elsewhere = match &scope.project {
+                Some(_) => mnem::ask::elsewhere(&conn, &question, &scope)?,
+                None => Vec::new(),
+            };
+            let print_elsewhere = || {
+                if !elsewhere.is_empty() {
+                    println!(
+                        "\nAlso recorded in other projects (ask again with --project, or --all):"
+                    );
+                    for (p, n) in &elsewhere {
+                        println!("  {p}  ({n} memories)");
+                    }
+                }
+            };
             if found.is_empty() {
                 println!(
-                    "Nothing recorded for that{}.{}",
+                    "Nothing recorded for that{}{}.",
                     if scope.window.is_some() {
                         " in that time"
                     } else {
                         ""
                     },
-                    if scope.project.is_some() {
-                        " Try --all."
-                    } else {
-                        ""
-                    }
+                    scope
+                        .project
+                        .as_deref()
+                        .map(|p| format!(" in {p}"))
+                        .unwrap_or_default()
                 );
+                print_elsewhere();
                 return Ok(());
             }
             mnem::ask::add_code_state(&conn, &mut found);
@@ -647,6 +664,7 @@ fn main() -> Result<()> {
             let configured = distill::not_configured(&mnem::config::CONFIG.distill).is_none();
             if sources || !configured {
                 print_sources(&[]);
+                print_elsewhere();
                 if !configured && !sources {
                     println!("\n(no model configured, so these are the sources without an answer)");
                 }
@@ -659,6 +677,10 @@ fn main() -> Result<()> {
                     println!("{text}\n");
                     println!("Sources (* cited; full text: mnem search or get_observations):");
                     print_sources(&cited);
+                    // Nothing cited here: the answer was not in this project.
+                    if cited.is_empty() {
+                        print_elsewhere();
+                    }
                 }
                 Err(e) => {
                     eprintln!("mnem ask: no answer ({e:#}); the best matches:");

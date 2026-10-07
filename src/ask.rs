@@ -22,9 +22,12 @@ use serde_json::Value;
 
 /// Memories given to the model, at most.
 const SOURCES: usize = 8;
-/// Memories given for a time window, at most: a busy day holds dozens of pieces of work,
-/// and an answer that drops the morning is wrong, not just short.
-const WINDOW_SOURCES: usize = 40;
+/// Memories given for a time window, at most: a busy week holds over a hundred outcomes
+/// in one project, and an answer that drops one is wrong, not just short. They are given
+/// as their titles (an outcome's title states it), so many fit.
+const WINDOW_SOURCES: usize = 120;
+/// Of those, given in full (the most telling first): enough detail to say what each was.
+const WINDOW_FULL: usize = 24;
 /// Developer prompts given as evidence, at most.
 const PROMPTS: usize = 12;
 
@@ -32,12 +35,16 @@ const SYSTEM: &str = r##"You answer a developer's question about their own past 
 using only the sources given: memories (notes distilled from their agent sessions, id like #123) and
 events (what the developer typed in those sessions, id like E456). Some memories include "asked:", what
 the developer typed in that session: the most direct evidence of why something was done.
-Rules: answer in 1-8 short sentences or bullets, plain words, concrete names and values. Cite the sources
+Rules: answer in 1-8 short sentences or bullets (a time question may use one bullet per project),
+plain words, concrete names and values. Cite the sources
 you used right after the claim they support, like [#123] or [E456]. State a reason, cause or motive only
 when a source states it; never infer one from a later suggestion, follow-up or next step. Give times
-as dates (each source shows its date), never only a clock time or "earlier". Keep each source's own
+as dates (each source shows its date), never only a clock time or "earlier": when something started,
+was decided or shipped, say on which date. A source marked "pinned by you" is the developer's own
+standing rule or fact: say it is their rule and since when. Keep each source's own
 specifics: which system, size, version or number it names. When the question asks about a time
-("yesterday", a date), use only sources dated in that window and say which projects they cover. Say "in progress" or "partly done" when the sources do not show it finished; never
+("yesterday", a date), use only sources dated in that window; give one bullet per project, named,
+listing its main outcomes by name (up to 5 each), so no project's work is left out or blurred. Say "in progress" or "partly done" when the sources do not show it finished; never
 call work done or shipped unless a source says so. If a decision is not recorded, say it is not
 recorded. If the sources do not answer the question, say so in one sentence instead of guessing; then
 cite nothing. Never cite an id that was not given.
@@ -177,6 +184,47 @@ fn named_project(question: &str, projects: &[String]) -> Option<String> {
     }
 }
 
+/// Where a question's topic is recorded when its own project holds nothing on it: the
+/// projects whose memories hold at least two of its topic words, with how many, most
+/// first. Searching them is the
+/// asker's choice (mnem never widens on its own); this only says where to look.
+pub fn elsewhere(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<(String, i64)>> {
+    let Some(q) = two_of(&topic_words(question)) else {
+        return Ok(Vec::new());
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT m.project, count(*) FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+          WHERE memories_fts MATCH ?1 AND instr(m.project, '/') > 0 AND m.project != ?2
+            AND (?3 = 0 OR m.created_at < ?3) AND coalesce(m.type, '') != 'sensitive'
+          GROUP BY m.project HAVING count(*) >= 3 ORDER BY count(*) DESC, m.project LIMIT 5",
+    )?;
+    let here = scope.project.clone().unwrap_or_default();
+    Ok(st
+        .query_map(rusqlite::params![q, here, scope.before.unwrap_or(0)], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Every `k`-element combination of `items`, in order.
+fn combinations<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
+    if k == 0 {
+        return vec![vec![]];
+    }
+    if items.len() < k {
+        return vec![];
+    }
+    let mut with: Vec<Vec<T>> = combinations(&items[1..], k - 1)
+        .into_iter()
+        .map(|mut c| {
+            c.insert(0, items[0].clone());
+            c
+        })
+        .collect();
+    with.extend(combinations(&items[1..], k));
+    with
+}
+
 /// The projects a question may name, for `Asked::projects`: ones identified by a
 /// repository or directory (`host/owner/repo`, `/path`). Bare names an import carried
 /// over ("what", "ini", "incoming") are ordinary words, not projects to choose.
@@ -238,8 +286,13 @@ pub struct Source {
     text: String,
 }
 
-/// Personal details and pinned facts never become answer sources.
+/// Personal details never become answer sources. Pinned facts are found separately
+/// (`pinned_sources`) and put first: they are the developer's own words.
 const MEMORY_FILTER: &str = "coalesce(m.type, '') != 'sensitive' AND m.kind != 'pinned'";
+/// Pinned facts given, at most.
+const PINS: usize = 3;
+/// Agent replies and prompts found by their words, given as evidence, at most.
+const EVENT_MATCHES: usize = 6;
 
 /// SQL condition (and its bound values) for memories in `scope`'s project, written
 /// before `scope.before`.
@@ -258,18 +311,207 @@ fn scope_filter(scope: &Scope) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
     (sql, args)
 }
 
-/// The sources for `question` in `scope`: a time window's activity, or the best matches.
+/// The sources for `question` in `scope`: the developer's pinned facts that bear on it,
+/// then a time window's activity or the best matching memories, then what was said in
+/// sessions (prompts and agent replies) that matches it, which holds what no memory kept.
 pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<Source>> {
-    let mut out = match &scope.window {
-        Some(w) => window_memories(conn, scope, w)?,
-        None => best_memories(conn, question, scope)?,
-    };
-    let prompts = match &scope.window {
-        Some(w) => window_prompts(conn, scope, w)?,
-        None => Vec::new(),
-    };
-    out.extend(prompts);
+    let mut out = pinned_sources(conn, question, scope)?;
+    match &scope.window {
+        Some(w) => {
+            // What was said then about the question's topic comes first ("the Done field
+            // on 15 September"), then the window's activity.
+            out.extend(matching_events(conn, question, scope)?);
+            out.extend(window_memories(conn, scope, w)?);
+            out.extend(window_prompts(conn, scope, w)?);
+        }
+        None => {
+            out.extend(best_memories(conn, question, scope)?);
+            out.extend(matching_events(conn, question, scope)?);
+        }
+    }
+    let mut seen = Vec::new();
+    out.retain(|s| {
+        let new = !seen.contains(&s.id);
+        seen.push(s.id.clone());
+        new
+    });
     Ok(out)
+}
+
+/// The topic words of `question`: no stop words, numbers, short words or words that only
+/// set a time ("yesterday", "september"), which would match unrelated text.
+fn topic_words(question: &str) -> Vec<String> {
+    crate::recall::terms(question)
+        .into_iter()
+        .filter(|w| {
+            crate::when::window(&format!("1 {w}"), 0, 0).is_none()
+                && crate::when::window(w, 0, 0).is_none()
+        })
+        .filter(|w| {
+            !matches!(
+                w.as_str(),
+                "week" | "month" | "last" | "since" | "minggu" | "bulan" | "lalu" | "hari"
+            )
+        })
+        .collect()
+}
+
+/// An FTS query for text holding at least two of `words` (one shared word is noise):
+/// `("a" AND "b") OR ("a" AND "c") OR ...`. None with fewer than two words.
+fn two_of(words: &[String]) -> Option<String> {
+    let quoted: Vec<String> = words
+        .iter()
+        .take(8)
+        .map(|w| format!("\"{}\"", w.replace('"', "\"\"")))
+        .collect();
+    let pairs: Vec<String> = combinations(&quoted, 2)
+        .into_iter()
+        .map(|p| format!("({} AND {})", p[0], p[1]))
+        .collect();
+    (!pairs.is_empty()).then(|| pairs.join(" OR "))
+}
+
+/// The developer's pinned facts in scope (its project's and every project's) that share
+/// at least two topic words with the question, best first.
+fn pinned_sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<Source>> {
+    let Some(q) = two_of(&topic_words(question)) else {
+        return Ok(Vec::new());
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT m.id FROM memories_fts JOIN memories m ON m.id = memories_fts.rowid
+          WHERE memories_fts MATCH ?1 AND m.kind = 'pinned'
+            AND (?2 = '' OR m.project IN (?2, '*') OR m.project LIKE ?2 || '#%')
+            AND (?3 = 0 OR m.created_at < ?3)
+          ORDER BY bm25(memories_fts) LIMIT ?4",
+    )?;
+    let project = scope.project.clone().unwrap_or_default();
+    let keep: Vec<i64> = st
+        .query_map(
+            rusqlite::params![q, project, scope.before.unwrap_or(0), PINS as i64],
+            |r| r.get(0),
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = memory_sources(conn, &keep)?;
+    for s in &mut out {
+        s.kind = "pinned by you".into();
+    }
+    Ok(out)
+}
+
+/// Prompts and agent replies in scope whose words match the question, best first: what
+/// was said in a session that no memory kept (a list the agent wrote into a ticket, the
+/// reason the developer gave). Main conversations only, never another agent's script or
+/// a claude-mem copy of a prompt mnem read itself.
+fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<Source>> {
+    let Some(q) = two_of(&topic_words(question)) else {
+        return Ok(Vec::new());
+    };
+    let mut st = conn.prepare_cached(
+        "SELECT e.id, e.kind, e.ts, coalesce(s.project, ''), e.text
+           FROM events_fts JOIN events e ON e.id = events_fts.rowid JOIN sessions s ON s.id = e.session_id
+          WHERE events_fts MATCH ?1 AND e.kind IN ('prompt', 'assistant')
+            AND e.thread IS NULL AND e.label IS NULL AND e.record_key NOT LIKE 'cm:%'
+            AND length(e.text) >= 40
+            AND (?2 = '' OR s.project = ?2 OR s.project LIKE ?2 || '#%')
+            AND (?3 = 0 OR e.ts < ?3) AND e.ts >= ?5 AND e.ts < ?6
+            AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = s.id)
+          ORDER BY bm25(events_fts) LIMIT ?4",
+    )?;
+    let project = scope.project.clone().unwrap_or_default();
+    let found: Vec<Source> = st
+        .query_map(
+            rusqlite::params![
+                q,
+                project,
+                scope.before.unwrap_or(0),
+                (EVENT_MATCHES * 2) as i64,
+                scope.window.as_ref().map_or(0, |w| w.start),
+                scope.window.as_ref().map_or(i64::MAX, |w| w.end)
+            ],
+            |r| {
+                let kind: String = r.get(1)?;
+                let text: String = r.get(4)?;
+                Ok(Source {
+                    id: Ref::Event(r.get(0)?),
+                    kind: if kind == "assistant" {
+                        "agent said"
+                    } else {
+                        "you asked"
+                    }
+                    .into(),
+                    title: crate::text::head(text.trim(), 100).to_string(),
+                    at: r.get(2)?,
+                    project: r.get(3)?,
+                    code: None,
+                    text: crate::text::head(text.trim(), 1500).to_string(),
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    // Sharing two words is not sharing a topic ("go ahead with the next step" meets every
+    // reply that lists next steps): keep only text close to the question in meaning, when
+    // the embedding service can say. Without it, the words alone decide.
+    let Some(vq) = crate::embed::query_from_service(conn, question) else {
+        return Ok(found.into_iter().take(EVENT_MATCHES).collect());
+    };
+    let min = crate::recall::search_cosine();
+    Ok(found
+        .into_iter()
+        .filter(|s| {
+            // A long reply covers many things: it counts by its passage closest to the
+            // question. A passage the service cannot embed does not decide.
+            let scores: Vec<f32> = passages(&s.text)
+                .iter()
+                .filter_map(|p| crate::embed::query_from_service(conn, p))
+                .filter(|v| v.model == vq.model)
+                .map(|v| cosine(&vq.vec, &v.vec))
+                .collect();
+            scores.is_empty() || scores.iter().any(|c| *c >= min)
+        })
+        .take(EVENT_MATCHES)
+        .collect())
+}
+
+/// Passages of `text` to compare with a question: three sentences at a time, stepping by
+/// two, at most six (a reply's point is near its start, and each costs an embedding).
+fn passages(text: &str) -> Vec<String> {
+    let mut sentences: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for (i, c) in text.char_indices() {
+        if matches!(c, '.' | '!' | '?' | '\n') {
+            let s = text[start..i + c.len_utf8()].trim();
+            if s.len() > 20 {
+                sentences.push(s);
+            }
+            start = i + c.len_utf8();
+        }
+    }
+    let rest = text[start..].trim();
+    if rest.len() > 20 {
+        sentences.push(rest);
+    }
+    if sentences.len() <= 3 {
+        return vec![text.to_string()];
+    }
+    (0..sentences.len() - 2)
+        .step_by(2)
+        .take(6)
+        .map(|i| sentences[i..i + 3].join(" "))
+        .collect()
+}
+
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    let (mut dot, mut na, mut nb) = (0.0, 0.0, 0.0);
+    for (x, y) in a.iter().zip(b) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        0.0
+    } else {
+        dot / (na.sqrt() * nb.sqrt())
+    }
 }
 
 /// The memories that best match `question`, with what the developer asked behind each.
@@ -312,14 +554,54 @@ fn window_memories(conn: &Connection, scope: &Scope, w: &Window) -> Result<Vec<S
     );
     args.push(Box::new(w.start));
     args.push(Box::new(w.end));
-    let mut st = conn.prepare(&sql)?;
-    let rows: Vec<(i64, i64, i64)> = st
+    let mut st = conn.prepare(&sql.replacen("SELECT m.id,", "SELECT m.project, m.id,", 1))?;
+    let rows: Vec<(String, (i64, i64, i64))> = st
         .query_map(
             rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?))),
         )?
         .collect::<rusqlite::Result<_>>()?;
-    memory_sources(conn, &spread(rows, WINDOW_SOURCES))
+    let kept = share(rows.clone(), WINDOW_SOURCES);
+    // The most telling of them in full; the rest by title, which is what an outcome says.
+    let full: std::collections::HashSet<i64> = {
+        let mut best: Vec<&(String, (i64, i64, i64))> =
+            rows.iter().filter(|r| kept.contains(&r.1.0)).collect();
+        best.sort_by_key(|r| (r.1.1, -r.1.2));
+        best.iter().take(WINDOW_FULL).map(|r| r.1.0).collect()
+    };
+    let mut out = memory_sources(conn, &kept)?;
+    for s in &mut out {
+        if let Ref::Memory(id) = s.id
+            && !full.contains(&id)
+        {
+            s.text = s.title.clone();
+        }
+    }
+    Ok(out)
+}
+
+/// At most `n` of `(project, (id, weight, at))`, chronological, shared fairly between
+/// projects: each gets an equal part (a quiet project's unused part goes to the busy
+/// ones), and within its part `spread` keeps its most telling rows over its whole span.
+/// So one busy project cannot crowd another's outcomes out of a day.
+fn share(rows: Vec<(String, (i64, i64, i64))>, n: usize) -> Vec<i64> {
+    let mut by: std::collections::BTreeMap<String, Vec<(i64, i64, i64)>> = Default::default();
+    for (p, r) in rows {
+        by.entry(p).or_default().push(r);
+    }
+    // Smallest projects first take what they have, up to an equal part of what is left.
+    let mut groups: Vec<Vec<(i64, i64, i64)>> = by.into_values().collect();
+    groups.sort_by_key(Vec::len);
+    let count = groups.len();
+    let mut left = n;
+    let mut kept: Vec<(i64, i64, i64)> = Vec::new();
+    for (i, g) in groups.into_iter().enumerate() {
+        let ids = spread(g.clone(), left / (count - i));
+        left -= ids.len();
+        kept.extend(g.into_iter().filter(|r| ids.contains(&r.0)));
+    }
+    kept.sort_by_key(|r| (r.2, r.0));
+    kept.into_iter().map(|r| r.0).collect()
 }
 
 /// At most `n` of `(id, weight, at)`, chronological: every row when they fit; else the
@@ -433,9 +715,18 @@ fn memory_sources(conn: &Connection, ids: &[i64]) -> Result<Vec<Source>> {
     Ok(out)
 }
 
-/// For each memory source that modified files: whether its own edited lines are still there.
+/// Memory sources whose code state is checked, at most: each check reads git, and a
+/// window's long tail of titles does not need it.
+const CODE_STATE: usize = 12;
+
+/// For the first memory sources that modified files: whether their own edited lines are
+/// still there.
 pub fn add_code_state(conn: &Connection, sources: &mut [Source]) {
-    for s in sources.iter_mut() {
+    for s in sources
+        .iter_mut()
+        .filter(|s| matches!(s.id, Ref::Memory(_)))
+        .take(CODE_STATE)
+    {
         if let Ref::Memory(id) = s.id
             && let Ok(lines) = crate::files::staleness_lines(conn, id, 2)
             && let Some(first) = lines.first()
@@ -614,6 +905,138 @@ mod tests {
             rusqlite::params![n, session, project, title, format!("{session}@{n}-{n}#summary"), written],
         )
         .unwrap();
+    }
+
+    #[test]
+    fn a_pinned_fact_on_the_topic_comes_first() {
+        let c = db();
+        work(
+            &c,
+            1,
+            "pi:a-1",
+            "p",
+            10 * H,
+            10 * H,
+            "added the dry-run switch to publishing",
+        );
+        for (id, project, title) in [
+            (
+                50,
+                "p",
+                "Standing rule: every feature needs a dry-run switch for testing without going live",
+            ),
+            (51, "*", "Use pi in a herdr pane for council sub-agents"),
+            (
+                52,
+                "other",
+                "Every feature needs a dry-run switch in the other project too",
+            ),
+        ] {
+            c.execute(
+                "INSERT INTO memories(id, project, kind, title, origin, origin_id, created_at) VALUES (?1, ?2, 'pinned', ?3, 'user', ?1, 0)",
+                rusqlite::params![id, project, title],
+            )
+            .unwrap();
+        }
+        let scope = Scope {
+            project: Some("p".into()),
+            window: None,
+            before: None,
+        };
+        let got = sources(&c, "why does every feature need a dry-run switch?", &scope).unwrap();
+        // Its own project's pin, first and marked; not another project's, not an unrelated one.
+        assert_eq!(got[0].id, Ref::Memory(50));
+        assert_eq!(got[0].kind, "pinned by you");
+        assert!(!got.iter().any(|s| matches!(s.id, Ref::Memory(51 | 52))));
+    }
+
+    #[test]
+    fn what_an_agent_said_is_evidence_when_no_memory_kept_it() {
+        let c = db();
+        work(&c, 1, "pi:a-1", "p", 10 * H, 10 * H, "marcom session");
+        for (id, kind, key, text) in [
+            (
+                2,
+                "assistant",
+                "k2",
+                "Marcom Done field filled: three-stage copy, audience pinned to funders, every ticket in Content Review.",
+            ),
+            (
+                3,
+                "assistant",
+                "cm:assistant:3",
+                "Done field filled: a claude-mem copy of the same reply about the marcom Done field.",
+            ),
+            (
+                4,
+                "command",
+                "k4",
+                "grep -r 'Done field' marcom/ --include=*.ts and more words here",
+            ),
+        ] {
+            c.execute(
+                "INSERT INTO events(id, session_id, record_key, ts, turn, kind, text) VALUES (?1, 'pi:a-1', ?2, ?3, 1, ?4, ?5)",
+                rusqlite::params![id, key, 10 * H, kind, text],
+            )
+            .unwrap();
+        }
+        c.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')", [])
+            .unwrap();
+        let scope = Scope {
+            project: Some("p".into()),
+            window: None,
+            before: None,
+        };
+        let got = sources(&c, "what did we put in the Done field for marcom", &scope).unwrap();
+        let events: Vec<&Source> = got
+            .iter()
+            .filter(|s| matches!(s.id, Ref::Event(_)))
+            .collect();
+        // The agent's own reply, not a claude-mem copy of it, not a shell command.
+        assert_eq!(
+            events.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            [Ref::Event(2)]
+        );
+        assert_eq!(events[0].kind, "agent said");
+        // Asked before it was said: not a source.
+        let early = Scope {
+            before: Some(5 * H),
+            ..scope
+        };
+        assert!(
+            sources(&c, "what did we put in the Done field for marcom", &early)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_long_reply_is_compared_by_its_passages() {
+        assert_eq!(passages("Short reply."), ["Short reply."]);
+        let long = "First thing we did today. Second thing about the field. Third thing for the ticket. \
+                    Fourth point on the audience. Fifth point about review. Sixth point about drafts.";
+        let p = passages(long);
+        assert_eq!(p.len(), 2);
+        assert!(p[0].starts_with("First") && p[0].ends_with("ticket."));
+        assert!(p[1].starts_with("Third") && p[1].ends_with("review."));
+    }
+
+    #[test]
+    fn a_busy_project_cannot_crowd_another_out_of_the_day() {
+        // 30 rows for "busy", 4 for "quiet", room for 10: quiet keeps all 4.
+        let mut rows: Vec<(String, (i64, i64, i64))> = (0..30)
+            .map(|i| ("busy".to_string(), (100 + i, 0, i)))
+            .collect();
+        rows.extend((0..4).map(|i| ("quiet".to_string(), (i, 0, i * 7))));
+        let got = share(rows, 10);
+        assert_eq!(got.len(), 10);
+        assert!((0..4).all(|i| got.contains(&i)));
+        // Two equally busy projects split the room evenly.
+        let rows: Vec<(String, (i64, i64, i64))> = (0..20)
+            .map(|i| (if i % 2 == 0 { "a" } else { "b" }.to_string(), (i, 0, i)))
+            .collect();
+        let got = share(rows, 6);
+        assert_eq!(got.iter().filter(|i| *i % 2 == 0).count(), 3);
     }
 
     fn ids(s: &[Source]) -> Vec<String> {
