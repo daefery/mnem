@@ -291,17 +291,34 @@ const GIT_TIMEOUT: Duration = Duration::from_millis(1500);
 /// Run git in `root` with file names taken literally (never as patterns), bounded by
 /// GIT_TIMEOUT. None on failure or timeout.
 fn git(root: &Path, args: &[&str]) -> Option<String> {
+    run_bounded(
+        std::process::Command::new("git")
+            .arg("--literal-pathspecs")
+            .arg("-C")
+            .arg(root)
+            .args(args),
+        GIT_TIMEOUT,
+    )
+}
+
+/// Run `cmd` and return its stdout when it succeeds within `timeout`. Its output is read
+/// while it runs: a child writing more than the pipe holds (64 KB; `git ls-files` in a
+/// large repository writes about a megabyte) would otherwise wait for a reader that only
+/// reads after it exits, and be killed at the timeout with nothing returned.
+pub(crate) fn run_bounded(cmd: &mut std::process::Command, timeout: Duration) -> Option<String> {
     use std::io::Read;
-    let mut child = std::process::Command::new("git")
-        .arg("--literal-pathspecs")
-        .arg("-C")
-        .arg(root)
-        .args(args)
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = std::time::Instant::now() + GIT_TIMEOUT;
+    let mut pipe = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        pipe.read_to_end(&mut out).map(|_| out)
+    });
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match child.try_wait().ok()? {
             Some(s) => break s,
@@ -310,12 +327,13 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
                 let _ = child.wait();
                 return None;
             }
-            None => std::thread::sleep(Duration::from_millis(5)),
+            None => std::thread::sleep(Duration::from_millis(2)),
         }
     };
-    let mut out = String::new();
-    child.stdout.take()?.read_to_string(&mut out).ok()?;
-    status.success().then_some(out)
+    let out = reader.join().ok()?.ok()?;
+    status
+        .success()
+        .then(|| String::from_utf8_lossy(&out).into_owned())
 }
 
 /// The repository containing `path` (a file or directory).
@@ -1088,6 +1106,39 @@ mod tests {
             .map(|a| a.id)
             .collect();
         assert_eq!(ids, vec![5]);
+    }
+
+    #[test]
+    fn output_larger_than_a_pipe_comes_back_whole_and_fast() {
+        // 1 MB on stdout: read only after exit, the child would block on a full pipe
+        // until the timeout killed it.
+        let t = std::time::Instant::now();
+        let out = run_bounded(
+            std::process::Command::new("sh").args(["-c", "head -c 1000000 /dev/zero | tr '\\0' x"]),
+            Duration::from_secs(5),
+        )
+        .expect("output");
+        assert_eq!(out.len(), 1_000_000);
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "took {:?}",
+            t.elapsed()
+        );
+        // A failing command and one past its time give nothing.
+        assert!(
+            run_bounded(
+                std::process::Command::new("false").arg("x"),
+                Duration::from_secs(1)
+            )
+            .is_none()
+        );
+        assert!(
+            run_bounded(
+                std::process::Command::new("sleep").arg("3"),
+                Duration::from_millis(100)
+            )
+            .is_none()
+        );
     }
 
     #[test]

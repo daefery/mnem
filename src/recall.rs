@@ -477,14 +477,32 @@ pub fn recall(
         w.push_str(&line);
         shown.push(id);
     }
-    let mut mark = conn.prepare_cached(
-        "INSERT OR IGNORE INTO recall_seen(session_id, memory_id) VALUES (?1, ?2)",
-    )?;
-    for id in &shown {
-        mark.execute(params![session, id])?;
+    // Recording what was shown is bookkeeping: when another writer holds the database,
+    // the agent gets its memories now and the record is skipped (a memory may then be
+    // offered again later) instead of the agent waiting on the lock.
+    if let Err(e) = mark_shown(conn, session, &shown) {
+        crate::hook::log(&format!("recall: shown not recorded ({e:#})"));
     }
-    crate::uptake::offered(conn, session, &shown, "prompt")?;
     Ok((!shown.is_empty()).then_some(w))
+}
+
+/// Record that `session` was shown `ids`, in one write.
+fn mark_shown(conn: &Connection, session: &str, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut mark = tx.prepare_cached(
+            "INSERT OR IGNORE INTO recall_seen(session_id, memory_id) VALUES (?1, ?2)",
+        )?;
+        for id in ids {
+            mark.execute(params![session, id])?;
+        }
+    }
+    crate::uptake::offered(&tx, session, ids, "prompt")?;
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]

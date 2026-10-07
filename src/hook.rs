@@ -208,8 +208,65 @@ pub fn project_for(conn: &Connection, session: Option<&str>, cwd: Option<&str>) 
     Resolver::default().resolve(cwd, None)
 }
 
+/// Where a hook's time went, by phase, logged when the hook is slow: a total alone
+/// cannot say whether reading stdin, catching up, the lock or recall held the agent.
+#[derive(Default)]
+struct Phases {
+    start: Option<Instant>,
+    marks: Vec<(&'static str, u128)>,
+}
+
+impl Phases {
+    fn mark(&mut self, name: &'static str) {
+        let start = *self.start.get_or_insert_with(Instant::now);
+        self.marks.push((name, start.elapsed().as_millis()));
+    }
+
+    /// One log line when the hook took over `SLOW_HOOK_MS`.
+    fn report(&self, agent: Agent, event: &str) {
+        let Some(&(_, total)) = self.marks.last() else {
+            return;
+        };
+        if total >= SLOW_HOOK_MS {
+            let mut prev = 0;
+            let parts: Vec<String> = self
+                .marks
+                .iter()
+                .map(|(n, at)| {
+                    let d = at - prev;
+                    prev = *at;
+                    format!("{n} {d}")
+                })
+                .collect();
+            log(&format!(
+                "slow {} {event} ({total} ms): {}",
+                agent.as_str(),
+                parts.join(", ")
+            ));
+        }
+    }
+}
+
+/// A hook slower than this logs where its time went.
+const SLOW_HOOK_MS: u128 = 300;
+
+/// Longest a hook waits for the database lock to record what it showed (once the agent's
+/// context is decided): skipping the record costs a possible repeat later, waiting costs
+/// the agent now.
+const BOOKKEEPING_WAIT: Duration = Duration::from_millis(100);
+
 pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
+    let mut phases = Phases::default();
+    phases.mark("start");
+    let r = run_phases(conn, agent, event, &mut phases);
+    phases.mark("end");
+    phases.report(agent, event);
+    r
+}
+
+fn run_phases(conn: &mut Connection, agent: Agent, event: &str, phases: &mut Phases) -> Result<()> {
     let input = Input::from_stdin();
+    phases.mark("stdin");
     let session = input.session_id.as_deref().map(|s| session_key(agent, s));
     // A file touch comes after every read or edit: it stays quick and leaves catching up
     // with the transcript to the other hooks and the watcher.
@@ -238,6 +295,7 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             log(&format!("ingest {}: {e:#}", tp.display()));
         }
     }
+    phases.mark("own transcript");
     match event {
         "session-start" => {
             // A resumed scripted session follows its brief; it gets no context.
@@ -255,6 +313,7 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                     ..Default::default()
                 }
             });
+            phases.mark("catch-up");
             let Some(project) = project_for(conn, session.as_deref(), input.cwd.as_deref()) else {
                 return Ok(());
             };
@@ -269,6 +328,7 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
                     observations: 30,
                 },
             )?;
+            phases.mark("context");
             let mut footer = fresh.footer(conn);
             if let Ok((pending, _)) = crate::distill::pending(conn)
                 && pending > 0
@@ -282,7 +342,9 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             }
             ctx.push_str(&format!("\n---\n{footer}\n"));
             let notice = (!alerts.is_empty()).then(|| format!("mnem: {}", alerts.join(" | ")));
+            phases.mark("footer and health");
             emit_with("SessionStart", &ctx, notice.as_deref());
+            let _ = conn.busy_timeout(BOOKKEEPING_WAIT);
             // The agent waits for this process to exit: both records in one write, so a
             // busy database is waited for once, not once per record.
             if let Some(s) = &session
@@ -308,10 +370,16 @@ pub fn run(conn: &mut Connection, agent: Agent, event: &str) -> Result<()> {
             if let Err(e) = catch_up_recent(conn, Duration::from_millis(200)) {
                 log(&format!("catch-up: {e:#}"));
             }
+            phases.mark("catch-up");
             let Some(project) = project_for(conn, Some(s), input.cwd.as_deref()) else {
                 return Ok(());
             };
-            if let Some(update) = prompt_update(conn, s, &project, input.prompt.as_deref()) {
+            // The rest only reads, then records what it showed: a lock held by another
+            // writer may cost it little of the agent's time.
+            let _ = conn.busy_timeout(BOOKKEEPING_WAIT);
+            let update = prompt_update(conn, s, &project, input.prompt.as_deref());
+            phases.mark("delta and recall");
+            if let Some(update) = update {
                 emit("UserPromptSubmit", &update);
             }
         }
@@ -570,12 +638,21 @@ pub fn cross_agent_delta(
         w.push_str(&g);
         shown.push(o);
     }
-    let mut mark = conn.prepare_cached(
-        "INSERT INTO delta_seen(viewer, other, through) VALUES (?1, ?2, ?3)
-         ON CONFLICT(viewer, other) DO UPDATE SET through = max(through, excluded.through)",
-    )?;
-    for o in &shown {
-        mark.execute(params![session, o.id, o.last_id])?;
+    // Bookkeeping, as for recall: a held database skips the record, never the update.
+    let marked = conn.unchecked_transaction().and_then(|tx| {
+        {
+            let mut mark = tx.prepare_cached(
+                "INSERT INTO delta_seen(viewer, other, through) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(viewer, other) DO UPDATE SET through = max(through, excluded.through)",
+            )?;
+            for o in &shown {
+                mark.execute(params![session, o.id, o.last_id])?;
+            }
+        }
+        tx.commit()
+    });
+    if let Err(e) = marked {
+        log(&format!("delta: shown not recorded ({e:#})"));
     }
     if by.len() > shown.len() {
         w.push_str(&format!(

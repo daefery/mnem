@@ -817,7 +817,65 @@ pub fn answer(
     ));
     let user = format!("{asked}\nSources:\n{}", shown.join("\n"));
     let (v, _model) = llm.ask(SYSTEM, &user)?;
-    Ok(read_answer(&v, sources))
+    let (text, cited) = read_answer(&v, sources);
+    // What was searched leads a time question's answer, in code, not left to the model:
+    // "yesterday" means a date, and "what we did" means the projects it covers.
+    Ok(match &scope.window {
+        Some(_) => (format!("{}:\n{text}", headline(scope)), cited),
+        None => (text, cited),
+    })
+}
+
+/// The scope of a time question as the answer's first line: "Yesterday, 5 October 2026,
+/// across all projects".
+fn headline(scope: &Scope) -> String {
+    let Some(w) = &scope.window else {
+        return String::new();
+    };
+    let span = |ms: i64| long_day(ms);
+    let last = (w.end - 1).max(w.start);
+    let when = if day(w.start) == day(last) {
+        span(w.start)
+    } else {
+        format!("{} to {}", span(w.start), span(last))
+    };
+    let lead = w.label.split(" (").next().unwrap_or("");
+    let lead = match lead {
+        "yesterday" | "today" | "last week" | "this week" | "last month" => {
+            let mut c = lead.chars();
+            c.next()
+                .map(|f| f.to_uppercase().collect::<String>() + c.as_str() + ", ")
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+    let wher = match &scope.project {
+        Some(p) => format!("in {p}"),
+        None => "across all projects".into(),
+    };
+    format!("{lead}{when}, {wher}")
+}
+
+/// "5 October 2026" in the asker's local time.
+fn long_day(ms: i64) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let (y, m, d) = crate::text::civil_from_days(
+        (ms + crate::when::local_offset_min() * 60_000).div_euclid(86_400_000),
+    );
+    format!("{d} {} {y}", MONTHS[(m - 1) as usize])
 }
 
 fn day(ms: i64) -> String {
@@ -1105,6 +1163,31 @@ mod tests {
             reports_on("I will report back tomorrow with the numbers.", written),
             None
         );
+    }
+
+    #[test]
+    fn a_time_answer_leads_with_what_was_searched() {
+        let a = asked();
+        let s = resolve("what did we do yesterday", a.clone()).unwrap();
+        assert_eq!(
+            headline(&s),
+            "Yesterday, 5 October 2026, across all projects"
+        );
+        let s = resolve(
+            "what did we ship in mnem last week",
+            Asked {
+                projects: vec!["github.com/daefery/mnem".into()],
+                ..a.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            headline(&s),
+            "Last week, 28 September 2026 to 4 October 2026, in github.com/daefery/mnem"
+        );
+        let s = resolve("what happened on 4 October", a.clone()).unwrap();
+        assert_eq!(headline(&s), "4 October 2026, across all projects");
+        assert_eq!(headline(&resolve("why did we drop it", a).unwrap()), "");
     }
 
     #[test]

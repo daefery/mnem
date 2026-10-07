@@ -10,40 +10,24 @@ use crate::text;
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// Budget for all git calls of one snapshot together.
 const GIT_BUDGET: Duration = Duration::from_secs(3);
 const MAX_FILES: usize = 12;
 
-/// Run git in `cwd`, giving up at `deadline`.
+/// Run git in `cwd`, giving up at `deadline`. Its output is read while it runs (a large
+/// `git status` must not block on a full pipe until the deadline).
 fn git(cwd: &Path, args: &[&str], deadline: Instant) -> Option<String> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) if status.success() => {
-                let mut out = String::new();
-                std::io::Read::read_to_string(child.stdout.as_mut()?, &mut out).ok()?;
-                return Some(out);
-            }
-            Ok(Some(_)) => return None,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                return None;
-            }
-        }
-    }
+    crate::files::run_bounded(
+        Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0"),
+        deadline.saturating_duration_since(Instant::now()),
+    )
 }
 
 /// A compact, human-readable description of the working tree, or None outside git.
