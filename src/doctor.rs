@@ -149,6 +149,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
         }
     }
     let model = crate::embed::model_name();
+    let mut semantic_down = false;
     let vectors: i64 = conn
         .query_row(
             "SELECT count(DISTINCT memory_id) FROM memory_vectors WHERE substr(model, 1, length(?1) + 1) = ?1 || '@'",
@@ -180,9 +181,26 @@ pub fn run(conn: &Connection) -> Result<bool> {
             );
         }
     } else {
-        println!(
-            "semantic: {model}, {vectors} of {memories} memories embedded (served by mnem-watch)"
-        );
+        // Ask the service, not the records: a build without the model's feature serves
+        // nothing, and every search, recall and answer quietly loses meaning matching.
+        let served = match crate::embed::service_port(conn) {
+            None => "mnem-watch not running: hooks and ask match by words only".to_string(),
+            Some(_) => match crate::embed::query_from_service(conn, "mnem doctor probe") {
+                // The service names its vectors' key: the model, '@', a fingerprint.
+                Some(q) if q.model.split('@').next() == Some(model.as_str()) => {
+                    "served by mnem-watch".to_string()
+                }
+                Some(q) => format!("but mnem-watch serves {}", q.model),
+                None => {
+                    semantic_down = true;
+                    "but mnem-watch serves NO model: reinstall a build with the model's \
+                     feature (`cargo install --path . --locked --features fastembed`), then \
+                     restart mnem-watch"
+                        .to_string()
+                }
+            },
+        };
+        println!("semantic: {model}, {vectors} of {memories} memories embedded ({served})");
     }
     if let Err(e) = crate::scripted::refresh(conn) {
         println!("scripted sessions: scan failed: {e:#}");
@@ -250,6 +268,9 @@ pub fn run(conn: &Connection) -> Result<bool> {
     println!("agents");
     print!("{}", crate::agents::render(&agents));
     let mut alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
+    if semantic_down {
+        alerts.push("mnem-watch serves no embedding model (see semantic above)".to_string());
+    }
     alerts.extend(
         agents
             .iter()
