@@ -50,7 +50,8 @@ prompt, command and edit to disk. mnem reads those files, so:
   memory. On the author's machine mnem re-read 1.45 GB of transcripts from scratch with
   zero duplicates, and `mnem doctor` tells you exactly how far behind it is.
 - **Every answer has a source.** Each memory points to the transcript lines it came from.
-  `mnem ask "why did we..."` answers from memories and lists them, so you can check.
+  `mnem ask "why did we..."` or `mnem ask "what did we do yesterday"` answers from the
+  record and lists what it used, so you can check.
 - **Old memories say they're old.** Each one knows whether the code its session wrote is
   still in your repository. On mnem's own repo, 75% of the lines agents wrote last month
   are still there; memories about the rest say so, so they don't send your agent the
@@ -129,7 +130,7 @@ meaning-based search.
 <details>
 <summary><b>Options and older systems</b></summary>
 
-- `MNEM_VERSION=v0.4.0` picks a release, `MNEM_BIN_DIR` another folder, and
+- `MNEM_VERSION=v0.5.0` picks a release, `MNEM_BIN_DIR` another folder, and
   `MNEM_NO_SETUP=1` installs only the binary.
 - Linux with glibc 2.35 to 2.38 (Ubuntu 22.04, Debian 12) and Intel Macs get a "lite"
   build: the same mnem, with a smaller model for meaning-based search.
@@ -143,8 +144,19 @@ meaning-based search.
 
 <p align="center"><img alt="mnem ask answering a question from memories and listing the ones it cited" src="docs/assets/ask.svg" width="88%"></p>
 
-`mnem ask` answers only from the memories it found and lists every one it cited. If they
-don't cover the question, it says so.
+`mnem ask` answers only from what it found and lists every source it cited: memories,
+your pinned facts, what you typed and what your agents replied. If they don't cover the
+question, it says so.
+
+- **Why:** "why did we drop the merge button?" It says whose reason it was: when you only
+  said "go" to an agent's suggestion, the answer reads "the agent recommended it because
+  …; you chose it", not a reason you never gave. A later "still open" from you outweighs
+  an older note that calls it decided.
+- **When:** "what did we do yesterday?", "what shipped on 4 October?", "last week",
+  "kemarin". Read in your local time, across every project unless you name one, with
+  shipped work first. It works on the first day too, before any memory is written.
+- **Your agents ask it too.** The MCP tool `ask` (and pi's `mnem_ask`) lets an agent
+  answer "what did we decide about X?" from the record instead of digging through git log.
 
 ### Memory that shows up on its own
 
@@ -233,7 +245,7 @@ downloads its search model once from Hugging Face.
 | Command | What it does |
 |---|---|
 | `mnem doctor` | Is every session captured? Which agents are connected? Anything to fix? |
-| `mnem ask "..."` | Answer a question about past work, with sources |
+| `mnem ask "..."` | Answer a question about past work (why, when, what shipped), with sources |
 | `mnem search <words>` | Search everything captured |
 | `mnem remember "..."` | Pin a fact every agent sees at session start |
 | `mnem forget <id>` | Delete a memory, session or project for good |
