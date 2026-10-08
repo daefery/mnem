@@ -444,9 +444,7 @@ mod tests {
 
     #[test]
     fn codex_trust_needs_an_entry_for_every_mnem_hook() {
-        let dir = std::env::temp_dir().join(format!("mnem-agents-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::TempDir::new("agents");
         let hooks = dir.join("hooks.json");
         std::fs::write(
             &hooks,

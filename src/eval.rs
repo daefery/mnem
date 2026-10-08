@@ -1063,7 +1063,8 @@ mod tests {
 
     #[test]
     fn a_rerank_score_reorders_candidates_a_cosine_does_not() {
-        let f = std::env::temp_dir().join(format!("mnem-dump-{}.jsonl", std::process::id()));
+        let d = crate::TempDir::new("dump");
+        let f = d.join("dump.jsonl");
         std::fs::write(
             &f,
             r#"{"q":"a","cands":[{"cos":0.9,"rerank":0.1,"relevant":false},{"cos":0.2,"rerank":0.8,"relevant":true}]}"#,

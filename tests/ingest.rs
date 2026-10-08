@@ -5,11 +5,15 @@ use rusqlite::Connection;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-fn tmpdir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mnem-test-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+/// MNEM_HOME is one per process and tests run in parallel: a test that points it at its
+/// own directory holds this until it is done.
+fn home_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn tmpdir(name: &str) -> mnem::TempDir {
+    mnem::TempDir::new(&format!("test-{name}"))
 }
 
 fn fixture(agent: &str, file: &str) -> PathBuf {
@@ -456,7 +460,8 @@ fn import_summary_gets_fresh_id_when_reserved_id_is_taken() {
         [],
     )
     .unwrap();
-    unsafe { std::env::set_var("MNEM_HOME", &d) };
+    let _home = home_lock();
+    unsafe { std::env::set_var("MNEM_HOME", &*d) };
     let s = mnem::import::claude_mem(&mut conn, &src).unwrap();
     assert_eq!(s.summaries, 1);
     let title: String = conn
@@ -639,6 +644,10 @@ fn reimport_never_resurrects_forgotten_data() {
     .unwrap();
     drop(cm);
     let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    // The import writes its snapshot under MNEM_HOME: this test's own directory, never
+    // the developer's ~/.mnem, nor another test's (removed when that test ends).
+    let _home = home_lock();
+    unsafe { std::env::set_var("MNEM_HOME", &*d) };
     mnem::import::claude_mem(&mut conn, &src).unwrap();
     let prompt: i64 = conn
         .query_row(

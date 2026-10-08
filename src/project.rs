@@ -149,8 +149,7 @@ mod tests {
 
     #[test]
     fn second_checkout_of_same_remote_is_its_own_project() {
-        let root = std::env::temp_dir().join(format!("mnem-proj-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::TempDir::new("proj");
         for dir in ["firstmate", "secondmate"] {
             let git = root.join(dir).join(".git");
             std::fs::create_dir_all(&git).unwrap();

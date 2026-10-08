@@ -732,8 +732,7 @@ mod tests {
 
     #[test]
     fn import_skips_vectors_of_changed_text() {
-        let dir = std::env::temp_dir().join(format!("mnem-import-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::TempDir::new("import");
         let open = |name: &str| {
             let p = dir.join(name);
             let _ = std::fs::remove_file(&p);

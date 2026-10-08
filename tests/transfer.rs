@@ -6,11 +6,8 @@ use rusqlite::{Connection, params};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-fn home(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mnem-transfer-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn home(name: &str) -> mnem::TempDir {
+    mnem::TempDir::new(&format!("transfer-{name}"))
 }
 
 fn seed(db: &Path, session: &str, title: &str) {

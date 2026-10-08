@@ -495,8 +495,7 @@ mod tests {
 
     #[test]
     fn commits_are_attributed_from_agent_edits_in_transcripts() {
-        let dir = std::env::temp_dir().join(format!("mnem-trace-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::TempDir::new("trace");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         run(&dir, &[], &["init", "-q"]);
         let file = dir.join("src/a.rs");

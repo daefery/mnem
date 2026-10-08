@@ -3,12 +3,11 @@
 //! running `mnem distill` by hand is not limited. Runs the real binary in a scratch home
 //! with a fake `claude` that counts its calls.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mnem-limit-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
+fn scratch(name: &str) -> mnem::TempDir {
+    let d = mnem::TempDir::new(&format!("limit-{name}"));
     std::fs::create_dir_all(d.join("bin")).unwrap();
     std::fs::create_dir_all(d.join(".mnem")).unwrap();
     d

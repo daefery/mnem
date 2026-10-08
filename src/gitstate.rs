@@ -143,9 +143,7 @@ mod tests {
 
     #[test]
     fn describes_a_real_repo() {
-        let d = std::env::temp_dir().join(format!("mnem-git-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("git");
         let run = |args: &[&str]| {
             Command::new("git")
                 .arg("-C")

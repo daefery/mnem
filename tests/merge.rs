@@ -6,11 +6,8 @@
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-fn home() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mnem-merge-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn home() -> mnem::TempDir {
+    mnem::TempDir::new("merge")
 }
 
 /// A session with two events and one distilled memory citing both, in `project`.

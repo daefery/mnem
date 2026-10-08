@@ -50,8 +50,7 @@ fn hook(home: &Path, db: &Path, payload: &serde_json::Value) -> String {
 
 #[test]
 fn first_touch_of_a_file_brings_its_memories_once() {
-    let base = std::env::temp_dir().join(format!("mnem-file-hook-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
+    let base = mnem::TempDir::new("file-hook");
     let (repo, home) = (base.join("repo"), base.join("home"));
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::create_dir_all(&home).unwrap();

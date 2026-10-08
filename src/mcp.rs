@@ -1166,8 +1166,13 @@ mod tests {
     use super::{day, handle};
 
     fn conn() -> rusqlite::Connection {
-        let p = std::env::temp_dir().join(format!("mnem-mcp-{}.db", std::process::id()));
-        crate::db::open(&p).unwrap()
+        // One database per test: removed with its directory when the test ends would
+        // close it under the connection, so it lives in memory instead.
+        crate::db::open_with(
+            std::path::Path::new(":memory:"),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap()
     }
 
     #[test]

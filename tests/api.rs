@@ -28,9 +28,7 @@ fn get(port: u16, path: &str, token: Option<&str>, host: Option<&str>) -> (u16, 
 
 #[test]
 fn the_record_api_is_private_paged_and_complete() {
-    let home = std::env::temp_dir().join(format!("mnem-api-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).unwrap();
+    let home = mnem::TempDir::new("api");
     // SAFETY: set before any other thread starts.
     unsafe { std::env::set_var("MNEM_HOME", &home) };
     let path = home.join("mnem.db");

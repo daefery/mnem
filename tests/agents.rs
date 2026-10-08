@@ -4,11 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("mnem-agents-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn scratch(name: &str) -> mnem::TempDir {
+    mnem::TempDir::new(&format!("agents-{name}"))
 }
 
 /// `mnem <args>` with HOME in the scratch folder and a PATH holding only `bin`

@@ -915,9 +915,7 @@ mod tests {
 
     #[test]
     fn snapshots_of_killed_gate_runs_are_swept() {
-        let d = std::env::temp_dir().join(format!("mnem-gate-sweep-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("gate-sweep");
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
         for name in [".gate-1.db", ".gate-1.copy.db", ".gate-1.db-wal", "mnem.db"] {
             let f = std::fs::File::create(d.join(name)).unwrap();

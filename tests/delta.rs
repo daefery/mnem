@@ -2,9 +2,12 @@ use mnem::hook::cross_agent_delta;
 use rusqlite::{Connection, params};
 
 fn db(name: &str) -> Connection {
-    let p = std::env::temp_dir().join(format!("mnem-delta-{}-{name}.db", std::process::id()));
-    let _ = std::fs::remove_file(&p);
-    mnem::db::open(&p).unwrap()
+    let _ = name;
+    mnem::db::open_with(
+        std::path::Path::new(":memory:"),
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap()
 }
 
 fn seed(c: &Connection, sid: &str, kind: &str, text: &str) {
@@ -203,9 +206,7 @@ fn recall_matches_prompt_once_per_session() {
 
 #[test]
 fn half_written_line_is_not_an_alert() {
-    let dir = std::env::temp_dir().join(format!("mnem-health-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = mnem::TempDir::new("health");
     let c = mnem::db::open(&dir.join("m.db")).unwrap();
     let f = dir.join("t.jsonl");
     std::fs::write(&f, "{\"a\":1}\n{\"half\":").unwrap();
@@ -397,9 +398,7 @@ fn ineligible_memories_cannot_crowd_out_vector_hits() {
 
 #[test]
 fn viewer_rejects_oversized_requests() {
-    let dir = std::env::temp_dir().join(format!("mnem-ui-limit-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = mnem::TempDir::new("ui-limit");
     let path = dir.join("m.db");
     drop(mnem::db::open(&path).unwrap());
     let port = 38000 + (std::process::id() % 1000) as u16;

@@ -1143,9 +1143,7 @@ mod tests {
 
     #[test]
     fn git_treats_file_names_literally() {
-        let dir = std::env::temp_dir().join(format!("mnem-files-lit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::TempDir::new("files-lit");
         let sh = |args: &[&str]| {
             std::process::Command::new("git")
                 .arg("-C")
@@ -1176,8 +1174,7 @@ mod tests {
 
     #[test]
     fn report_marks_memories_older_than_the_files_changes() {
-        let dir = std::env::temp_dir().join(format!("mnem-files-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::TempDir::new("files");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let sh_at = |args: &[&str], date: Option<&str>| {
             let mut cmd = std::process::Command::new("git");
@@ -1302,8 +1299,7 @@ mod tests {
 
     #[test]
     fn a_memory_says_whether_its_own_edits_are_still_there() {
-        let dir = std::env::temp_dir().join(format!("mnem-files-kept-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::TempDir::new("files-kept");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         let file = dir.join("src/a.rs").to_string_lossy().to_string();
         let kept = "let retries = backoff(attempt);";
@@ -1388,8 +1384,7 @@ mod tests {
 
     #[test]
     fn an_ending_that_fits_several_tracked_files_does_not_match() {
-        let dir = std::env::temp_dir().join(format!("mnem-files-amb-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::TempDir::new("files-amb");
         for p in ["packages/a/src", "packages/b/src", "packages/c/lib"] {
             std::fs::create_dir_all(dir.join(p)).unwrap();
         }

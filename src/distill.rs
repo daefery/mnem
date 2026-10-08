@@ -521,9 +521,7 @@ mod chain_tests {
 
     #[test]
     fn forgotten_session_is_not_recreated_by_a_late_answer() {
-        let d = std::env::temp_dir().join(format!("mnem-late-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("late");
         let mut conn = db::open(&d.join("m.db")).unwrap();
         conn.execute(
             "INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:s', 'pi', 's', 'p')",
@@ -554,9 +552,7 @@ mod chain_tests {
 
     #[test]
     fn small_idle_sessions_settle_and_the_backlog_is_counted() {
-        let d = std::env::temp_dir().join(format!("mnem-backlog-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("backlog");
         let mut conn = db::open(&d.join("m.db")).unwrap();
         let now = db::now_ms();
         let hour = 3_600_000;
@@ -730,9 +726,7 @@ mod chain_tests {
 
     #[test]
     fn an_edited_title_is_searched_by_its_new_words() {
-        let d = std::env::temp_dir().join(format!("mnem-retitle-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("retitle");
         let conn = db::open(&d.join("m.db")).unwrap();
         conn.execute(
             "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1, 'observation', 'Bug fixed', 'mnem', 'x')",
@@ -764,9 +758,7 @@ mod chain_tests {
 
     #[test]
     fn one_distiller_per_database() {
-        let d = std::env::temp_dir().join(format!("mnem-lock-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("lock");
         let conn = db::open(&d.join("m.db")).unwrap();
         let held = Lock::acquire(&conn).unwrap();
         assert!(held.is_some());

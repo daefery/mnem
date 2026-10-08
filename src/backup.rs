@@ -651,9 +651,7 @@ mod tests {
 
     #[test]
     fn a_backup_is_removed_one_at_a_time_and_only_backups() {
-        let d = std::env::temp_dir().join(format!("mnem-remove-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("remove");
         let c = crate::db::open(&d.join("m.db")).unwrap();
         let backups = d.join("backups");
         let a = create(&c, &backups, KEEP).unwrap();
@@ -713,9 +711,7 @@ mod tests {
 
     #[test]
     fn concurrent_backups_do_not_collide() {
-        let d = std::env::temp_dir().join(format!("mnem-backup-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("backup-race");
         let path = d.join("m.db");
         drop(db::open(&path).unwrap());
         let backups = d.join("backups");
@@ -738,9 +734,7 @@ mod tests {
 
     #[test]
     fn restore_gives_up_cleanly_when_locked() {
-        let d = std::env::temp_dir().join(format!("mnem-restore-locked-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("restore-locked");
         let backups = d.join("backups");
         let mut conn = db::open(&d.join("m.db")).unwrap();
         conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'snap', 'mnem', 'a')", [])
@@ -776,9 +770,7 @@ mod tests {
     /// while the backup is checked, and not by a name that looks like SQLite's own.
     #[test]
     fn a_smuggled_trigger_never_runs_during_restore() {
-        let d = std::env::temp_dir().join(format!("mnem-restore-early-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("restore-early");
         let evil = d.join("evil.db");
         {
             let c = db::open(&evil).unwrap();
@@ -830,9 +822,7 @@ mod tests {
 
     #[test]
     fn restore_drops_code_a_backup_smuggles_in() {
-        let d = std::env::temp_dir().join(format!("mnem-restore-evil-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("restore-evil");
         let backups = d.join("backups");
         let evil = d.join("evil.db");
         {
@@ -879,9 +869,7 @@ mod tests {
 
     #[test]
     fn no_write_is_lost_during_restore() {
-        let d = std::env::temp_dir().join(format!("mnem-restore-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("restore-race");
         let backups = d.join("backups");
         let live = d.join("m.db");
         let mut conn = db::open(&live).unwrap();
@@ -935,9 +923,7 @@ mod tests {
 
     #[test]
     fn backup_verify_rotate() {
-        let d = std::env::temp_dir().join(format!("mnem-backup-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("backup-test");
         let conn = db::open(&d.join("m.db")).unwrap();
         conn.execute(
             "INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'the queue stalled', 'mnem', 'x')",
@@ -983,9 +969,7 @@ mod tests {
 
     #[test]
     fn restoring_the_oldest_snapshot_survives_rotation() {
-        let d = std::env::temp_dir().join(format!("mnem-restore-oldest-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
+        let d = crate::TempDir::new("restore-oldest");
         let backups = d.join("backups");
         let mut conn = db::open(&d.join("m.db")).unwrap();
         conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'first', 'mnem', 'a')", [])
