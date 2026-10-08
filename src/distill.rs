@@ -40,6 +40,10 @@ pub(crate) const SYSTEM: &str = r#"You turn a digest of an AI coding session int
 Record durable technical signal only: what the system now does differently, what shipped, decisions
 with their rationale, and concrete findings from debugging (logs, data, code paths). Skip routine
 operations, empty checks, and anything already obvious from the code.
+A decision's reason belongs to whoever gave it. When the user only accepted an option the agent
+proposed ("ok let's do X", "B", "go"), write the reason as the agent's ("the agent recommended X
+because ...; the user chose X"), never as the user's motive. When the user said a question is still
+open, record it as open, not decided.
 
 Return JSON only:
 {"observations": [{"type": "...", "title": "...", "subtitle": "...", "narrative": "...",

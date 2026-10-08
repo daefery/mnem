@@ -38,7 +38,11 @@ the developer typed in that session: the most direct evidence of why something w
 Rules: answer in 1-8 short sentences or bullets (a question about a time may use more, one per
 project or per thing done), plain words, concrete names and values. Cite the sources
 you used right after the claim they support, like [#123] or [E456]. State a reason, cause or motive only
-when a source states it; never infer one from a later suggestion, follow-up or next step. Give times
+when a source states it; never infer one from a later suggestion, follow-up or next step. Say whose
+reason it is: when the developer only accepted an option (their "asked:" line is a short go-ahead such
+as "ok let's do X", "B", "go"), the reason was the agent's recommendation, so say "the agent
+recommended it because ...; you chose it", not "we chose it because ...". A later message from the
+developer saying it is still open or undecided outweighs an earlier memory that calls it decided. Give times
 as dates (each source shows its date), never only a clock time or "earlier": when something started,
 was decided or shipped, say on which date. A source marked "pinned by you" is the developer's own
 standing rule or fact: say it is their rule and since when. Keep each source's own
@@ -828,6 +832,13 @@ fn memory_sources(conn: &Connection, ids: &[i64]) -> Result<Vec<Source>> {
                 .collect();
             if !prompts.is_empty() {
                 text.push_str(&format!(" | asked: \"{}\"", prompts.join("\" / \"")));
+                // Said in the data, not left to the model to notice: a choice is not a
+                // reason, so any reason in this memory is the agent's.
+                if prompts.iter().all(|p| is_go_ahead(p)) {
+                    text.push_str(
+                        " | the developer only chose or approved here; any reason above is the agent's recommendation",
+                    );
+                }
             }
             out.push(Source {
                 id: Ref::Memory(id),
@@ -937,6 +948,38 @@ pub fn add_code_state(conn: &Connection, sources: &mut [Source]) {
             s.code = Some(first.clone());
         }
     }
+}
+
+/// Whether a prompt only picks or approves ("B", "A please", "ok let's do AGPL", "go",
+/// "yes do it") and gives no reason of its own.
+fn is_go_ahead(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    if p.chars().count() > 60 || p.contains('?') {
+        return false;
+    }
+    const REASON: [&str; 10] = [
+        "because", "since", "so that", "so we", "karena", "supaya", "biar", "to avoid", "reason",
+        "why",
+    ];
+    if REASON.iter().any(|r| p.contains(r)) {
+        return false;
+    }
+    let words: Vec<&str> = p
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .collect();
+    const ACCEPT: [&str; 22] = [
+        "ok", "okay", "yes", "yep", "sure", "go", "ahead", "do", "it", "let's", "lets", "with",
+        "option", "please", "that", "use", "pick", "agree", "approved", "approve", "ya", "lanjut",
+    ];
+    // Options by letter or number, and at most two other words ("ok let's do AGPL").
+    let other = words
+        .iter()
+        .filter(|w| {
+            !ACCEPT.contains(w) && !(w.len() == 1 && w.chars().all(|c| c.is_ascii_alphanumeric()))
+        })
+        .count();
+    !words.is_empty() && other <= 2
 }
 
 /// The model's answer and the sources it cited that were among `sources`.
@@ -1340,6 +1383,30 @@ mod tests {
         let s = resolve("what happened on 4 October", a.clone()).unwrap();
         assert_eq!(headline(&s), "4 October 2026, across all projects");
         assert_eq!(headline(&resolve("why did we drop it", a).unwrap()), "");
+    }
+
+    #[test]
+    fn a_choice_is_not_a_reason() {
+        for p in [
+            "B",
+            "A please",
+            "ok let's do AGPL",
+            "go",
+            "yes do it",
+            "let's go with option 2",
+            "yes i think use B",
+        ] {
+            assert!(is_go_ahead(p), "{p}");
+        }
+        for p in [
+            "use B because the demo must show the real flow",
+            "why not A?",
+            "B, karena lebih murah",
+            "keep firstmate changes local, no push, no PR, no pipeline from now on",
+            "close your validate-self agent if not needed anymore",
+        ] {
+            assert!(!is_go_ahead(p), "{p}");
+        }
     }
 
     #[test]
