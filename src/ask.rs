@@ -139,6 +139,8 @@ pub fn resolve(question: &str, a: Asked) -> Result<Scope> {
                     since.as_deref().unwrap_or("the beginning"),
                     until.as_deref().unwrap_or("now")
                 ),
+
+                offset_min: a.offset_min,
             })
         }
     };
@@ -1162,9 +1164,9 @@ fn headline(scope: &Scope) -> String {
     let Some(w) = &scope.window else {
         return String::new();
     };
-    let span = |ms: i64| long_day(ms);
+    let span = |ms: i64| long_day(ms, w.offset_min);
     let last = (w.end - 1).max(w.start);
-    let when = if day(w.start) == day(last) {
+    let when = if span(w.start) == span(last) {
         span(w.start)
     } else {
         format!("{} to {}", span(w.start), span(last))
@@ -1186,8 +1188,8 @@ fn headline(scope: &Scope) -> String {
     format!("{lead}{when}, {wher}")
 }
 
-/// "5 October 2026" in the asker's local time.
-fn long_day(ms: i64) -> String {
+/// "5 October 2026" at UTC offset `offset_min` (the asker's, as the window was read).
+fn long_day(ms: i64, offset_min: i64) -> String {
     const MONTHS: [&str; 12] = [
         "January",
         "February",
@@ -1202,9 +1204,7 @@ fn long_day(ms: i64) -> String {
         "November",
         "December",
     ];
-    let (y, m, d) = crate::text::civil_from_days(
-        (ms + crate::when::local_offset_min() * 60_000).div_euclid(86_400_000),
-    );
+    let (y, m, d) = crate::text::civil_from_days((ms + offset_min * 60_000).div_euclid(86_400_000));
     format!("{d} {} {y}", MONTHS[(m - 1) as usize])
 }
 
@@ -1735,6 +1735,7 @@ mod tests {
             start: day,
             end: day + 24 * H,
             label: "yesterday".into(),
+            offset_min: 0,
         };
         let scope = Scope {
             project: Some("p".into()),
@@ -1799,6 +1800,7 @@ mod tests {
             start: day,
             end: day + 24 * H,
             label: "yesterday".into(),
+            offset_min: 0,
         };
         let scope = Scope {
             project: Some("github.com/o/mnem".into()),
@@ -1841,6 +1843,7 @@ mod tests {
             start: day,
             end: day + 24 * H,
             label: "yesterday".into(),
+            offset_min: 0,
         };
         // Asked at day + 26h: the memory written at day + 30h did not exist yet.
         let scope = Scope {
@@ -2048,6 +2051,7 @@ mod tests {
             start: day,
             end: day + 24 * H,
             label: "yesterday".into(),
+            offset_min: 0,
         };
         let scope = Scope {
             project: None,

@@ -17,6 +17,8 @@ pub struct Window {
     pub end: i64,
     /// What the question said, as resolved: "yesterday (2026-10-05)".
     pub label: String,
+    /// The asker's UTC offset the window was resolved in (minutes): its days are read in it.
+    pub offset_min: i64,
 }
 
 const MONTHS: [(&str, i64); 24] = [
@@ -83,6 +85,7 @@ pub fn window(question: &str, now: i64, offset_min: i64) -> Option<Window> {
         } else {
             format!("{what} ({} to {})", date(from), date(to - 1))
         },
+        offset_min,
     };
     let has = |w: &str| words.contains(&w);
     let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
