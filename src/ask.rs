@@ -299,6 +299,15 @@ const MEMORY_FILTER: &str = "coalesce(m.type, '') != 'sensitive' AND m.kind != '
 const PINS: usize = 3;
 /// Agent replies and prompts found by their words, given as evidence, at most.
 const EVENT_MATCHES: usize = 6;
+/// The developer's own prompts found by one rare word, given besides those, at most.
+const RARE_PROMPTS: usize = 3;
+/// Longest prompt found by one rare word, in bytes: what a developer types on a topic is
+/// short (their prompts' median is about 110); longer ones are mostly relayed agent
+/// reports and handoffs, which mention a word in passing.
+const TYPED_PROMPT: usize = 600;
+/// A word in fewer than this share of the developer's prompts names a topic on its own
+/// ("agpl", "galur"): one such word shared is enough for a prompt to match.
+const RARE_IN_PROMPTS: f64 = 0.01;
 
 /// SQL condition (and its bound values) for memories in `scope`'s project, written
 /// before `scope.before`.
@@ -339,6 +348,7 @@ pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<S
         None => {
             out.extend(best_memories(conn, question, scope)?);
             out.extend(matching_events(conn, question, scope)?);
+            out.extend(rare_word_prompts(conn, question, scope)?);
         }
     }
     let mut seen = Vec::new();
@@ -418,27 +428,50 @@ fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<V
     let Some(q) = two_of(&topic_words(question)) else {
         return Ok(Vec::new());
     };
-    let mut st = conn.prepare_cached(
+    let found = said_matching(
+        conn,
+        &q,
+        "'prompt', 'assistant'",
+        usize::MAX >> 1,
+        scope,
+        EVENT_MATCHES * 2,
+    )?;
+    Ok(close_in_meaning(conn, question, found, EVENT_MATCHES))
+}
+
+/// Main-conversation prompts and replies in scope matching the FTS query `q`, best
+/// first, as sources, at most `max_len` bytes long. `kinds` is an SQL list ("'prompt',
+/// 'assistant'").
+fn said_matching(
+    conn: &Connection,
+    q: &str,
+    kinds: &str,
+    max_len: usize,
+    scope: &Scope,
+    limit: usize,
+) -> Result<Vec<Source>> {
+    let mut st = conn.prepare_cached(&format!(
         "SELECT e.id, e.kind, e.ts, coalesce(s.project, ''), e.text
            FROM events_fts JOIN events e ON e.id = events_fts.rowid JOIN sessions s ON s.id = e.session_id
-          WHERE events_fts MATCH ?1 AND e.kind IN ('prompt', 'assistant')
+          WHERE events_fts MATCH ?1 AND e.kind IN ({kinds})
             AND e.thread IS NULL AND e.label IS NULL AND e.record_key NOT LIKE 'cm:%'
-            AND length(e.text) >= 40
+            AND length(e.text) >= 40 AND length(e.text) <= ?7
             AND (?2 = '' OR s.project = ?2 OR s.project LIKE ?2 || '#%')
             AND (?3 = 0 OR e.ts < ?3) AND e.ts >= ?5 AND e.ts < ?6
             AND NOT EXISTS (SELECT 1 FROM scripted_sessions x WHERE x.session_id = s.id)
-          ORDER BY bm25(events_fts) LIMIT ?4",
-    )?;
+          ORDER BY bm25(events_fts) LIMIT ?4"
+    ))?;
     let project = scope.project.clone().unwrap_or_default();
-    let found: Vec<Source> = st
+    let found = st
         .query_map(
             rusqlite::params![
                 q,
                 project,
                 scope.before.unwrap_or(0),
-                (EVENT_MATCHES * 2) as i64,
+                limit as i64,
                 scope.window.as_ref().map_or(0, |w| w.start),
-                scope.window.as_ref().map_or(i64::MAX, |w| w.end)
+                scope.window.as_ref().map_or(i64::MAX, |w| w.end),
+                max_len as i64
             ],
             |r| {
                 let kind: String = r.get(1)?;
@@ -460,14 +493,23 @@ fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<V
             },
         )?
         .collect::<rusqlite::Result<_>>()?;
-    // Sharing two words is not sharing a topic ("go ahead with the next step" meets every
-    // reply that lists next steps): keep only text close to the question in meaning, when
-    // the embedding service can say. Without it, the words alone decide.
+    Ok(found)
+}
+
+/// Sharing words is not sharing a topic ("go ahead with the next step" meets every reply
+/// that lists next steps): keep, of `found`, at most `n` close to the question in meaning,
+/// when the embedding service can say. Without it, the words alone decide.
+fn close_in_meaning(
+    conn: &Connection,
+    question: &str,
+    found: Vec<Source>,
+    n: usize,
+) -> Vec<Source> {
     let Some(vq) = crate::embed::query_from_service(conn, question) else {
-        return Ok(found.into_iter().take(EVENT_MATCHES).collect());
+        return found.into_iter().take(n).collect();
     };
     let min = crate::recall::search_cosine();
-    Ok(found
+    found
         .into_iter()
         .filter(|s| {
             // A long reply covers many things: it counts by its passage closest to the
@@ -480,8 +522,53 @@ fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<V
                 .collect();
             scores.is_empty() || scores.iter().any(|c| *c >= min)
         })
-        .take(EVENT_MATCHES)
-        .collect())
+        .take(n)
+        .collect()
+}
+
+/// The developer's own prompts in scope that share one rare topic word with the question
+/// ("#4 why AGPL: not sure, still open" for "why did we choose the AGPL licence?"). The
+/// two-word rule misses them: a developer writes tersely, and their word on a topic (still
+/// open, not a priority) outweighs what a memory says. A word is rare when it is in fewer
+/// than `RARE_IN_PROMPTS` of the prompts written before the scope's cutoff.
+fn rare_word_prompts(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<Source>> {
+    let before = scope.before.unwrap_or(i64::MAX);
+    let count = |q: Option<&str>| -> Result<i64> {
+        Ok(match q {
+            Some(q) => conn.query_row(
+                "SELECT count(*) FROM events_fts JOIN events e ON e.id = events_fts.rowid
+                  WHERE events_fts MATCH ?1 AND e.kind = 'prompt' AND e.ts < ?2",
+                rusqlite::params![q, before],
+                |r| r.get(0),
+            )?,
+            None => conn.query_row(
+                "SELECT count(*) FROM events WHERE kind = 'prompt' AND ts < ?1",
+                [before],
+                |r| r.get(0),
+            )?,
+        })
+    };
+    let total = count(None)?.max(1) as f64;
+    let mut rare = Vec::new();
+    for w in topic_words(question) {
+        let q = format!("\"{}\"", w.replace('"', "\"\""));
+        let n = count(Some(&q))?;
+        if n > 0 && (n as f64) / total < RARE_IN_PROMPTS {
+            rare.push(q);
+        }
+    }
+    if rare.is_empty() {
+        return Ok(Vec::new());
+    }
+    let found = said_matching(
+        conn,
+        &rare.join(" OR "),
+        "'prompt'",
+        TYPED_PROMPT,
+        scope,
+        RARE_PROMPTS * 2,
+    )?;
+    Ok(close_in_meaning(conn, question, found, RARE_PROMPTS))
 }
 
 /// Passages of `text` to compare with a question: three sentences at a time, stepping by
@@ -1311,6 +1398,59 @@ mod tests {
             sources(&c, "what did we put in the Done field for marcom", &early)
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_developers_word_on_a_rare_topic_is_evidence_though_it_shares_one_word() {
+        let c = db();
+        work(&c, 1, "pi:a-1", "p", 10 * H, 10 * H, "adopted the licence");
+        let say = |id: i64, ts: i64, text: &str| {
+            c.execute(
+                "INSERT INTO events(id, session_id, record_key, ts, turn, kind, text) VALUES (?1, 'pi:a-1', ?2, ?3, 1, 'prompt', ?4)",
+                rusqlite::params![id, format!("k{id}"), ts, text],
+            )
+            .unwrap();
+        };
+        say(
+            2,
+            20 * H,
+            "#4 (why AGPL): not sure, still open on different options",
+        );
+        // Common words are in many prompts; "agpl" only in one.
+        for i in 0..200 {
+            say(
+                100 + i,
+                11 * H,
+                "please choose the next step and keep going with it",
+            );
+        }
+        c.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')", [])
+            .unwrap();
+        let scope = Scope {
+            project: Some("p".into()),
+            window: None,
+            before: None,
+        };
+        let q = "why did we choose the AGPL licence?";
+        let got = sources(&c, q, &scope).unwrap();
+        let s = got
+            .iter()
+            .find(|s| s.id == Ref::Event(2))
+            .expect("the prompt");
+        assert_eq!(s.kind, "you asked");
+        // A common word alone matches nothing.
+        assert!(!got.iter().any(|s| matches!(s.id, Ref::Event(100..))));
+        // Said after the replay time: not a source.
+        let early = Scope {
+            before: Some(15 * H),
+            ..scope
+        };
+        assert!(
+            !sources(&c, q, &early)
+                .unwrap()
+                .iter()
+                .any(|s| s.id == Ref::Event(2))
         );
     }
 
