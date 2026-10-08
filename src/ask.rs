@@ -436,7 +436,51 @@ fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<V
         scope,
         EVENT_MATCHES * 2,
     )?;
-    Ok(close_in_meaning(conn, question, found, EVENT_MATCHES))
+    with_replies(
+        conn,
+        close_in_meaning(conn, question, found, EVENT_MATCHES),
+        scope,
+    )
+}
+
+/// `found`, each of the developer's prompts followed by the agent's last reply in that
+/// turn: the request says what was asked ("fill the Done field with what we shipped"),
+/// the reply what came of it (the list itself), which may share no word with the question.
+/// A reply written after the scope's cutoff is not added.
+fn with_replies(conn: &Connection, found: Vec<Source>, scope: &Scope) -> Result<Vec<Source>> {
+    let mut st = conn.prepare_cached(
+        "SELECT r.id, r.ts, r.text FROM events p JOIN events r
+             ON r.session_id = p.session_id AND r.turn = p.turn AND r.id > p.id
+          WHERE p.id = ?1 AND p.kind = 'prompt' AND r.kind = 'assistant'
+            AND r.thread IS NULL AND r.label IS NULL AND r.record_key NOT LIKE 'cm:%'
+            AND length(r.text) >= 40 AND (?2 = 0 OR r.ts < ?2)
+          ORDER BY r.id DESC LIMIT 1",
+    )?;
+    let mut out: Vec<Source> = Vec::new();
+    for s in found {
+        let reply = match (&s.id, s.kind.as_str()) {
+            (Ref::Event(id), "you asked") => st
+                .query_row(rusqlite::params![id, scope.before.unwrap_or(0)], |r| {
+                    let text: String = r.get(2)?;
+                    Ok(Source {
+                        id: Ref::Event(r.get(0)?),
+                        kind: "agent said".into(),
+                        title: crate::text::head(text.trim(), 100).to_string(),
+                        at: r.get(1)?,
+                        project: s.project.clone(),
+                        code: None,
+                        text: crate::text::head(text.trim(), 1500).to_string(),
+                    })
+                })
+                .optional()?,
+            _ => None,
+        };
+        out.push(s);
+        if let Some(r) = reply.filter(|r| !out.iter().any(|o| o.id == r.id)) {
+            out.push(r);
+        }
+    }
+    Ok(out)
 }
 
 /// Main-conversation prompts and replies in scope matching the FTS query `q`, best
@@ -568,7 +612,11 @@ fn rare_word_prompts(conn: &Connection, question: &str, scope: &Scope) -> Result
         scope,
         RARE_PROMPTS * 2,
     )?;
-    Ok(close_in_meaning(conn, question, found, RARE_PROMPTS))
+    with_replies(
+        conn,
+        close_in_meaning(conn, question, found, RARE_PROMPTS),
+        scope,
+    )
 }
 
 /// Passages of `text` to compare with a question: three sentences at a time, stepping by
@@ -1452,6 +1500,67 @@ mod tests {
                 .iter()
                 .any(|s| s.id == Ref::Event(2))
         );
+    }
+
+    #[test]
+    fn a_matched_request_brings_the_reply_that_carried_it_out() {
+        let c = db();
+        work(&c, 1, "pi:a-1", "p", 10 * H, 10 * H, "marcom session");
+        for (id, turn, ts, kind, text) in [
+            (
+                2,
+                7,
+                11 * H,
+                "prompt",
+                "fill the Done field with what we already shipped for marcom automation",
+            ),
+            (
+                3,
+                7,
+                11 * H + 1,
+                "assistant",
+                "Found the field, appending to it now, keeping what's there.",
+            ),
+            (
+                4,
+                7,
+                11 * H + 2,
+                "assistant",
+                "Captain, written: three-stage copy, audience pinned to funders, every ticket in Content Review.",
+            ),
+            (
+                5,
+                8,
+                11 * H + 3,
+                "assistant",
+                "Next turn: something unrelated to the request, written later on.",
+            ),
+        ] {
+            c.execute(
+                "INSERT INTO events(id, session_id, record_key, ts, turn, kind, text) VALUES (?1, 'pi:a-1', ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![id, format!("k{id}"), ts, turn, kind, text],
+            )
+            .unwrap();
+        }
+        c.execute("INSERT INTO events_fts(events_fts) VALUES ('rebuild')", [])
+            .unwrap();
+        let scope = Scope {
+            project: Some("p".into()),
+            window: None,
+            before: None,
+        };
+        let q = "what did we ship for marcom automation so far?";
+        let got = ids(&sources(&c, q, &scope).unwrap());
+        // The turn's last reply, right after the request; not an earlier note or a later turn.
+        let at = got.iter().position(|i| i == "E2").expect("the request");
+        assert_eq!(got.get(at + 1).map(String::as_str), Some("E4"));
+        assert!(!got.contains(&"E5".to_string()));
+        // A reply written after the cutoff is not a source.
+        let early = Scope {
+            before: Some(11 * H + 2),
+            ..scope
+        };
+        assert!(!ids(&sources(&c, q, &early).unwrap()).contains(&"E4".to_string()));
     }
 
     #[test]
