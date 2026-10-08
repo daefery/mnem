@@ -30,6 +30,9 @@ const WINDOW_SOURCES: usize = 120;
 const WINDOW_FULL: usize = 24;
 /// Developer prompts given as evidence, at most.
 const PROMPTS: usize = 12;
+/// Fewer memories than this in a time window: it is not distilled yet, and each prompt
+/// there brings the agent's closing reply to say what came of it.
+const FEW_MEMORIES: usize = 5;
 
 const SYSTEM: &str = r##"You answer a developer's question about their own past work with coding agents,
 using only the sources given: memories (notes distilled from their agent sessions, id like #123) and
@@ -344,8 +347,18 @@ pub fn sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<S
                     .filter(|s| reports_on(&s.text, s.at).is_none_or(|day| in_window(day, w)))
             };
             out.extend(said(matching_events(conn, question, scope)?));
-            out.extend(window_memories(conn, question, scope, w)?);
-            out.extend(said(window_prompts(conn, scope, w)?));
+            let memories = window_memories(conn, question, scope, w)?;
+            // Before memories are made (a new install, a day not yet distilled), what the
+            // developer asked says what was attempted, not what came of it: the agent's
+            // closing reply in each turn says that.
+            let thin = memories.len() < FEW_MEMORIES;
+            out.extend(memories);
+            let prompts: Vec<Source> = said(window_prompts(conn, scope, w)?).collect();
+            if thin {
+                out.extend(said(with_replies(conn, prompts, scope)?));
+            } else {
+                out.extend(prompts);
+            }
         }
         None => {
             out.extend(best_memories(conn, question, scope)?);
@@ -461,7 +474,7 @@ fn with_replies(conn: &Connection, found: Vec<Source>, scope: &Scope) -> Result<
     let mut out: Vec<Source> = Vec::new();
     for s in found {
         let reply = match (&s.id, s.kind.as_str()) {
-            (Ref::Event(id), "you asked") => st
+            (Ref::Event(id), "you asked" | "prompt") => st
                 .query_row(rusqlite::params![id, scope.before.unwrap_or(0)], |r| {
                     let text: String = r.get(2)?;
                     Ok(Source {
@@ -1561,6 +1574,75 @@ mod tests {
             ..scope
         };
         assert!(!ids(&sources(&c, q, &early).unwrap()).contains(&"E4".to_string()));
+    }
+
+    #[test]
+    fn an_undistilled_day_says_what_came_of_each_request() {
+        let c = db();
+        c.execute(
+            "INSERT INTO sessions(id, agent, native_id, project, last_event_at) VALUES ('pi:a-1', 'pi', 'pi:a-1', 'p', 0)",
+            [],
+        )
+        .unwrap();
+        let day = 48 * H;
+        for (id, turn, ts, kind, text) in [
+            (
+                1,
+                1,
+                day + H,
+                "prompt",
+                "add backup import to the viewer please",
+            ),
+            (
+                2,
+                1,
+                day + H + 1,
+                "assistant",
+                "Backup import is in the viewer now, merged to main as 17f6aab.",
+            ),
+            (3, 2, day + 2 * H, "prompt", "and rerank the top ten too"),
+            (
+                4,
+                2,
+                day + 2 * H + 1,
+                "assistant",
+                "Reranking did not help on the eval set, so I left it out.",
+            ),
+        ] {
+            c.execute(
+                "INSERT INTO events(id, session_id, record_key, ts, turn, kind, text) VALUES (?1, 'pi:a-1', ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![id, format!("k{id}"), ts, turn, kind, text],
+            )
+            .unwrap();
+        }
+        let w = Window {
+            start: day,
+            end: day + 24 * H,
+            label: "yesterday".into(),
+            offset_min: 0,
+        };
+        let scope = Scope {
+            project: Some("p".into()),
+            window: Some(w),
+            before: None,
+        };
+        // No memories yet: each request comes with what the agent said came of it.
+        let got = ids(&sources(&c, "what did we do yesterday", &scope).unwrap());
+        assert_eq!(got, ["E1", "E2", "E3", "E4"]);
+        // Once the day has memories, its prompts stand alone again.
+        for n in 0..FEW_MEMORIES as i64 {
+            c.execute(
+                "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)
+                 VALUES (?1, 'pi:a-1', 'p', 'observation', 'feature', ?2, 'mnem', ?3, ?4)",
+                rusqlite::params![100 + n, format!("shipped thing {n}"), format!("pi:a-1@1-{}#{n}", 1), day + H],
+            )
+            .unwrap();
+        }
+        let got = ids(&sources(&c, "what did we do yesterday", &scope).unwrap());
+        assert!(
+            got.contains(&"E1".to_string()) && !got.contains(&"E2".to_string()),
+            "{got:?}"
+        );
     }
 
     #[test]

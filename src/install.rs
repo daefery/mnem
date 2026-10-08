@@ -92,23 +92,50 @@ fn distillation(p: &Plan) -> Result<()> {
     if crate::distill::not_configured(cfg).is_none() {
         return Ok(());
     }
-    let choice = [crate::cli_llm::Cli::Claude, crate::cli_llm::Cli::Codex]
+    let found: Vec<crate::cli_llm::Cli> = [crate::cli_llm::Cli::Claude, crate::cli_llm::Cli::Codex]
         .into_iter()
-        .find(|c| crate::cli_llm::locate(*c).is_some());
-    let Some(cli) = choice else {
+        .filter(|c| crate::cli_llm::locate(*c).is_some())
+        .collect();
+    if found.is_empty() {
         if let Some(why) = crate::distill::not_configured(cfg) {
             say!("\n{why}");
         }
         return Ok(());
+    }
+    // A command line being installed does not mean it can answer: its login may be
+    // missing or expired. One short request says so now, not at the first answer.
+    let mut failures = Vec::new();
+    let works = if p.dry_run {
+        None
+    } else {
+        found.iter().copied().find(|c| match answers(*c) {
+            Ok(()) => true,
+            Err(why) => {
+                failures.push(why);
+                false
+            }
+        })
     };
+    let cli = works.unwrap_or(found[0]);
     say!(
-        "\ndistillation: using `{}` ({}), signed in as you; at most {} background requests a day",
+        "\ndistillation: using `{}` ({}); at most {} background requests a day",
         cli.command(),
         cli.default_chain().join(", "),
         NEW_USER_DAILY_CALLS
     );
     if p.dry_run {
+        say!("  not tested (dry run)");
         return Ok(());
+    }
+    match works {
+        Some(_) => say!("  tested: it answered"),
+        None => {
+            say!("  ! it did not answer, so memories and `mnem ask` answers wait until it does:");
+            for f in &failures {
+                say!("    {f}");
+            }
+            say!("  then run `mnem doctor` to check");
+        }
     }
     let path = crate::config::path();
     let mut v: serde_json::Value = match std::fs::read_to_string(&path) {
@@ -133,6 +160,24 @@ fn distillation(p: &Plan) -> Result<()> {
     std::fs::write(&path, serde_json::to_string_pretty(&v)? + "\n")?;
     say!("  written to {}", path.display());
     Ok(())
+}
+
+/// Whether `cli` answers one short request with its default model: why not, as the
+/// user can act on it ("claude is not signed in: open Claude Code and type /login").
+fn answers(cli: crate::cli_llm::Cli) -> std::result::Result<(), String> {
+    let model = cli.default_chain()[0];
+    match crate::cli_llm::call(
+        cli,
+        model,
+        "Reply with JSON only.",
+        r#"Reply with exactly: {"ok": true}"#,
+        std::time::Duration::from_secs(120),
+    ) {
+        Ok(_) => Ok(()),
+        Err(
+            crate::distill::Failure::Endpoint(why) | crate::distill::Failure::NextModel(_, why),
+        ) => Err(format!("{}: {why}", cli.command())),
+    }
 }
 
 /// Background requests a day for a user whose distillation runs on their own plan.

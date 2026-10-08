@@ -124,7 +124,7 @@ impl Cli {
                     .map_err(|_| Failure::NextModel(0, "claude printed no JSON envelope".into()))?;
                 let text = v["result"].as_str().unwrap_or_default().to_string();
                 if v["is_error"].as_bool() == Some(true) {
-                    return Err(classify_message(&text));
+                    return Err(with_login_hint(self, classify_message(&text)));
                 }
                 Ok(text)
             }
@@ -147,8 +147,13 @@ pub fn classify_message(msg: &str) -> Failure {
         "please log in",
         "/login",
         "authentication",
+        "authenticate",
         "unauthorized",
         "invalid api key",
+        "session expired",
+        "token expired",
+        "could not be refreshed",
+        "codex login",
     ]
     .iter()
     .any(|k| m.contains(k))
@@ -273,21 +278,25 @@ fn run(
     match cli.reply(&stdout, out) {
         Ok(text) => Ok(text),
         // A failed run explains itself on stderr (or, for claude, in its envelope).
-        Err(_) if !status.success() => Err(
-            match classify_message(&failure_text(cli, &stdout, &stderr)) {
-                // Say how to sign in, not only that a request was refused.
-                Failure::Endpoint(m) if m.starts_with("not signed in") => {
-                    Failure::Endpoint(format!(
-                        "{} is not signed in: {} ({})",
-                        cli.command(),
-                        cli.login_hint(),
-                        m.trim_start_matches("not signed in: ")
-                    ))
-                }
-                f => f,
-            },
-        ),
+        Err(_) if !status.success() => Err(with_login_hint(
+            cli,
+            classify_message(&failure_text(cli, &stdout, &stderr)),
+        )),
         Err(f) => Err(f),
+    }
+}
+
+/// A sign-in failure says how to sign in, however the command reported it (exit status
+/// or an error envelope on success), not only that a request was refused.
+fn with_login_hint(cli: Cli, f: Failure) -> Failure {
+    match f {
+        Failure::Endpoint(m) if m.starts_with("not signed in") => Failure::Endpoint(format!(
+            "{} is not signed in: {} ({})",
+            cli.command(),
+            cli.login_hint(),
+            m.trim_start_matches("not signed in: ")
+        )),
+        f => f,
     }
 }
 
@@ -301,8 +310,15 @@ fn failure_text(cli: Cli, stdout: &str, stderr: &str) -> String {
     } else {
         stderr
     };
-    if cli != Cli::Codex {
-        return all.to_string();
+    if cli == Cli::Claude {
+        // claude prints a JSON envelope; its own complaint is the `result`. The rest
+        // (`modelUsage`, token counts) would read as "model unavailable" and rest the
+        // model for hours over what is only an expired login.
+        return serde_json::from_str::<Value>(stdout.trim())
+            .ok()
+            .and_then(|v| v["result"].as_str().map(str::to_string))
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| all.to_string());
     }
     let errors: Vec<String> = all
         .lines()
@@ -383,6 +399,23 @@ mod tests {
             classify_message("Not logged in · Please run /login"),
             Failure::Endpoint(_)
         ));
+        // An expired login is a sign-out too: no other model helps, nothing cools down.
+        assert!(matches!(
+            classify_message(
+                "Failed to authenticate: OAuth session expired and could not be refreshed"
+            ),
+            Failure::Endpoint(_)
+        ));
+        // claude reports a sign-out in an error envelope that exits 0: it still says how
+        // to sign in.
+        let envelope = r#"{"is_error":true,"terminal_reason":"api_error","result":"Not logged in · Please run /login"}"#;
+        match Cli::Claude.reply(envelope, none) {
+            Err(Failure::Endpoint(m)) => assert!(
+                m.contains("/login") && m.starts_with("claude is not signed in"),
+                "{m}"
+            ),
+            other => panic!("{other:?}"),
+        }
         assert!(
             matches!(classify_message("model 'x' not found"), Failure::NextModel(m, _) if m == 6 * 60 * 60_000)
         );
@@ -418,8 +451,13 @@ mod tests {
             classify_message(&failure_text(Cli::Codex, "", silent)),
             Failure::NextModel(m, _) if m == 5 * 60_000
         ));
-        // claude's message is its whole output, as before.
+        // claude's message is its stderr, or the `result` of its envelope: never the
+        // envelope's field names, which hold the word "model".
         assert_eq!(failure_text(Cli::Claude, "x", "usage limit"), "usage limit");
+        let envelope = r#"{"duration_api_ms":0,"is_error":true,"modelUsage":{},"result":"Failed to authenticate: OAuth session expired and could not be refreshed"}"#;
+        let text = failure_text(Cli::Claude, envelope, "");
+        assert!(text.starts_with("Failed to authenticate"), "{text}");
+        assert!(matches!(classify_message(&text), Failure::Endpoint(_)));
     }
 
     #[test]
