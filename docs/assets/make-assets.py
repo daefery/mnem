@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Draw the README images (light and dark): the banner, how mnem works, and terminal
+"""Draw the README images (light and dark): the banner, how ravnori works, and terminal
 panels rendered from real command output.
 
     python3 docs/assets/make-assets.py [ask.txt] [trace.txt]
 
-ask.txt / trace.txt: output captured from `mnem ask` and `mnem trace` (the demo record
+ask.txt / trace.txt: output captured from `rvn ask` and `rvn trace` (the demo record
 from docs/demo/make-demo.py for ask, this repository for trace); without them the
 panels are not redrawn.
 """
@@ -20,18 +20,20 @@ MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monosp
 THEMES = {
     "dark": dict(bg="#0d1117", panel="#161b22", panel2="#1c2430", ink="#e6edf3", ink2="#9da7b3",
                  ink3="#6e7781", rule="#30363d", teal="#2dd4bf", teal_soft="#0f3d39", amber="#f0a64a",
-                 violet="#b79cff", term="#0b0f14", term_bar="#1b222c"),
+                 violet="#b79cff", term="#0b0f14", term_bar="#1b222c", logo_ink="#E9F2E7", logo_dot="#B5E38B"),
     "light": dict(bg="#ffffff", panel="#f6f8fa", panel2="#eef2f5", ink="#1f2328", ink2="#475260",
                   ink3="#6e7781", rule="#d0d7de", teal="#0f766e", teal_soft="#d6efec", amber="#b45309",
-                  violet="#6d28d9", term="#0d1117", term_bar="#1f2630"),
+                  violet="#6d28d9", term="#0d1117", term_bar="#1f2630", logo_ink="#122D2B", logo_dot="#168F76"),
 }
 
-LOGO = """<g transform="translate({x},{y}) scale({s})">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#0f766e"/>
-  <rect x="14" y="17" width="36" height="7" rx="3.5" fill="#99f6e4"/>
-  <rect x="14" y="28.5" width="28" height="7" rx="3.5" fill="#5eead4"/>
-  <rect x="14" y="40" width="20" height="7" rx="3.5" fill="#2dd4bf"/>
-</g>"""
+# The strata mark (docs/assets/logo/), drawn on a 132-unit square; {ink} and {dot} are the
+# theme's colours (light: deep green; dark: pale).
+LOGO = """<g transform="translate({x},{y}) scale({s})"><g transform="translate(1 1)">
+  <path d="M19 44L65 20L111 44L65 68Z" fill="{ink}"/>
+  <path d="M19 66L65 90L111 66" fill="none" stroke="{ink}" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M19 88L65 112L111 88" fill="none" stroke="{ink}" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="65" cy="44" r="9" fill="{dot}"/>
+</g></g>"""
 
 
 def esc(s):
@@ -67,13 +69,13 @@ def hero(t):
   <text x="{card_x + 24}" y="{card_y + 198}" font-family="{MONO}" font-size="13" fill="{t['ink3']}">evidence  E2041 E2044 E2058</text>
   <text x="{card_x + 24}" y="{card_y + 224}" font-family="{MONO}" font-size="13" fill="{t['teal']}">✓ its edited lines are still there</text>
   <text x="{card_x + 24}" y="{card_y + 250}" font-family="{MONO}" font-size="13" fill="{t['ink3']}">offered 3× · opened 1× · 2d ago</text>"""
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="mnem: memory for coding agents">
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="ravnori: memory for coding agents">
   <rect width="{W}" height="{H}" rx="20" fill="{t['bg']}"/>
   <rect x="0.5" y="0.5" width="{W - 1}" height="{H - 1}" rx="20" fill="none" stroke="{t['rule']}"/>
-  {LOGO.format(x=60, y=62, s=0.95)}
-  <text x="134" y="112" font-family="{MONO}" font-size="46" font-weight="700" fill="{t['ink']}">mnem</text>
+  {LOGO.format(x=60, y=62, s=0.95 * 64 / 132, ink=t['logo_ink'], dot=t['logo_dot'])}
+  <text x="134" y="112" font-family="{MONO}" font-size="46" font-weight="700" fill="{t['ink']}">ravnori</text>
   <text x="64" y="186" font-family="{SANS}" font-size="31" font-weight="700" fill="{t['ink']}">Your coding agents already write</text>
-  <text x="64" y="226" font-family="{SANS}" font-size="31" font-weight="700" fill="{t['ink']}">everything down. <tspan fill="{t['teal']}">mnem remembers it.</tspan></text>
+  <text x="64" y="226" font-family="{SANS}" font-size="31" font-weight="700" fill="{t['ink']}">everything down. <tspan fill="{t['teal']}">ravnori remembers it.</tspan></text>
   <text x="64" y="268" font-family="{SANS}" font-size="17" fill="{t['ink2']}">One local record of every session · memories with evidence · nothing lost</text>
   {pills}
   {card}
@@ -108,11 +110,11 @@ def how(t):
     # Agents (left)
     for y, (name, path) in zip(rows_y, [("Claude Code", "~/.claude/projects"), ("Codex", "~/.codex/sessions"), ("pi", "~/.pi/agent/sessions")]):
         parts.append(box(40, y, 250, 96, t, name, [f"writes {path}"]))
-    # mnem (middle)
+    # ravnori (middle)
     mx, my, mw, mh = 380, 70, 470, 336
     parts.append(f'<rect x="{mx}" y="{my}" width="{mw}" height="{mh}" rx="16" fill="{t["panel2"]}" stroke="{t["teal"]}" stroke-width="2"/>')
-    parts.append(LOGO.format(x=mx + 18, y=my + 16, s=0.5))
-    parts.append(f'<text x="{mx + 58}" y="{my + 44}" font-family="{MONO}" font-size="22" font-weight="700" fill="{t["ink"]}">mnem</text>')
+    parts.append(LOGO.format(x=mx + 18, y=my + 16, s=0.5 * 64 / 132, ink=t['logo_ink'], dot=t['logo_dot']))
+    parts.append(f'<text x="{mx + 58}" y="{my + 44}" font-family="{MONO}" font-size="22" font-weight="700" fill="{t["ink"]}">ravnori</text>')
     rows = [
         ("Capture", "reads transcripts as they grow; a crash or", "a missed hook delays it, never loses it"),
         ("Record", "one local SQLite: prompts, edits, commands;", "deduplicated, secrets redacted, deletable"),
@@ -129,18 +131,18 @@ def how(t):
     # Outputs (right)
     outs = [
         ("Back to your agents", ["session start, each prompt, opening a file", "MCP tools: search, get_observations, …"], t["teal"]),
-        ("To you", ["the viewer at 127.0.0.1:37777", "mnem ask “why did we …”, with sources"], None),
-        ("To your tools", ["record API: read-only, local, token", "mnem trace: Agent Trace for commits"], None),
+        ("To you", ["the viewer at 127.0.0.1:37777", "rvn ask “why did we …”, with sources"], None),
+        ("To your tools", ["record API: read-only, local, token", "rvn trace: Agent Trace for commits"], None),
     ]
     for y, (title, lines, accent) in zip(rows_y, outs):
         parts.append(box(940, y, 300, 96, t, title, lines, accent=accent))
-    # Arrows: agents -> mnem, mnem -> outputs, each to the middle of its box
+    # Arrows: agents -> ravnori, ravnori -> outputs, each to the middle of its box
     for y in rows_y:
         parts.append(arrow(296, y + 48, mx - 8, y + 48, t))
         parts.append(arrow(mx + mw + 6, y + 48, 932, y + 48, t))
     parts.append(f'<text x="640" y="458" text-anchor="middle" font-family="{SANS}" font-size="15" fill="{t["ink2"]}">Everything stays on your machine. The only thing that leaves it: redacted excerpts sent to the model <tspan font-weight="700">you</tspan> choose, to write memories.</text>')
     parts.append(f'<text x="640" y="488" text-anchor="middle" font-family="{SANS}" font-size="15" fill="{t["ink2"]}">One binary · no Node, Python, Docker or vector database · Linux, WSL and macOS</text>')
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="How mnem works">{"".join(parts)}</svg>\n'
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" aria-label="How ravnori works">{"".join(parts)}</svg>\n'
 
 
 def terminal(t, title, command, lines, color_of):
@@ -178,8 +180,8 @@ def main():
 
         # A terminal is dark in either theme: one file each.
         t = THEMES["dark"]
-        write("ask.svg", terminal(t, "mnem ask", 'mnem ask "why did customers get charged twice"', ask, ask_color))
-        write("trace.svg", terminal(t, "mnem trace", "mnem trace --commits 8 --out .agent-trace", trace,
+        write("ask.svg", terminal(t, "rvn ask", 'rvn ask "why did customers get charged twice"', ask, ask_color))
+        write("trace.svg", terminal(t, "rvn trace", "rvn trace --commits 8 --out .agent-trace", trace,
                                     lambda l: "#2dd4bf" if "written by agents" in l else "#e6edf3"))
     print("assets written to", HERE)
 

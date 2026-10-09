@@ -1,4 +1,4 @@
-//! Keeping secrets out of what mnem already stored. New text is redacted as it is
+//! Keeping secrets out of what ravnori already stored. New text is redacted as it is
 //! captured (`text::redact`); when the patterns grow (`text::REDACTION_VERSION`), this
 //! redacts events, memories and session titles stored before, in batches, resuming where
 //! it stopped. The transcripts on disk are the agents' own files and are left as they are.
@@ -184,7 +184,7 @@ mod tests {
             .unwrap();
         }
         c.execute(
-            "INSERT INTO memories(id, session_id, kind, title, narrative, origin, origin_id) VALUES (1, 's', 'observation', 'DB access', ?1, 'mnem', 'x')",
+            "INSERT INTO memories(id, session_id, kind, title, narrative, origin, origin_id) VALUES (1, 's', 'observation', 'DB access', ?1, 'ravnori', 'x')",
             [format!("Use {url} for reports")],
         )
         .unwrap();

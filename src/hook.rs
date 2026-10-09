@@ -1,4 +1,4 @@
-//! Agent hook entry point: `mnem hook <agent> <event>` with the hook JSON on stdin.
+//! Agent hook entry point: `rvn hook <agent> <event>` with the hook JSON on stdin.
 //!
 //! Claude Code and Codex share the protocol: stdin carries `session_id`,
 //! `transcript_path`, `cwd`; stdout `{"hookSpecificOutput": {"hookEventName",
@@ -79,13 +79,13 @@ impl Freshness {
             )
         };
         format!(
-            "mnem: {sessions} sessions, {events} events indexed · newest event {last} ago · {status}"
+            "ravnori: {sessions} sessions, {events} events indexed · newest event {last} ago · {status}"
         )
     }
 }
 
 /// A hook never parses more than this much of one transcript; bigger backlogs are left
-/// to `mnem backfill` / `mnem watch` and reported as behind.
+/// to `rvn backfill` / `rvn watch` and reported as behind.
 const HOOK_MAX_UNREAD: u64 = 8 << 20;
 
 /// Catch up every transcript that changed since it was last read, newest first, until
@@ -134,7 +134,7 @@ pub fn catch_up_recent(conn: &mut Connection, budget: Duration) -> Result<Freshn
         ..Default::default()
     };
     let mut busy = false;
-    // A lock wait counts against the budget too: while mnem-watch holds the database,
+    // A lock wait counts against the budget too: while ravnori-watch holds the database,
     // a write would otherwise wait the connection's full timeout past the deadline.
     let timeout: i64 = conn
         .pragma_query_value(None, "busy_timeout", |r| r.get(0))
@@ -338,10 +338,10 @@ fn run_phases(conn: &mut Connection, agent: Agent, event: &str, phases: &mut Pha
             // Problems go to the user directly (systemMessage), not only to the agent.
             let alerts = crate::health::for_hook(conn);
             for a in &alerts {
-                footer.push_str(&format!("\nmnem warning: {a}"));
+                footer.push_str(&format!("\nravnori warning: {a}"));
             }
             ctx.push_str(&format!("\n---\n{footer}\n"));
-            let notice = (!alerts.is_empty()).then(|| format!("mnem: {}", alerts.join(" | ")));
+            let notice = (!alerts.is_empty()).then(|| format!("ravnori: {}", alerts.join(" | ")));
             phases.mark("footer and health");
             emit_with("SessionStart", &ctx, notice.as_deref());
             let _ = conn.busy_timeout(BOOKKEEPING_WAIT);
@@ -604,7 +604,7 @@ pub fn cross_agent_delta(
             o.last_id,
         ))
     });
-    let mut w = String::from("mnem: meanwhile in this project (other sessions, newest first)\n");
+    let mut w = String::from("ravnori: meanwhile in this project (other sessions, newest first)\n");
     let mut shown: Vec<&Other> = Vec::new();
     for o in &by {
         if shown.len() == MAX_SESSIONS {

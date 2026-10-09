@@ -6,7 +6,7 @@
 //   node features.js http://127.0.0.1:37777 [fingerprint.json]
 //
 // Read-only: it never creates, imports or deletes anything. `sh run.sh` runs it against
-// a demo record. Uses the installed Chrome; set MNEM_CHROME to a browser binary instead.
+// a demo record. Uses the installed Chrome; set RAVNORI_CHROME to a browser binary instead.
 const { chromium } = require("playwright-core");
 const B = (process.argv[2] || "").replace(/\/$/, "");
 const out = process.argv[3];
@@ -15,7 +15,7 @@ const ok = (c, m) => { console.log(`${c ? "PASS" : "FAIL"} ${m}`); if (!c) proce
 const text = (es) => es.map((e) => e.textContent.replace(/\s+/g, " ").trim());
 
 (async () => {
-  const browser = await chromium.launch(process.env.MNEM_CHROME ? { executablePath: process.env.MNEM_CHROME } : { channel: "chrome" });
+  const browser = await chromium.launch(process.env.RAVNORI_CHROME ? { executablePath: process.env.RAVNORI_CHROME } : { channel: "chrome" });
   const page = await browser.newPage({ viewport: { width: 1366, height: 900 } });
   const errors = [];
   page.on("pageerror", (e) => errors.push(e.message));
@@ -120,7 +120,7 @@ const text = (es) => es.map((e) => e.textContent.replace(/\s+/g, " ").trim());
   const query = words.slice(0, 2).join(" ");
   await page.keyboard.type(query);
   await page.waitForTimeout(1500);
-  const matches = await page.$$eval(".mnem-match", (e) => [...new Set(e.map((x) => x.textContent))]);
+  const matches = await page.$$eval(".ravnori-match", (e) => [...new Set(e.map((x) => x.textContent))]);
   ok(matches.length > 0, `search shows match labels ("${query}": ${matches})`);
   ok(page.url().includes("q=" + encodeURIComponent(words[0])), "search in the URL");
   fp.search = await page.$$eval(".card", (es) => es.slice(0, 20).map((e) => e.textContent.replace(/\s+/g, " ").trim()));

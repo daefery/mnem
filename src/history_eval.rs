@@ -1,10 +1,10 @@
-//! `mnem eval --history <set>`: does `mnem ask` answer real questions about past work
+//! `rvn eval --history <set>`: does `rvn ask` answer real questions about past work
 //! correctly, with sources, and say so when nothing is recorded?
 //!
-//! Each case (`~/.mnem/eval/history-dev.jsonl`, `history-test.jsonl`) is a question the
+//! Each case (`~/.ravnori/eval/history-dev.jsonl`, `history-test.jsonl`) is a question the
 //! owner asks, the moment it is asked as of (`before`), its project, the points a correct
 //! answer must contain (`expect`) and claims that make it wrong (`must_not`). It is
-//! replayed through the same scope, sources and answer as `mnem ask`, so nothing written
+//! replayed through the same scope, sources and answer as `rvn ask`, so nothing written
 //! after `before` is seen. A judge model then marks the answer: does it state each
 //! expected point, does it make a forbidden claim, does it abstain. Judgments are cached by
 //! (judge, case, answer), so a rerun with the same answer costs nothing.
@@ -129,7 +129,7 @@ pub fn run(
             },
         )?;
         let sources = ask::sources(conn, &c.question, &scope)?;
-        // Time to find the sources, counted in every run as `mnem ask` would.
+        // Time to find the sources, counted in every run as `rvn ask` would.
         let finding = t0.elapsed().as_millis();
         let mut tries = Vec::new();
         for _ in 0..runs.max(1) {

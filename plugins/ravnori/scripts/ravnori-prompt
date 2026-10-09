@@ -1,0 +1,6 @@
+#!/bin/sh
+# Claude Code plugin hook: pass the event to the ravnori program. Quiet when ravnori is not
+# installed yet (run /ravnori:setup), when rvn install already wired this hook, or when
+# the installed ravnori is older than 0.3.0 (run /ravnori:setup to update it).
+command -v rvn >/dev/null 2>&1 || exit 0
+rvn hook claude prompt --plugin 2>/dev/null || exit 0

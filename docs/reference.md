@@ -1,55 +1,81 @@
-# mnem reference
+# ravnori reference
 
-Everything about mnem in detail: installation options, every command, configuration,
+Everything about ravnori in detail: installation options, every command, configuration,
 how recall is measured and gated, backups, guarantees and limits. For a quick start,
 see the [README](../README.md).
 
 Local-first memory for coding agents (Claude Code, Codex CLI, pi), built from the
 transcripts those agents already write to disk.
 
-mnem never puts an LLM or a queue on the write path. Each transcript is read
+ravnori never puts an LLM or a queue on the write path. Each transcript is read
 incrementally; parsed events and the file cursor are committed in one SQLite
 transaction, and events are deduplicated by the agent's own record ids. A crash,
 a missed hook or a rewritten file can delay capture but cannot lose it, and
-`mnem doctor` shows exactly how far behind capture is.
+`rvn doctor` shows exactly how far behind capture is.
 
 ## Install
 
 No Rust or build needed. On Linux (x86_64 or arm64), WSL, or macOS:
 
 ```sh
-curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/daefery/ravnori/releases/latest/download/install.sh | sh
 ```
 
 Or, in Claude Code, as a plugin:
 
 ```
-/plugin marketplace add daefery/mnem
-/plugin install mnem@mnem
-/mnem:setup
+/plugin marketplace add daefery/ravnori
+/plugin install ravnori@ravnori
+/ravnori:setup
 ```
 
-The plugin's hooks and tools run the mnem program; `/mnem:setup` installs it with the
-script above. When `mnem install` has also wired Claude Code, the plugin's copies stay
+The plugin's hooks and tools run the ravnori program; `/ravnori:setup` installs it with the
+script above. When `rvn install` has also wired Claude Code, the plugin's copies stay
 quiet, so nothing runs twice.
 
 The script downloads the binary for your system, checks its SHA-256 against the
-release, puts it in `~/.local/bin` and runs `mnem install --watch`: it connects Claude
+release, puts it in `~/.local/bin` and runs `rvn install --watch`: it connects Claude
 Code, Codex and pi (installed yet or not), starts the background service (systemd on
 Linux and WSL, launchd on macOS), and sets distillation to the Claude Code or Codex you
 are signed in to when no model is configured. Then, after your first session:
 
 ```sh
-mnem doctor    # ends with "status: OK"; the viewer is at http://127.0.0.1:37777
+rvn doctor    # ends with "status: OK"; the viewer is at http://127.0.0.1:37777
 ```
 
 The first run downloads the embedding model (about 90 MB, once). Linux with glibc 2.39
 or newer (Ubuntu 24.04, Debian 13, Fedora 40) gets the full build; glibc 2.35 to 2.38
 (Ubuntu 22.04, Debian 12) gets a lite build without ONNX Runtime, whose prebuilt library
 needs glibc 2.38: meaning search then uses the small potion model, everything else is the
-same. Intel Macs get the lite build too, since ONNX Runtime ships no library for them. Windows: use WSL. `MNEM_VERSION=v0.2.0`
-picks a release, `MNEM_BIN_DIR` another folder, `MNEM_NO_SETUP=1` installs only the
+same. Intel Macs get the lite build too, since ONNX Runtime ships no library for them. Windows: use WSL. `RAVNORI_VERSION=v0.6.0`
+picks a release, `RAVNORI_BIN_DIR` another folder, `RAVNORI_NO_SETUP=1` installs only the
 binary. To build from source instead, see Build below.
+
+### Upgrading from mnem
+
+ravnori was called mnem before 0.6.0, and its command is now `rvn`. Install 0.6.0 the
+usual way (the script, the plugin's `/ravnori:setup`, or `rvn install`) and it moves an
+existing mnem setup over by itself:
+
+- `~/.mnem` moves to `~/.ravnori` (database, backups, settings, models, API token) and
+  `~/.mnem` stays as a link to it. `mnem.db` is renamed `ravnori.db` once nothing has it
+  open. Memories mnem distilled keep their ids; their origin becomes `ravnori`.
+- mnem's hooks in Claude Code and Codex are replaced by ravnori's; other hooks are kept.
+- The `mnem` MCP server is removed from Claude Code and Codex, and `ravnori` added. Tools
+  an agent calls are named `ravnori_*` in pi (`mnem_*` before).
+- The `mnem-watch` service is stopped and removed; `ravnori-watch` is started. pi's
+  `extensions/mnem` is replaced by `extensions/ravnori`.
+- The Claude Code plugin is renamed `ravnori@ravnori`; the marketplace maps `mnem` to it.
+- Backups named `mnem-*.db` stay listed, downloadable and restorable.
+
+Every file is backed up before it changes, and a second install finds nothing left to
+move. Until install runs, `rvn` reads `~/.mnem` where it is, so nothing is lost in between.
+
+For one release (0.6.x) the old names still work, and 0.7.0 drops them: the `mnem`
+command (a link to `rvn`, which reminds you of the new name), the `MNEM_*` settings
+(`MNEM_HOME`, `MNEM_UI_PORT`, `MNEM_CONFIG`, `MNEM_CLAUDE_DIRS` and the install script's
+`MNEM_VERSION`, `MNEM_BIN_DIR`, `MNEM_NO_SETUP`), the `~/.mnem` link, and a viewer tab
+opened before the upgrade. Switch scripts to `rvn` and `RAVNORI_*` before then.
 
 Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed: each
 target is built and tested on its own runner (full Linux on Ubuntu 24.04, lite Linux on
@@ -60,22 +86,22 @@ attached to the release.
 
 | Command | What it does |
 |---|---|
-| `mnem backfill` | Ingest every transcript under `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions` (incremental, safe to re-run) |
-| `mnem import` | Import a claude-mem database (read-only snapshot; observation ids are kept) |
-| `mnem install [--dry-run] [--only claude,codex,pi]` | Connect Claude Code, Codex and pi (hooks, MCP tools, pi extension), installed yet or not, then show each one's state. Backs up every file it changes |
-| `mnem doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, which agents are connected, claude-mem comparison |
-| `mnem context --cwd DIR` | The context injected at session start |
-| `mnem search <query>` | Full-text search over captured events |
-| `mnem ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
-| `mnem watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
-| `mnem distill` / `mnem models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
-| `mnem embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
-| `mnem mcp` | MCP server: `search`, `timeline`, `get_observations`, `recall_file`, `remember`, `ask`, `session_start_context` |
-| `mnem ask <question> [--project P \| --all] [--since D --until D] [--as-of T] [--sources]` | Ask about past agent work, answered by your distillation model from the record: memories, your pinned facts, your prompts and agents' replies, citing only sources it was shown (`#id` memories, `E<id>` events), each memory with whether its code is still there. A question about a time ("yesterday", "last week", "on 4 October", "kemarin") is read in your local time and looks in every project unless one is named; others look in this directory's project and never widen on their own. `--since/--until` set the time, `--as-of` replays a past question with only what existed then, `--sources` lists sources without a model |
-| `mnem eval --history history-dev\|history-test` | Score `mnem ask` on real past-work questions replayed as of when they were asked, graded by a judge model (`~/.mnem/eval/history-*.jsonl`; tune on dev, look at test once per change) |
-| `mnem trace [--commits N \| --since REV] [--out DIR]` | [Agent Trace](https://agent-trace.dev) records for this repository's commits: which lines each commit added were written by an agent, by session and model, worked out from the transcripts mnem already holds, so it covers commits made before any tracing tool was installed. Exact line matches only (a floor: files written by shell commands are not seen); edits in other worktrees or clones of the same repository count |
-| `mnem api` | The record API for your own tools (read-only HTTP, token auth): address, token and an example. See [docs/api.md](api.md) |
-| `mnem hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
+| `rvn backfill` | Ingest every transcript under `~/.claude/projects`, `~/.codex/sessions`, `~/.pi/agent/sessions` (incremental, safe to re-run) |
+| `rvn import` | Import a claude-mem database (read-only snapshot; observation ids are kept) |
+| `rvn install [--dry-run] [--only claude,codex,pi]` | Connect Claude Code, Codex and pi (hooks, MCP tools, pi extension), installed yet or not, then show each one's state. Backs up every file it changes |
+| `rvn doctor [--strict]` | Capture coverage, lag, quarantine, lost bytes, which agents are connected, claude-mem comparison |
+| `rvn context --cwd DIR` | The context injected at session start |
+| `rvn search <query>` | Full-text search over captured events |
+| `rvn ui [--port 37777]` | Web viewer: live feed of observations, summaries and prompts across agents, search, context preview (local only) |
+| `rvn watch` | Background reconciliation + distillation; also serves the viewer on :37777 |
+| `rvn distill` / `rvn models` | Tier-1 distillation through the model chain / show the chain and cooldowns |
+| `rvn embed` | Download the local embedding model (Model2Vec, 30 MB) and embed memories for semantic recall |
+| `rvn mcp` | MCP server: `search`, `timeline`, `get_observations`, `recall_file`, `remember`, `ask`, `session_start_context` |
+| `rvn ask <question> [--project P \| --all] [--since D --until D] [--as-of T] [--sources]` | Ask about past agent work, answered by your distillation model from the record: memories, your pinned facts, your prompts and agents' replies, citing only sources it was shown (`#id` memories, `E<id>` events), each memory with whether its code is still there. A question about a time ("yesterday", "last week", "on 4 October", "kemarin") is read in your local time and looks in every project unless one is named; others look in this directory's project and never widen on their own. `--since/--until` set the time, `--as-of` replays a past question with only what existed then, `--sources` lists sources without a model |
+| `rvn eval --history history-dev\|history-test` | Score `rvn ask` on real past-work questions replayed as of when they were asked, graded by a judge model (`~/.ravnori/eval/history-*.jsonl`; tune on dev, look at test once per change) |
+| `rvn trace [--commits N \| --since REV] [--out DIR]` | [Agent Trace](https://agent-trace.dev) records for this repository's commits: which lines each commit added were written by an agent, by session and model, worked out from the transcripts ravnori already holds, so it covers commits made before any tracing tool was installed. Exact line matches only (a floor: files written by shell commands are not seen); edits in other worktrees or clones of the same repository count |
+| `rvn api` | The record API for your own tools (read-only HTTP, token auth): address, token and an example. See [docs/api.md](api.md) |
+| `rvn hook <agent> <event>` | Hook entry point (stdin JSON, Claude Code / Codex protocol) |
 
 ## What the agent sees
 
@@ -87,7 +113,7 @@ something since, a short "meanwhile" update.
 
 ## Configuration
 
-`~/.mnem/config.json` (optional):
+`~/.ravnori/config.json` (optional):
 
 ```json
 {
@@ -118,9 +144,9 @@ something since, a short "meanwhile" update.
   memories (179 vs 149 by gpt-5.6-luna, 141 vs 100 by claude-haiku-4-5) without more
   unhelpful ones. The trade: on the model-written set hit@1 fell 61% to 55% (two cases)
   and on the hand-written set prompts with no answer that still recalled something rose
-  from 1 to 3 of 10. Reproduce with `mnem eval --set real-dev --judge --dump <file>` per
+  from 1 to 3 of 10. Reproduce with `rvn eval --set real-dev --judge --dump <file>` per
   model (judging costs about one LLM call per prompt the first time; later models reuse
-  the cached judgments), then `mnem eval --analyze <files>`. `mnem embed --import <db>` reuses vectors
+  the cached judgments), then `rvn eval --analyze <files>`. `rvn embed --import <db>` reuses vectors
   computed in another copy of the database when the memory text still matches.
   Cross-encoder reranking of the top ten was tried the same way and not adopted: none
   of jina-reranker-v1-turbo-en, bge-reranker-base or jina-reranker-v2-base-multilingual
@@ -129,25 +155,25 @@ something since, a short "meanwhile" update.
   this CPU. That screen only let a reranker reorder and filter the keyword top ten;
   two uses stay untested: scoring a wider pool (keyword ranks 11-60 and meaning-only
   hits) and reordering MCP search results, where seconds of latency are acceptable.
-  `mnem eval --rerank <model> --dump <file>` re-runs the comparison.
+  `rvn eval --rerank <model> --dump <file>` re-runs the comparison.
   A distillation title rule that names the component, file or decision first was not
   adopted either: on 30 chunks with the contents unchanged and only titles rewritten,
   top-5 recall fell from 22 to 18 and titles-only choices to open a memory from 19 to 16;
-  paths and ids replaced the words people ask in. `mnem eval --titles N` (re-distils N
+  paths and ids replaced the words people ask in. `rvn eval --titles N` (re-distils N
   chunks with the candidate rule) and `--titles N --retitle` (rewrites only the titles
   of the last run's chunks) re-run it.
 - `semantic.relevance_cosine` / `fill_cosine` / `search_cosine`: similarity thresholds.
   They depend on the model; tuned defaults exist for potion-8M (0.45 / 0.55 / 0.35)
-  and MiniLM (0.30 / 0.50 / 0.35). Tune others with `mnem eval --set real-dev --judge
+  and MiniLM (0.30 / 0.50 / 0.35). Tune others with `rvn eval --set real-dev --judge
   --dump <file>`, which writes each candidate's cosine and judgment.
-- `mnem eval`: measures recall on test sets in `~/.mnem/eval/` (private; they hold
+- `rvn eval`: measures recall on test sets in `~/.ravnori/eval/` (private; they hold
   your prompts). `--set recall` (model-written questions, `--build N`), `--set vague`
   (hand-written, `"id": null` for prompts nothing should answer), `--set real-dev` /
   `real-test` (real prompts replayed as of when they were typed, `--build-real N`;
   add `--judge` to have the distillation models judge what recall showed, or
   `--judge-model <model>` for a second judge and its agreement with the first), and
   `--set recent-dev` / `recent-test` (`--build-recent N`: prompts of the last 30 days
-  in projects that already held 20 memories mnem distilled itself, at most 6 per
+  in projects that already held 20 memories ravnori distilled itself, at most 6 per
   session and half per project; the `real` sets mostly predate those memories and
   see imported claude-mem ones). Tune on the dev halves; read the test halves only
   to confirm.
@@ -160,15 +186,15 @@ something since, a short "meanwhile" update.
   prompt is scripted: it is not distilled, not offered memories, left out of uptake, and
   the memories already made from it stay out of recall, search and the session-start
   context. Nothing is deleted; change the patterns and the next scan (every distillation
-  pass, or `mnem doctor`, which shows the count) re-marks every session. On this machine
+  pass, or `rvn doctor`, which shows the count) re-marks every session. On this machine
   24 of 2,482 sessions were scripted yet made 17% of a week's distilled memories, and
   9% of the memories shown to real sessions came from them.
 - `distill.provider`: where distillation requests go. `openai` (the default) is any
   OpenAI-compatible endpoint, below. `claude-cli` runs `claude -p` (default model
   `sonnet`) and `codex-cli` runs `codex exec` (default `gpt-5.6-luna`, low effort),
   signed in as the user already is: no key, no proxy. Each run is isolated: an empty
-  directory, no saved session, no tools, no MCP servers, no hooks (mnem's own included)
-  and none of the user's settings or instructions. With nothing configured, `mnem install`
+  directory, no saved session, no tools, no MCP servers, no hooks (ravnori's own included)
+  and none of the user's settings or instructions. With nothing configured, `rvn install`
   picks Claude Code, else Codex, and sets `daily_calls` to 100. Chosen on 30 real session
   chunks judged blind against luna by two models: sonnet and codex with luna matched
   it, haiku made up more details and lost (so it is not the default). On a Claude plan a
@@ -178,26 +204,26 @@ something since, a short "meanwhile" update.
   in order; a model that hits quota or rate limits (HTTP 402/429) cools down for 30 min,
   an unavailable one (403/404) for 6 h, a failing one (5xx, timeout) for 5 min. With
   `auto_fallback`, any other text model the endpoint lists is tried next, cheapest-looking
-  first. `mnem models` shows the live order and cooldowns.
+  first. `rvn models` shows the live order and cooldowns.
 - `distill.backfill_days` (default 7) / `distill.daily_calls` (default 300; 0 = backfill
   off): every 5 minutes, on its own thread so capture never waits on a model, the watcher
   distils the newest idle sessions of the last 2 days, then the ones that pass missed,
   oldest first, back to `backfill_days`. Every background request counts toward
   `daily_calls` over the last 24 hours: the per-turn Stop hook, the watcher's pass over
   recent sessions and backfill (fallbacks to other models count too). At the limit, work
-  waits undistilled, never lost, until the window frees, and `mnem doctor` says so. With
-  `daily_calls` 0, backfill is off and the other two run unlimited. A `mnem distill` you
+  waits undistilled, never lost, until the window frees, and `rvn doctor` says so. With
+  `daily_calls` 0, backfill is off and the other two run unlimited. A `rvn distill` you
   run yourself is not limited. Backfill
   covers sessions from `backfill_days` before the watcher first ran; older ones wait for
-  `mnem distill --since-days 30 --limit 1000 --max-calls 200` (newest first; repeat
+  `rvn distill --since-days 30 --limit 1000 --max-calls 200` (newest first; repeat
   until done, `--dry-run` shows the cost). A session whose last chunk is too small to
   distil leaves the backlog after a day idle and is read again if it resumes.
-  `mnem doctor` shows the backlog; a warning appears when sessions are about to leave
+  `rvn doctor` shows the backlog; a warning appears when sessions are about to leave
   the window and backfill will not reach them.
 
 ## Memories about a file
 
-When Claude Code or pi first reads or edits a file in a session, mnem adds up to three
+When Claude Code or pi first reads or edits a file in a session, ravnori adds up to three
 past memories about that file (those that changed it first; never the session's own,
 never one the session was already shown), each with whether the lines its session
 left in the file are still there: all or most of them (4 in 5), partly (how many), or
@@ -212,8 +238,8 @@ after the memory, uncommitted edits, lines added and removed, or that the file i
 On 460 recent memory-file pairs, 354 could be told: 268 still had their lines, 77
 partly, 9 not, where the file-level check called nearly all of them changed. It takes
 about 60 ms, once per file per session. Claude Code gets them from a PostToolUse hook; pi's extension appends them
-to the read, edit or write result (`mnem file <path> --touch`, at most 2.5 s). Any agent can ask with the MCP tool `recall_file(path)`, and people with
-`mnem file <path>`; `get_observations` also says, per file a memory touched, whether
+to the read, edit or write result (`rvn file <path> --touch`, at most 2.5 s). Any agent can ask with the MCP tool `recall_file(path)`, and people with
+`rvn file <path>`; `get_observations` also says, per file a memory touched, whether
 its edits are still there and how the file changed since.
 
 Recorded paths are placed before they are compared: a relative path is resolved
@@ -233,14 +259,14 @@ higher: with the file name hidden, 51% were judged helpful on the tuning half. S
 are about as useful as prompt recall, and they add what prompt recall does not find. The recall gate checks it on every change. Codex edits
 through apply_patch and asks to re-trust changed hooks, so it uses `recall_file`.
 
-## Is it used? `mnem uptake`
+## Is it used? `rvn uptake`
 
-Evals say whether recalled memories would help; `mnem uptake` says what agents do with
-them. Every memory mnem injects is recorded with its source (session start, prompt
-recall, file recall), every call to mnem's MCP tools with the memories it asked for,
+Evals say whether recalled memories would help; `rvn uptake` says what agents do with
+them. Every memory ravnori injects is recorded with its source (session start, prompt
+recall, file recall), every call to ravnori's MCP tools with the memories it asked for,
 and every hook run with its duration. The report shows, per source, how many offered
 memories were fetched in full within a day in the same project or cited by id (`#123`)
-in the agent's replies, MCP calls per tool, and hook p50/p95. `mnem doctor` prints a
+in the agent's replies, MCP calls per tool, and hook p50/p95. `rvn doctor` prints a
 one-line summary. Transcripts keep neither hook context nor MCP arguments, so counting
 starts when this is installed.
 
@@ -250,11 +276,11 @@ Build the change, then run the new build's gate before installing it:
 
 ```sh
 cargo build --release --features fastembed
-target/release/mnem eval --gate                      # this build vs the installed mnem
-mnem eval --gate --candidate-config new-config.json  # a settings change instead
+target/release/rvn eval --gate                      # this build vs the installed ravnori
+rvn eval --gate --candidate-config new-config.json  # a settings change instead
 ```
 
-It runs the installed mnem and the candidate one after the other on one frozen copy
+It runs the installed ravnori and the candidate one after the other on one frozen copy
 of the database and the same cached judgments (live sessions cannot move one run and
 not the other), over the
 model-written, hand-written and both real-prompt (tuning half) test sets, and exits 1 if
@@ -285,11 +311,11 @@ candidates are judged once by the configured models and cached.
 
 ## Backups
 
-`mnem watch` takes a verified backup when the newest is a day old and keeps the seven
-newest in `~/.mnem/backups/` (about the database's size each). To back up only by hand,
+`rvn watch` takes a verified backup when the newest is a day old and keeps the seven
+newest in `~/.ravnori/backups/` (about the database's size each). To back up only by hand,
 untick **Back up automatically every day** under **Backup & move** in the viewer, or run
-`mnem backup --auto off` (`--auto on` turns it back on). Then backups are taken only with
-**Create backup now** or `mnem backup`, and a missing or old backup is no longer an
+`rvn backup --auto off` (`--auto on` turns it back on). Then backups are taken only with
+**Create backup now** or `rvn backup`, and a missing or old backup is no longer an
 alert.
 
 ## Moving to another machine
@@ -299,36 +325,36 @@ In the viewer (http://127.0.0.1:37777), open **Backup & move**:
 1. On the old machine, **Create backup now**, then **Download**. The file holds every
    session, event and memory plus your settings (config.json names key files; it never
    holds keys). It holds your full history, so keep it private.
-2. On the new machine, install mnem (`mnem install`), open the viewer, **Choose backup
+2. On the new machine, install ravnori (`rvn install`), open the viewer, **Choose backup
    file**. It is uploaded and checked on a scratch copy (integrity, schema, search);
    you see it next to what this machine holds. Nothing changes until you confirm.
-3. **Replace** restores it through SQLite's online-backup API. mnem first takes the
+3. **Replace** restores it through SQLite's online-backup API. ravnori first takes the
    database's write lock, then saves the current memory, then copies, so no write can
    fall between the two. Only data is taken from the file: its triggers, views and
    indexes are dropped and rebuilt from this build. Settings are off by default; the
    preview lists every setting that would change and flags any that change where
-   prompts go or which key is used. After ticking them, **Restart mnem** (as a service
+   prompts go or which key is used. After ticking them, **Restart ravnori** (as a service
    it comes back in about 10 s). Transcripts on the new machine are read again
    afterwards, so its own sessions return; the old machine's are kept as history and
-   `mnem doctor` lists them as from another machine.
+   `rvn doctor` lists them as from another machine.
 
 Needs free space for about twice the backup plus the current database. A backup whose
 settings use `fastembed:` models needs a build with `--features fastembed`; the preview
 says so. The watch service downloads a missing embedding model when it starts (internet
 required) and re-embeds memories in the background; recall uses keywords until then.
-The viewer's restart button appears only when mnem runs as the service `mnem install
+The viewer's restart button appears only when ravnori runs as the service `rvn install
 --watch` sets up, which restarts it: a systemd user unit with `Restart=always` on Linux
 and WSL, a launchd agent with `KeepAlive` on macOS.
 
-From a shell: `mnem backup`, copy `~/.mnem/backups/mnem-*.db`, then
-`mnem restore <file> --apply [--settings]`. Automatic backups carry settings too.
+From a shell: `rvn backup`, copy `~/.ravnori/backups/ravnori-*.db`, then
+`rvn restore <file> --apply [--settings]`. Automatic backups carry settings too.
 
 ## Learning from a teammate's memory (merge)
 
 A teammate sends you a backup from their machine. Choose it in **Backup & move** and pick
 **Merge into my memory** (the default for a backup from another machine; for your own
 backup the default is **Replace**). From a shell:
-`mnem restore <file> --merge [--prefix ana]` shows what it would add, and `--apply`
+`rvn restore <file> --merge [--prefix ana]` shows what it would add, and `--apply`
 merges.
 
 - **Nothing of yours changes.** Every session, event, memory and pin already here stays
@@ -341,20 +367,20 @@ merges.
   the viewer shows it as `ana/shop`. Projects only they have keep their name.
 - **Merging again adds only what is new.** The same backup twice adds nothing; a newer
   backup from the same teammate, with the same prefix, adds their new sessions to the
-  same places (mnem remembers where each of their projects went).
+  same places (ravnori remembers where each of their projects went).
 - **What you forgot stays forgotten.** A session, project, event or memory you deleted
-  with `mnem forget` is not brought back by a merge. A session that is already here
+  with `rvn forget` is not brought back by a merge. A session that is already here
   (the same agent session id) is left out too.
-- **Their sessions are history.** Their transcripts are on their machine, so mnem never
+- **Their sessions are history.** Their transcripts are on their machine, so ravnori never
   re-reads or re-distils those sessions here; their memories come with them, each still
-  citing the events behind it. Search, `mnem ask` and the viewer cover them.
+  citing the events behind it. Search, `rvn ask` and the viewer cover them.
 - **Safe to stop.** The current memory is saved as a verified backup first, and the merge
   is one transaction: a failure leaves nothing half merged. The backup is checked and
   sanitised the same way as for a replace.
 
-Into an empty mnem, a merge would be a replace, so only **Replace** is offered there.
+Into an empty ravnori, a merge would be a replace, so only **Replace** is offered there.
 
-The viewer's changing actions are POSTs that need an `X-Mnem` header from the viewer's
+The viewer's changing actions are POSTs that need an `X-Ravnori` header from the viewer's
 own origin, so another website open in the browser cannot trigger them.
 
 ## Guarantees and limits
@@ -376,34 +402,34 @@ own origin, so another website open in the browser cannot trigger them.
 
 ```sh
 cargo install --path . --locked --features fastembed   # --features fastembed: semantic recall
-mnem install --dry-run   # what it would change
-mnem install --watch     # connect the agents, start the background service (systemd;
+rvn install --dry-run   # what it would change
+rvn install --watch     # connect the agents, start the background service (systemd;
                          # launchd on macOS), and pick
                          # Claude Code or Codex for distillation if no model is set
-mnem doctor              # ends with "status: OK"
+rvn doctor              # ends with "status: OK"
 ```
 
-### Agents installed before or after mnem
+### Agents installed before or after ravnori
 
-The order does not matter. `mnem install` writes each agent's part whether the agent
+The order does not matter. `rvn install` writes each agent's part whether the agent
 is installed yet or not (Claude Code's tools too, without its `claude` command), so an
 agent installed later gets memory from its first session. Two cases need a step:
 
-- **Codex** runs a hook only after you trust it: on its first start after `mnem
-  install` it says hooks need review; type `/hooks` and trust mnem's.
-- **An agent reinstalled or reset** can lose mnem's entries.
+- **Codex** runs a hook only after you trust it: on its first start after `ravnori
+  install` it says hooks need review; type `/hooks` and trust ravnori's.
+- **An agent reinstalled or reset** can lose ravnori's entries.
 
-`mnem doctor` lists every agent as connected, not installed, not connected (with what
+`rvn doctor` lists every agent as connected, not installed, not connected (with what
 is missing), or waiting for Codex trust. The viewer (http://127.0.0.1:37777) shows the
 same above the feed when an installed agent is not connected, with a **Connect**
-button that does what `mnem install --only <agent>` does.
+button that does what `rvn install --only <agent>` does.
 
-Data lives in `~/.mnem/mnem.db` (override with `MNEM_HOME` or `--db`).
+Data lives in `~/.ravnori/ravnori.db` (override with `RAVNORI_HOME` or `--db`).
 
 ## Licence
 
-mnem is free software under the [GNU Affero General Public License v3.0](../LICENSE): use
-it, change it and share it, including at work. If you distribute a modified mnem, or run
+ravnori is free software under the [GNU Affero General Public License v3.0](../LICENSE): use
+it, change it and share it, including at work. If you distribute a modified ravnori, or run
 one as a service for others, you share your changes under the same licence. A commercial
 licence is available for uses the AGPL does not suit. Third-party components and their
 licences are listed in `NOTICE` and, in each release, `THIRD-PARTY-LICENSES.txt`.

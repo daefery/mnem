@@ -61,7 +61,7 @@ that appear in the digest; never invent one.
 Use 0-5 observations; return an empty list when nothing durable happened. summary may be null."#;
 
 /// The title rule in SYSTEM, and a candidate that names what the memory is about first
-/// (`mnem eval --titles` compares them).
+/// (`rvn eval --titles` compares them).
 pub(crate) const TITLE_RULE: &str = r#"title: under 12 words, states the outcome ("Retry loop now backs off on 429"), not the activity."#;
 pub(crate) const TITLE_RULE_NAMED: &str = r#"title: under 12 words. Start with the specific thing it concerns (the component, file,
 command, setting or decision, named as the code or the team names it), then the outcome
@@ -179,11 +179,11 @@ pub fn not_configured(c: &crate::config::DistillConfig) -> Option<&'static str> 
         .and_then(crate::cli_llm::Cli::from_name)
     {
         return crate::cli_llm::locate(cli).is_none().then_some(
-            "no memories are being made: distillation is set to a command line that is not installed (distill.provider in ~/.mnem/config.json; run `mnem install` again to pick one)",
+            "no memories are being made: distillation is set to a command line that is not installed (distill.provider in ~/.ravnori/config.json; run `rvn install` again to pick one)",
         );
     }
     (c.api_key_env.is_none() && c.api_key_json.is_none()).then_some(
-        "no memories are being made: distillation has no model configured (install Claude Code or Codex and run `mnem install` again, or set distill.api_key_env or distill.api_key_json in ~/.mnem/config.json; see docs/reference.md · Configuration)",
+        "no memories are being made: distillation has no model configured (install Claude Code or Codex and run `rvn install` again, or set distill.api_key_env or distill.api_key_json in ~/.ravnori/config.json; see docs/reference.md · Configuration)",
     )
 }
 
@@ -237,7 +237,7 @@ impl Llm {
                 .context("api key field missing")?
                 .to_string()
         } else {
-            bail!("configure distill.api_key_env or distill.api_key_json in ~/.mnem/config.json")
+            bail!("configure distill.api_key_env or distill.api_key_json in ~/.ravnori/config.json")
         };
         let mut chain: Vec<String> = c.model.iter().cloned().collect();
         match &c.models {
@@ -729,7 +729,7 @@ mod chain_tests {
         let d = crate::TempDir::new("retitle");
         let conn = db::open(&d.join("m.db")).unwrap();
         conn.execute(
-            "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1, 'observation', 'Bug fixed', 'mnem', 'x')",
+            "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1, 'observation', 'Bug fixed', 'ravnori', 'x')",
             [],
         )
         .unwrap();
@@ -961,7 +961,7 @@ pub struct Options {
     pub verbose: bool,
     /// Stop once all distillation in the last 24 hours has sent this many requests.
     /// Checked under the distill lock before every call. Background passes (the watcher,
-    /// the per-turn Stop hook) use `daily_budget()`; only a person running `mnem distill`
+    /// the per-turn Stop hook) use `daily_budget()`; only a person running `rvn distill`
     /// by hand goes without one.
     pub budget: Option<usize>,
 }
@@ -1018,7 +1018,7 @@ pub fn recent_budget() -> Option<usize> {
 }
 
 /// Where the watcher's backfill starts: `backfill_days` before it first ran. Sessions
-/// older than that were never promised and wait for a deliberate `mnem distill`.
+/// older than that were never promised and wait for a deliberate `rvn distill`.
 /// Recorded when the watcher starts, whatever budget is left, so the line never moves.
 pub fn backfill_since(conn: &Connection) -> Result<i64> {
     if let Some(t) = backfill_start(conn) {
@@ -1450,7 +1450,7 @@ pub(crate) fn store(
         let mut ins = tx.prepare_cached(
             "INSERT OR IGNORE INTO memories(session_id, project, kind, type, title, subtitle, narrative, facts, concepts,
                  files_read, files_modified, data, origin, origin_id, model, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'mnem', ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'ravnori', ?13, ?14, ?15)",
         )?;
         let observations = v
             .get("observations")
@@ -1467,7 +1467,7 @@ pub(crate) fn store(
                 .and_then(Value::as_str)
                 .filter(|t| TYPES.contains(t))
                 .unwrap_or("discovery");
-            if crate::forget::memory_forgotten(&tx, "mnem", &format!("{base}#{i}"))? {
+            if crate::forget::memory_forgotten(&tx, "ravnori", &format!("{base}#{i}"))? {
                 continue;
             }
             let cited = cited_ids(&o["evidence"], &c.shown);
@@ -1508,7 +1508,7 @@ pub(crate) fn store(
                 .join("\n");
             let request = field(s, "request");
             if !(request.is_empty() && narrative.is_empty())
-                && !crate::forget::memory_forgotten(&tx, "mnem", &format!("{base}#summary"))?
+                && !crate::forget::memory_forgotten(&tx, "ravnori", &format!("{base}#summary"))?
             {
                 n_sum = ins.execute(params![
                     sid,

@@ -1,5 +1,5 @@
-//! `mnem trace`: Agent Trace records (agent-trace.dev, v0.1.0) for git commits, built
-//! from the transcripts mnem already holds, so attribution covers commits made before any
+//! `rvn trace`: Agent Trace records (agent-trace.dev, v0.1.0) for git commits, built
+//! from the transcripts ravnori already holds, so attribution covers commits made before any
 //! tracing tool was installed.
 //!
 //! A line a commit adds is attributed to an agent session when that exact line (trimmed,
@@ -307,7 +307,8 @@ fn attribute(added: &[(u64, String)], written: &HashMap<String, Written>) -> Vec
     out
 }
 
-/// A stable UUID for a commit's record, so exporting twice gives the same id.
+/// A stable UUID for a commit's record, so exporting twice gives the same id. The seed
+/// keeps ravnori's earlier name: records already exported keep their ids.
 fn record_id(sha: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut b: [u8; 16] = Sha256::digest(format!("mnem-agent-trace:{sha}").as_bytes())[..16]
@@ -413,7 +414,7 @@ pub fn records(conn: &Connection, root: &Path, commits: &[String]) -> Result<(Ve
                         contributor["model_id"] = json!(m);
                     }
                     json!({
-                        "url": format!("mnem://session/{session}"),
+                        "url": format!("ravnori://session/{session}"),
                         "contributor": contributor,
                         "ranges": ranges.iter().map(|(a, b)| json!({ "start_line": a, "end_line": b })).collect::<Vec<_>>(),
                     })
@@ -433,9 +434,9 @@ pub fn records(conn: &Connection, root: &Path, commits: &[String]) -> Result<(Ve
             "id": record_id(&full),
             "timestamp": timestamp,
             "vcs": { "type": "git", "revision": full },
-            "tool": { "name": "mnem", "version": env!("CARGO_PKG_VERSION") },
+            "tool": { "name": "ravnori", "version": env!("CARGO_PKG_VERSION") },
             "files": files,
-            "metadata": { "dev.mnem": {
+            "metadata": { "dev.ravnori": {
                 "added_lines": n_added,
                 "attributed_lines": n_ai,
                 "method": "exact match of the lines the commit added (12+ characters) against lines agents wrote to the file with edit tool calls in the 14 days before it, read from their transcripts; files written by shell commands are not seen, so this is a floor",
@@ -572,10 +573,10 @@ mod tests {
         assert_eq!(f["path"], "src/a.rs");
         let conv = &f["conversations"][0];
         assert_eq!(conv["contributor"]["model_id"], "anthropic/claude-opus-5-5");
-        assert_eq!(conv["url"], "mnem://session/claude:s1");
+        assert_eq!(conv["url"], "ravnori://session/claude:s1");
         assert_eq!(conv["ranges"], json!([{ "start_line": 2, "end_line": 2 }]));
-        assert_eq!(recs[0]["metadata"]["dev.mnem"]["added_lines"], 4);
-        assert_eq!(recs[0]["metadata"]["dev.mnem"]["attributed_lines"], 1);
+        assert_eq!(recs[0]["metadata"]["dev.ravnori"]["added_lines"], 4);
+        assert_eq!(recs[0]["metadata"]["dev.ravnori"]["attributed_lines"], 1);
         // Commit 2 (rebased, committed 6 h later) added line 4, written by the agent
         // between the commits; line 2, written before commit 1, is not added again.
         assert_eq!(

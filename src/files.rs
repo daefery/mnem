@@ -8,7 +8,7 @@
 //! - absolute inside this repository: compared exactly;
 //! - otherwise (another machine, another checkout): the two paths must end alike at a
 //!   directory boundary, and for an absolute path the repository's name must appear
-//!   before that ending (`/Users/x/code/mnem/src/embed.rs` is mnem's `src/embed.rs`;
+//!   before that ending (`/Users/x/code/ravnori/src/embed.rs` is ravnori's `src/embed.rs`;
 //!   `.../node_modules/pkg/extensions/index.ts` is not firstmate's). A lone file name
 //!   only matches on its own.
 //!
@@ -559,7 +559,7 @@ fn touch_text(conn: &Connection, t: &Target, found: &[About]) -> String {
     let h = history(&t.root, &t.rel);
     let now = crate::db::now_ms();
     let mut w = format!(
-        "mnem: past memories about {} (full text: get_observations([ids]))\n",
+        "ravnori: past memories about {} (full text: get_observations([ids]))\n",
         t.rel
     );
     let mut stale = Vec::new();
@@ -771,7 +771,7 @@ fn is_rel(recorded: &str, rel: &str) -> bool {
 pub fn edits_kept(conn: &Connection, id: i64, root: &Path, rel: &str) -> Result<Option<Kept>> {
     let origin: Option<(String, String)> = conn
         .query_row(
-            "SELECT coalesce(session_id, ''), coalesce(origin_id, '') FROM memories WHERE id = ?1 AND origin = 'mnem'",
+            "SELECT coalesce(session_id, ''), coalesce(origin_id, '') FROM memories WHERE id = ?1 AND origin = 'ravnori'",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -981,14 +981,14 @@ mod tests {
 
     #[test]
     fn recorded_paths_are_placed_before_they_are_compared() {
-        let root = Path::new("/home/me/code/mnem");
-        let p = at("src/embed.rs", Some(root), "github.com/daefery/mnem");
+        let root = Path::new("/home/me/code/ravnori");
+        let p = at("src/embed.rs", Some(root), "github.com/daefery/ravnori");
         assert!(names_file("src/embed.rs", None, &p));
         assert!(names_file("./src/embed.rs", None, &p));
-        assert!(names_file("/home/me/code/mnem/src/embed.rs", None, &p));
+        assert!(names_file("/home/me/code/ravnori/src/embed.rs", None, &p));
         assert!(names_file("src\\embed.rs", None, &p));
         // Another machine: the repository's name is in the path.
-        assert!(names_file("/Users/x/code/mnem/src/embed.rs", None, &p));
+        assert!(names_file("/Users/x/code/ravnori/src/embed.rs", None, &p));
         // Another project's file with the same ending is not this one.
         assert!(!names_file(
             "/home/me/.pi/node_modules/pkg/src/embed.rs",
@@ -996,12 +996,16 @@ mod tests {
             &p
         ));
         assert!(!names_file("src/embedder.rs", None, &p));
-        assert!(!names_file("/home/me/code/mnem/lib/src/embed.rs", None, &p));
+        assert!(!names_file(
+            "/home/me/code/ravnori/lib/src/embed.rs",
+            None,
+            &p
+        ));
         // A lone name matches only itself.
-        let readme = at("README.md", Some(root), "github.com/daefery/mnem");
+        let readme = at("README.md", Some(root), "github.com/daefery/ravnori");
         assert!(names_file("README.md", None, &readme));
         assert!(!names_file("docs/README.md", None, &readme));
-        assert!(names_file("/Users/x/code/mnem/README.md", None, &readme));
+        assert!(names_file("/Users/x/code/ravnori/README.md", None, &readme));
         assert!(!names_file("/Users/x/other/README.md", None, &readme));
         // `..` is applied, not matched literally.
         assert!(names_file("docs/../src/embed.rs", None, &p));
@@ -1069,7 +1073,7 @@ mod tests {
         let add = |id: i64, project: &str, files: &str, created: i64| {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
-                 VALUES (?1, ?2, 'observation', 'bugfix', 't', ?3, 'mnem', ?1, ?4)",
+                 VALUES (?1, ?2, 'observation', 'bugfix', 't', ?3, 'ravnori', ?1, ?4)",
                 params![id, project, files, created],
             )
             .unwrap();
@@ -1081,7 +1085,7 @@ mod tests {
         add(6, "github.com/a/r", r#"["C:\\work\\r\\src\\embed.rs"]"#, 60);
         c.execute(
             "INSERT INTO memories(id, project, kind, type, title, files_read, origin, origin_id, created_at)
-             VALUES (5, 'github.com/a/r', 'observation', 'discovery', 'r', '[\"src/embed.rs\"]', 'mnem', 5, 50)",
+             VALUES (5, 'github.com/a/r', 'observation', 'discovery', 'r', '[\"src/embed.rs\"]', 'ravnori', 5, 50)",
             [],
         )
         .unwrap();
@@ -1212,7 +1216,7 @@ mod tests {
         let add = |id: i64, created: i64| {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
-                 VALUES (?1, ?2, 'observation', 'bugfix', ?3, '[\"src/a.rs\"]', 'mnem', ?1, ?4)",
+                 VALUES (?1, ?2, 'observation', 'bugfix', ?3, '[\"src/a.rs\"]', 'ravnori', ?1, ?4)",
                 params![id, t.project, format!("memory {id}"), created],
             )
             .unwrap();
@@ -1345,7 +1349,7 @@ mod tests {
         .unwrap();
         let memory = |id: i64, range: &str| {
             c.execute(
-                "INSERT INTO memories(id, session_id, project, kind, title, origin, origin_id) VALUES (?1, 's', 'p', 'observation', 't', 'mnem', ?2)",
+                "INSERT INTO memories(id, session_id, project, kind, title, origin, origin_id) VALUES (?1, 's', 'p', 'observation', 't', 'ravnori', ?2)",
                 params![id, format!("s@{range}#0")],
             )
             .unwrap();
@@ -1414,7 +1418,7 @@ mod tests {
         for (id, file) in [(1, "src/shared.rs"), (2, "lib/only.rs")] {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, files_modified, origin, origin_id, created_at)
-                 VALUES (?1, 'p', 'observation', 'bugfix', 't', ?2, 'mnem', ?1, 1)",
+                 VALUES (?1, 'p', 'observation', 'bugfix', 't', ?2, 'ravnori', ?1, 1)",
                 params![id, format!("[\"{file}\"]")],
             )
             .unwrap();

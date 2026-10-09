@@ -1231,28 +1231,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mnem"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "clap",
- "fastembed",
- "flate2",
- "libc",
- "model2vec-rs",
- "rayon",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "toml_edit",
- "ureq 3.4.2",
- "walkdir",
- "xxhash-rust",
-]
-
-[[package]]
 name = "model2vec-rs"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1640,6 +1618,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "ravnori"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "fastembed",
+ "flate2",
+ "libc",
+ "model2vec-rs",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml_edit",
+ "ureq 3.4.2",
+ "walkdir",
+ "xxhash-rust",
 ]
 
 [[package]]

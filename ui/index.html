@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>mnem</title>
+  <title>ravnori</title>
   <link rel="icon" href="/logo.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/style.css">
 </head>
@@ -11,13 +11,20 @@
   <div class="header">
     <div class="header-main">
       <h1>
-        <img src="/logo.svg" alt="" class="mnem-logomark" id="logomark">
-        <span class="logo-text">mnem</span>
+        <svg class="ravnori-logomark" id="logomark" viewBox="0 0 132 132" aria-hidden="true">
+          <g transform="translate(1 1)">
+            <path class="logo-ink" d="M19 44L65 20L111 44L65 68Z"/>
+            <path class="logo-line" d="M19 66L65 90L111 66"/>
+            <path class="logo-line" d="M19 88L65 112L111 88"/>
+            <circle class="logo-dot" cx="65" cy="44" r="9"/>
+          </g>
+        </svg>
+        <span class="logo-text">ravnori</span>
       </h1>
     </div>
     <div class="status">
-      <input class="mnem-search" id="search" type="search" placeholder="Search memory…" autocomplete="off">
-      <span class="mnem-health" id="health" title="Capture health">
+      <input class="ravnori-search" id="search" type="search" placeholder="Search memory…" autocomplete="off">
+      <span class="ravnori-health" id="health" title="Capture health">
         <span class="dot"></span><span class="label" id="health-label">…</span>
       </span>
       <select id="project">
@@ -43,7 +50,7 @@
 
   <div class="feed" id="feed">
     <div class="feed-column">
-      <div class="mnem-agents" id="agents" role="status" hidden></div>
+      <div class="ravnori-agents" id="agents" role="status" hidden></div>
       <div class="feed-content" id="feed-content"></div>
     </div>
   </div>

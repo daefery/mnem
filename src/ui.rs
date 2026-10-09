@@ -1,9 +1,9 @@
-//! `mnem ui`: a local web viewer for the memory database.
+//! `rvn ui`: a local web viewer for the memory database.
 //!
 //! A deliberately small HTTP/1.1 server (one thread per connection, no framework). It
 //! binds to 127.0.0.1 and rejects requests whose Host header is not local, so other
 //! sites in the browser cannot read memory via DNS rebinding. The few actions that
-//! change anything (take a backup, import one) are POSTs that must carry an `X-Mnem`
+//! change anything (take a backup, import one) are POSTs that must carry an `X-Ravnori`
 //! header and come from the viewer's own origin: a page on another site cannot send
 //! that header without a CORS preflight, which this server never grants.
 
@@ -52,7 +52,7 @@ const ICONS: &[(&str, &str)] = &[
 pub fn serve(db_path: PathBuf, port: u16, bound: impl FnOnce()) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))?;
     bound();
-    println!("mnem ui: http://127.0.0.1:{port}/  (Ctrl-C to stop)");
+    println!("rvn ui: http://127.0.0.1:{port}/  (Ctrl-C to stop)");
     static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
@@ -65,7 +65,7 @@ pub fn serve(db_path: PathBuf, port: u16, bound: impl FnOnce()) -> Result<()> {
         let db_path = db_path.clone();
         std::thread::spawn(move || {
             if let Err(e) = handle(stream, &db_path, port) {
-                eprintln!("mnem ui: {e:#}");
+                eprintln!("rvn ui: {e:#}");
             }
             ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
@@ -155,7 +155,7 @@ fn handle(mut stream: TcpStream, db_path: &Path, port: u16) -> Result<()> {
         Response::text(
             "403 Forbidden",
             "text/plain",
-            "mnem ui only answers local requests\n",
+            "rvn ui only answers local requests\n",
         )
     } else if method == "GET" && (path == "/v1" || path.starts_with("/v1/")) {
         let reply = crate::api::handle(&path[3..], &parse_query(query), &headers, db_path);
@@ -285,8 +285,10 @@ fn same_origin(
     headers: &HashMap<String, String>,
     host: &str,
 ) -> std::result::Result<(), &'static str> {
-    if headers.get("x-mnem").map(String::as_str) != Some("1") {
-        return Err("missing X-Mnem header");
+    // X-Mnem: a viewer tab opened before the rename (0.5.x), until it is reloaded.
+    let marked = |h: &str| headers.get(h).map(String::as_str) == Some("1");
+    if !marked("x-ravnori") && !marked("x-mnem") {
+        return Err("missing X-Ravnori header");
     }
     if let Some(origin) = headers.get("origin")
         && origin != &format!("http://{host}")
@@ -444,7 +446,7 @@ fn incoming() -> PathBuf {
     crate::backup::dir().join("incoming")
 }
 
-/// A file name the viewer may serve or act on: produced by mnem, no path parts.
+/// A file name the viewer may serve or act on: produced by ravnori, no path parts.
 fn safe_name<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     (name.starts_with(prefix)
         && name.ends_with(".db")
@@ -492,7 +494,7 @@ fn backups(conn: &Connection, db_path: &Path) -> Result<Value> {
 /// Stream a verified snapshot as a download.
 fn download(path: &str) -> Response {
     let name = path.trim_start_matches("/api/backups/");
-    match safe_name(name, "mnem-") {
+    match safe_name(name, "ravnori-").or_else(|| safe_name(name, "mnem-")) {
         Some(n) if crate::backup::dir().join(n).is_file() => Response {
             status: "200 OK",
             content_type: "application/vnd.sqlite3",
@@ -504,12 +506,15 @@ fn download(path: &str) -> Response {
     }
 }
 
-/// The viewer's actions: take a backup, upload one, restore it, or restart mnem.
+/// The viewer's actions: take a backup, upload one, restore it, or restart ravnori.
 fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> Result<Response> {
     Ok(match path {
         // Delete one backup (and its manifest).
         "/api/backups/remove" => {
-            let Some(name) = q.get("file").and_then(|f| safe_name(f, "mnem-")) else {
+            let Some(name) = q
+                .get("file")
+                .and_then(|f| safe_name(f, "ravnori-").or_else(|| safe_name(f, "mnem-")))
+            else {
                 return Ok(Response::error("400 Bad Request", "not a backup name"));
             };
             match crate::backup::remove(&crate::backup::dir(), name) {
@@ -562,7 +567,7 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
                 return Ok(Response::error(
                     "507 Insufficient Storage",
                     format!(
-                        "importing this backup needs about {} MB free next to mnem's data; {} MB are free",
+                        "importing this backup needs about {} MB free next to ravnori's data; {} MB are free",
                         need / 1_000_000,
                         free / 1_000_000
                     ),
@@ -743,7 +748,7 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             }
             Response::json(&json!({ "discarded": true }))
         }
-        // Connect one agent: what `mnem install --only <agent>` does, reported back.
+        // Connect one agent: what `rvn install --only <agent>` does, reported back.
         "/api/agents/connect" => {
             let Some(agent) = q.get("agent").and_then(|a| crate::agents::Agent::parse(a)) else {
                 return Ok(Response::error("400 Bad Request", "unknown agent"));
@@ -771,14 +776,14 @@ fn post(path: &str, q: &HashMap<String, String>, body: Body, db_path: &Path) -> 
             if !crate::service::supervised_with_restart() {
                 return Ok(Response::error(
                     "409 Conflict",
-                    "mnem is not running as a service that restarts it: restart mnem yourself",
+                    "ravnori is not running as a service that restarts it: restart ravnori yourself",
                 ));
             }
-            // The service manager (systemd Restart=always, launchd KeepAlive) starts mnem
+            // The service manager (systemd Restart=always, launchd KeepAlive) starts ravnori
             // again; answer first, then exit.
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
-                // EX_TEMPFAIL: Restart=always and on-failure both start mnem again.
+                // EX_TEMPFAIL: Restart=always and on-failure both start ravnori again.
                 std::process::exit(75);
             });
             Response::json(&json!({ "restarting": true }))
@@ -1282,7 +1287,7 @@ mod tests {
         for (id, t) in [(1, 201), (2, 202), (3, 203)] {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, 'p', 'observation', 'change', 't', 'mnem', ?1, ?2)",
+                 VALUES (?1, 'p', 'observation', 'change', 't', 'ravnori', ?1, ?2)",
                 [id, t],
             )
             .unwrap();
@@ -1333,7 +1338,7 @@ mod tests {
         for id in 1..=5 {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'mnem', ?1, ?1)",
+                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'ravnori', ?1, ?1)",
                 rusqlite::params![id, format!("watcher restart note {id}")],
             )
             .unwrap();

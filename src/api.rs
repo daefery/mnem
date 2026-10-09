@@ -1,10 +1,10 @@
-//! The record API, v1: a stable, read-only HTTP interface to everything mnem captured, so
+//! The record API, v1: a stable, read-only HTTP interface to everything ravnori captured, so
 //! other tools build on one complete record instead of each parsing agent transcripts.
-//! Served by `mnem watch` (and `mnem ui`) on 127.0.0.1 next to the viewer, under `/v1/`.
+//! Served by `rvn watch` (and `rvn ui`) on 127.0.0.1 next to the viewer, under `/v1/`.
 //!
 //! Contract (docs/api.md): field names and meanings in v1 only ever gain fields, never
 //! lose or change them; anything else is /v2. Every request carries
-//! `Authorization: Bearer <token>`, the token in `~/.mnem/api-token` (owner-only). A web
+//! `Authorization: Bearer <token>`, the token in `~/.ravnori/api-token` (owner-only). A web
 //! page on another site cannot send that header without a CORS preflight, which this
 //! server never answers, and the viewer's Host check stops DNS rebinding, so a browser
 //! cannot read the record; a local tool reads the token file as it could read the
@@ -219,11 +219,11 @@ fn meta(conn: &Connection) -> Result<Reply> {
     };
     Ok(ok(json!({
         "api": VERSION,
-        "mnem": env!("CARGO_PKG_VERSION"),
+        "ravnori": env!("CARGO_PKG_VERSION"),
         "embedding_model": crate::embed::model_name(),
         "counts": { "sessions": count("sessions")?, "events": count("events")?, "memories": count("memories")? },
         "endpoints": ["/v1/sessions", "/v1/sessions/{id}", "/v1/events", "/v1/memories", "/v1/memories/{id}", "/v1/search"],
-        "docs": "https://github.com/daefery/mnem/blob/main/docs/api.md",
+        "docs": "https://github.com/daefery/ravnori/blob/main/docs/api.md",
     })))
 }
 

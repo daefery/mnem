@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use mnem::model::Agent;
-use mnem::{
+use ravnori::model::Agent;
+use ravnori::{
     backup, context, db, distill, doctor, hook, import, ingest, install, mcp, project, search, ui,
 };
 use std::path::PathBuf;
@@ -9,12 +9,12 @@ use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
-    name = "mnem",
+    name = "rvn",
     version,
     about = "Local-first memory for coding agents, built from their own transcripts"
 )]
 struct Cli {
-    /// Database path (default: $MNEM_HOME/mnem.db or ~/.mnem/mnem.db)
+    /// Database path (default: $RAVNORI_HOME/ravnori.db or ~/.ravnori/ravnori.db)
     #[arg(long, global = true)]
     db: Option<PathBuf>,
     #[command(subcommand)]
@@ -35,7 +35,7 @@ enum Cmd {
         agent: Agent,
         /// session-start | prompt | stop | session-end
         event: String,
-        /// Run by the Claude Code plugin: do nothing when `mnem install` already wired
+        /// Run by the Claude Code plugin: do nothing when `rvn install` already wired
         /// this hook into the profile's settings (it would run twice)
         #[arg(long)]
         plugin: bool,
@@ -46,13 +46,13 @@ enum Cmd {
         cwd: Option<String>,
         #[arg(long)]
         project: Option<String>,
-        /// Caller's mnem session id, excluded from "recent" (e.g. claude:<uuid>)
+        /// Caller's ravnori session id, excluded from "recent" (e.g. claude:<uuid>)
         #[arg(long)]
         session: Option<String>,
         #[arg(long, default_value_t = 8000)]
         budget: usize,
     },
-    /// Wire mnem into Claude Code, Codex and pi (backs up every file it changes)
+    /// Wire ravnori into Claude Code, Codex and pi (backs up every file it changes)
     Install {
         /// Print the plan without writing anything
         #[arg(long)]
@@ -60,19 +60,19 @@ enum Cmd {
         /// Comma-separated subset: claude,codex,pi
         #[arg(long, default_value = "claude,codex,pi")]
         only: String,
-        /// mnem binary to register (default: this executable)
+        /// ravnori binary to register (default: this executable)
         #[arg(long)]
         bin: Option<String>,
-        /// Also install and start the `mnem watch` background service (systemd, or launchd on macOS)
+        /// Also install and start the `rvn watch` background service (systemd, or launchd on macOS)
         #[arg(long)]
         watch: bool,
     },
-    /// Remove mnem's hooks, MCP entries and pi extension (keeps the database)
+    /// Remove ravnori's hooks, MCP entries and pi extension (keeps the database)
     Uninstall {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Whether agents use what mnem offers: fetches, citations, MCP calls, hook cost
+    /// Whether agents use what ravnori offers: fetches, citations, MCP calls, hook cost
     Uptake {
         #[arg(long, default_value_t = 7)]
         days: i64,
@@ -113,7 +113,7 @@ enum Cmd {
         #[arg(long)]
         prompt: Option<String>,
     },
-    /// Call an MCP tool from the shell: mnem tool search '{"query":"..."}'
+    /// Call an MCP tool from the shell: rvn tool search '{"query":"..."}'
     Tool {
         name: String,
         #[arg(default_value = "{}")]
@@ -121,7 +121,7 @@ enum Cmd {
     },
     /// Distil captured events into typed observations and summaries (LLM, off the write path)
     Distill {
-        /// Only this mnem session id (e.g. claude:<uuid>)
+        /// Only this ravnori session id (e.g. claude:<uuid>)
         #[arg(long)]
         session: Option<String>,
         #[arg(long, default_value_t = 7)]
@@ -245,14 +245,14 @@ enum Cmd {
         /// Print the cosine distribution of true targets vs best wrong candidates
         #[arg(long)]
         cosines: bool,
-        /// Test set in ~/.mnem/eval: recall (model-written), vague (hand-written),
+        /// Test set in ~/.ravnori/eval: recall (model-written), vague (hand-written),
         /// real-dev or real-test (real prompts, see --build-real)
         #[arg(long, default_value = "recall")]
         set: String,
         /// Sample N real prompts from transcripts into real-dev and real-test
         #[arg(long)]
         build_real: Option<usize>,
-        /// Sample N prompts from the last 30 days, in projects with memories mnem
+        /// Sample N prompts from the last 30 days, in projects with memories ravnori
         /// distilled, into recent-dev and recent-test
         #[arg(long)]
         build_recent: Option<usize>,
@@ -274,11 +274,11 @@ enum Cmd {
         /// Also score each dumped candidate with this reranker (fastembed enum name)
         #[arg(long)]
         rerank: Option<String>,
-        /// Release gate: run the installed mnem and this build on the same data and
+        /// Release gate: run the installed ravnori and this build on the same data and
         /// fail (exit 1) if recall got worse
         #[arg(long)]
         gate: bool,
-        /// The baseline build for --gate (default: the mnem on PATH)
+        /// The baseline build for --gate (default: the ravnori on PATH)
         #[arg(long)]
         baseline: Option<PathBuf>,
         /// Gate a settings change: the candidate runs with this config file
@@ -297,7 +297,7 @@ enum Cmd {
         /// Print this build's gate metrics as JSON (used by --gate)
         #[arg(long, hide = true)]
         gate_metrics: bool,
-        /// Score `mnem ask` on real past-work questions: history-dev (tune on it) or
+        /// Score `rvn ask` on real past-work questions: history-dev (tune on it) or
         /// history-test (look once per change, never tune on it)
         #[arg(long)]
         history: Option<String>,
@@ -305,7 +305,7 @@ enum Cmd {
     /// The record API for other tools: its address, token and an example request
     Api,
     /// Agent Trace records (agent-trace.dev) for this repository's commits: which added
-    /// lines agents wrote, by session and model, from the transcripts mnem holds
+    /// lines agents wrote, by session and model, from the transcripts ravnori holds
     Trace {
         /// Commits after this revision (default: the last --commits)
         #[arg(long)]
@@ -343,7 +343,7 @@ enum Cmd {
         #[arg(long)]
         as_of: Option<String>,
     },
-    /// List pinned facts (forget one with `mnem forget <id>`)
+    /// List pinned facts (forget one with `rvn forget <id>`)
     Pins,
     /// Download the embedding model (once) and embed memories that have no vector yet
     Embed {
@@ -352,18 +352,18 @@ enum Cmd {
         probe: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
-        /// Keep vectors of other models (to compare models with `mnem eval`)
+        /// Keep vectors of other models (to compare models with `rvn eval`)
         #[arg(long)]
         keep: bool,
-        /// First copy this model's vectors from another mnem database where the memory
+        /// First copy this model's vectors from another ravnori database where the memory
         /// text still matches (the rest are embedded as usual)
         #[arg(long)]
         import: Option<PathBuf>,
     },
     /// MCP server over stdio (search, timeline, get_observations, session_start_context)
     Mcp {
-        /// Run by the Claude Code plugin: offer no tools when `mnem install` already
-        /// registered mnem's (they would be listed twice)
+        /// Run by the Claude Code plugin: offer no tools when `rvn install` already
+        /// registered ravnori's (they would be listed twice)
         #[arg(long)]
         plugin: bool,
     },
@@ -387,7 +387,27 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let path = cli.db.unwrap_or_else(|| db::data_dir().join("mnem.db"));
+    ravnori::rename::warn_if_old_name(
+        std::env::args_os().next().as_deref(),
+        matches!(cli.cmd, Cmd::Hook { .. } | Cmd::Mcp { .. }),
+    );
+    // An install from before 0.6.0 keeps its data in ~/.mnem: `rvn install` moves it to
+    // ~/.ravnori first, before anything opens or creates a database. Other commands read
+    // it where it is (db::data_dir) until then.
+    if matches!(cli.cmd, Cmd::Install { dry_run: false, .. }) && cli.db.is_none() {
+        // The old watcher first, so nothing writes to the folder while it moves.
+        match ravnori::rename::remove_old_service(false) {
+            Ok(Some(note)) => println!("{note}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("could not stop mnem's service: {e:#}"),
+        }
+        match ravnori::rename::move_data(false) {
+            Ok(Some(note)) => println!("{note}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("could not move ravnori's data from ~/.mnem: {e:#}"),
+        }
+    }
+    let path = cli.db.unwrap_or_else(db::database_path);
     // The gate never opens the live database for writing (opening can migrate it): it
     // only snapshots it read-only and measures copies.
     if let Cmd::Eval {
@@ -400,14 +420,14 @@ fn main() -> Result<()> {
     {
         return run_gate(&path, baseline.clone(), candidate_config.clone(), !no_judge);
     }
-    // The plugin's copy of a hook `mnem install` already wired does nothing, before the
+    // The plugin's copy of a hook `rvn install` already wired does nothing, before the
     // database is even opened.
     if let Cmd::Hook {
         plugin: true,
         event,
         ..
     } = &cli.cmd
-        && mnem::agents::settings_has_hook(event)
+        && ravnori::agents::settings_has_hook(event)
     {
         return Ok(());
     }
@@ -482,10 +502,11 @@ fn main() -> Result<()> {
                 hook::log(&format!("{} {event}: {e:#}", agent.as_str()));
             }
             // The agent waits for this process to exit, not only for its output. The
-            // timing row is a statistic: while mnem-watch holds the database, drop it
+            // timing row is a statistic: while ravnori-watch holds the database, drop it
             // rather than keep the agent waiting for the lock.
             let _ = conn.busy_timeout(std::time::Duration::from_millis(20));
-            let _ = mnem::uptake::hook_run(&conn, agent.as_str(), &event, t.elapsed().as_millis());
+            let _ =
+                ravnori::uptake::hook_run(&conn, agent.as_str(), &event, t.elapsed().as_millis());
             hook::log(&format!(
                 "{} {event} took {} ms",
                 agent.as_str(),
@@ -521,7 +542,7 @@ fn main() -> Result<()> {
             println!("{ctx}\n---\n{}", fresh.footer(&conn));
         }
         Cmd::Mcp { plugin } => {
-            mcp::serve_with(&conn, plugin && mnem::agents::settings_has_tools())?
+            mcp::serve_with(&conn, plugin && ravnori::agents::settings_has_tools())?
         }
         Cmd::Embed {
             probe,
@@ -529,11 +550,11 @@ fn main() -> Result<()> {
             keep,
             import,
         } => {
-            let name = mnem::embed::model_name();
+            let name = ravnori::embed::model_name();
             let t = Instant::now();
-            mnem::embed::fetch(&name)?;
+            ravnori::embed::fetch(&name)?;
             let t_load = Instant::now();
-            let e = mnem::embed::Embedder::load()?;
+            let e = ravnori::embed::Embedder::load()?;
             println!(
                 "model {name}: ready in {:.1}s, loads in {} ms; vectors keyed {}",
                 t.elapsed().as_secs_f64(),
@@ -550,7 +571,7 @@ fn main() -> Result<()> {
                 );
             }
             if let Some(from) = import {
-                let (copied, skipped) = mnem::embed::import(
+                let (copied, skipped) = ravnori::embed::import(
                     &mut conn,
                     &e.key,
                     e.embed(&["dimension".to_string()])[0].len(),
@@ -561,12 +582,12 @@ fn main() -> Result<()> {
                 );
             }
             let t = Instant::now();
-            let n = mnem::embed::backfill(&mut conn, &e, limit)?;
+            let n = ravnori::embed::backfill(&mut conn, &e, limit)?;
             println!("embedded {n} memories in {:.1}s", t.elapsed().as_secs_f64());
             let pruned = if keep {
                 0
             } else {
-                mnem::embed::prune(&conn, &e)?
+                ravnori::embed::prune(&conn, &e)?
             };
             if pruned > 0 {
                 println!("removed {pruned} vectors of other models or revisions");
@@ -584,32 +605,32 @@ fn main() -> Result<()> {
             let question = question.join(" ");
             anyhow::ensure!(
                 !question.trim().is_empty(),
-                "ask a question, for example: mnem ask why did we drop the merge button"
+                "ask a question, for example: rvn ask why did we drop the merge button"
             );
             let cwd = std::env::current_dir()
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned());
             let here = hook::project_for(&conn, None, cwd.as_deref());
-            let scope = mnem::ask::resolve(
+            let scope = ravnori::ask::resolve(
                 &question,
-                mnem::ask::Asked {
+                ravnori::ask::Asked {
                     project,
                     all,
                     here,
-                    projects: mnem::ask::projects(&conn)?,
+                    projects: ravnori::ask::projects(&conn)?,
                     since,
                     until,
                     as_of,
                     now: db::now_ms(),
-                    offset_min: mnem::when::local_offset_min(),
+                    offset_min: ravnori::when::local_offset_min(),
                 },
             )?;
-            println!("({})\n", mnem::ask::describe(&scope));
-            let mut found = mnem::ask::sources(&conn, &question, &scope)?;
+            println!("({})\n", ravnori::ask::describe(&scope));
+            let mut found = ravnori::ask::sources(&conn, &question, &scope)?;
             // Where else the topic is recorded, when one project was searched: said, never
             // searched on the asker's behalf.
             let elsewhere = match &scope.project {
-                Some(_) => mnem::ask::elsewhere(&conn, &question, &scope)?,
+                Some(_) => ravnori::ask::elsewhere(&conn, &question, &scope)?,
                 None => Vec::new(),
             };
             let print_elsewhere = || {
@@ -639,29 +660,29 @@ fn main() -> Result<()> {
                 print_elsewhere();
                 return Ok(());
             }
-            mnem::ask::add_code_state(&conn, &mut found);
+            ravnori::ask::add_code_state(&conn, &mut found);
             let now = scope.before.unwrap_or_else(db::now_ms);
-            let print_sources = |cited: &[mnem::ask::Ref]| {
+            let print_sources = |cited: &[ravnori::ask::Ref]| {
                 for s in &found {
                     let mark = if cited.contains(&s.id) { "*" } else { " " };
                     println!(
                         "{mark} {} {} · {} ago · {}{}",
                         s.id.tag(),
                         s.kind,
-                        mnem::context::ago(now - s.at),
+                        ravnori::context::ago(now - s.at),
                         if scope.project.is_none() {
                             format!("{} · ", s.project)
                         } else {
                             String::new()
                         },
-                        mnem::text::head(&s.title, 100)
+                        ravnori::text::head(&s.title, 100)
                     );
                     if let Some(code) = &s.code {
                         println!("      {code}");
                     }
                 }
             };
-            let configured = distill::not_configured(&mnem::config::CONFIG.distill).is_none();
+            let configured = distill::not_configured(&ravnori::config::CONFIG.distill).is_none();
             if sources || !configured {
                 print_sources(&[]);
                 print_elsewhere();
@@ -672,10 +693,10 @@ fn main() -> Result<()> {
             }
             let llm = distill::Llm::from_config()?;
             llm.load_cooldowns(&conn);
-            match mnem::ask::answer(&llm, &question, &scope, &found) {
+            match ravnori::ask::answer(&llm, &question, &scope, &found) {
                 Ok((text, cited)) => {
                     println!("{text}\n");
-                    println!("Sources (* cited; full text: mnem search or get_observations):");
+                    println!("Sources (* cited; full text: rvn search or get_observations):");
                     print_sources(&cited);
                     // Nothing cited here: the answer was not in this project.
                     if cited.is_empty() {
@@ -683,7 +704,7 @@ fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    eprintln!("mnem ask: no answer ({e:#}); the best matches:");
+                    eprintln!("rvn ask: no answer ({e:#}); the best matches:");
                     print_sources(&[]);
                 }
             }
@@ -695,10 +716,10 @@ fn main() -> Result<()> {
             out,
         } => {
             let cwd = std::env::current_dir()?;
-            let root = mnem::files::repo_root(&cwd)
+            let root = ravnori::files::repo_root(&cwd)
                 .ok_or_else(|| anyhow::anyhow!("not inside a git repository"))?;
-            let list = mnem::trace::commits(&root, since.as_deref(), commits)?;
-            let (records, totals) = mnem::trace::records(&conn, &root, &list)?;
+            let list = ravnori::trace::commits(&root, since.as_deref(), commits)?;
+            let (records, totals) = ravnori::trace::records(&conn, &root, &list)?;
             match &out {
                 Some(dir) => {
                     std::fs::create_dir_all(dir)?;
@@ -717,7 +738,7 @@ fn main() -> Result<()> {
                 }
             }
             eprintln!(
-                "mnem trace: {} commits, {} added lines, {} written by agents ({:.0}%){}",
+                "rvn trace: {} commits, {} added lines, {} written by agents ({:.0}%){}",
                 totals.commits,
                 totals.added,
                 totals.attributed,
@@ -728,21 +749,21 @@ fn main() -> Result<()> {
             );
         }
         Cmd::Api => {
-            let port = mnem::embed::configured_port();
-            let token = mnem::api::token()?;
+            let port = ravnori::embed::configured_port();
+            let token = ravnori::api::token()?;
             println!(
-                "mnem record API v{} (read-only), served by mnem watch",
-                mnem::api::VERSION
+                "ravnori record API v{} (read-only), served by rvn watch",
+                ravnori::api::VERSION
             );
             println!("  base:  http://127.0.0.1:{port}/v1");
             println!(
                 "  token: {} (in {})",
                 token,
-                mnem::api::token_path().display()
+                ravnori::api::token_path().display()
             );
             println!(
                 "  try:   curl -s -H \"Authorization: Bearer $(cat {})\" http://127.0.0.1:{port}/v1",
-                mnem::api::token_path().display()
+                ravnori::api::token_path().display()
             );
             println!("  docs:  docs/api.md (endpoints: sessions, events, memories, search)");
         }
@@ -771,10 +792,10 @@ fn main() -> Result<()> {
             let n = match &out {
                 Some(p) => {
                     let mut f = std::io::BufWriter::new(std::fs::File::create(p)?);
-                    mnem::eval::export(&conn, &mut f, project.as_deref())?
+                    ravnori::eval::export(&conn, &mut f, project.as_deref())?
                 }
                 None => {
-                    mnem::eval::export(&conn, &mut std::io::stdout().lock(), project.as_deref())?
+                    ravnori::eval::export(&conn, &mut std::io::stdout().lock(), project.as_deref())?
                 }
             };
             eprintln!("export: {n} records");
@@ -802,30 +823,35 @@ fn main() -> Result<()> {
             history,
         } => {
             if let Some(name) = history {
-                let cases = mnem::history_eval::load(&mnem::eval::set_path(&name))?;
+                let cases = ravnori::history_eval::load(&ravnori::eval::set_path(&name))?;
                 let llm = distill::Llm::from_config()?;
                 llm.load_cooldowns(&conn);
                 // Another model family grades, so the answerer never marks its own work.
                 let judge = distill::Llm::from_config()?.only(
                     judge_model
                         .as_deref()
-                        .unwrap_or(mnem::history_eval::JUDGE_MODEL),
+                        .unwrap_or(ravnori::history_eval::JUDGE_MODEL),
                 );
-                let outcomes =
-                    mnem::history_eval::run(&conn, &llm, &judge, &cases, mnem::history_eval::RUNS)?;
+                let outcomes = ravnori::history_eval::run(
+                    &conn,
+                    &llm,
+                    &judge,
+                    &cases,
+                    ravnori::history_eval::RUNS,
+                )?;
                 llm.save_cooldowns(&conn)?;
                 println!("{name}: {} cases", outcomes.len());
-                print!("{}", mnem::history_eval::report(&outcomes));
+                print!("{}", ravnori::history_eval::report(&outcomes));
                 return Ok(());
             }
             if let Some(n) = titles {
-                let compare = mnem::eval::set_path("titles-compare");
+                let compare = ravnori::eval::set_path("titles-compare");
                 let (out, (cases, old, new)) = if retitle {
-                    let out = mnem::eval::set_path("titles-retitled");
-                    let r = mnem::eval::retitle(&path, &compare, &out)?;
+                    let out = ravnori::eval::set_path("titles-retitled");
+                    let r = ravnori::eval::retitle(&path, &compare, &out)?;
                     (out, r)
                 } else {
-                    let r = mnem::eval::titles(&path, n, &compare)?;
+                    let r = ravnori::eval::titles(&path, n, &compare)?;
                     (compare, r)
                 };
                 let pct = |k: usize| 100.0 * k as f64 / cases.max(1) as f64;
@@ -847,33 +873,33 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             if gate_metrics {
-                let m = mnem::gate::metrics(&conn, &path, !no_judge)?;
+                let m = ravnori::gate::metrics(&conn, &path, !no_judge)?;
                 println!("{}", serde_json::to_string(&m)?);
                 return Ok(());
             }
             let _ = (gate, baseline, candidate_config);
             if !analyze.is_empty() {
-                print!("{}", mnem::eval::analyze(&analyze, "cos")?);
+                print!("{}", ravnori::eval::analyze(&analyze, "cos")?);
                 return Ok(());
             }
             if let Some(n) = build_files {
-                let (dev, test) = mnem::eval::build_files(&conn, n)?;
+                let (dev, test) = ravnori::eval::build_files(&conn, n)?;
                 println!("sampled {dev} edits into files-dev and {test} into files-test");
                 return Ok(());
             }
             if let Some(n) = build_real {
-                let (dev, test) = mnem::eval::build_real(&conn, n)?;
+                let (dev, test) = ravnori::eval::build_real(&conn, n)?;
                 println!("sampled {dev} prompts into real-dev and {test} into real-test");
                 return Ok(());
             }
             if let Some(n) = build_recent {
-                let (dev, test) = mnem::eval::build_recent(&conn, n, 30)?;
+                let (dev, test) = ravnori::eval::build_recent(&conn, n, 30)?;
                 println!("sampled {dev} prompts into recent-dev and {test} into recent-test");
                 return Ok(());
             }
-            let path = mnem::eval::set_path(&set);
+            let path = ravnori::eval::set_path(&set);
             if cosines {
-                let (t, w) = mnem::eval::cosines(&conn, &path)?;
+                let (t, w) = ravnori::eval::cosines(&conn, &path)?;
                 let pct = |v: &[f32], p: f64| {
                     v.get(((v.len() as f64 - 1.0) * p).round() as usize)
                         .copied()
@@ -893,21 +919,21 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             let mode = match mode.as_str() {
-                "keyword" => mnem::recall::Mode::Keyword,
-                "vector" => mnem::recall::Mode::Vector,
-                "fill" => mnem::recall::Mode::Fill,
-                _ => mnem::recall::Mode::Hybrid,
+                "keyword" => ravnori::recall::Mode::Keyword,
+                "vector" => ravnori::recall::Mode::Vector,
+                "fill" => ravnori::recall::Mode::Fill,
+                _ => ravnori::recall::Mode::Hybrid,
             };
             if let Some(n) = build {
-                let written = mnem::eval::build(&conn, n, &path)?;
+                let written = ravnori::eval::build(&conn, n, &path)?;
                 println!("built {written} questions in {}", path.display());
             }
             let judge_with = judge_model.as_deref().or(judge.then_some("chain"));
             let reranker = rerank
                 .as_deref()
-                .map(mnem::rerank::Reranker::load)
+                .map(ravnori::rerank::Reranker::load)
                 .transpose()?;
-            let r = mnem::eval::run(
+            let r = ravnori::eval::run(
                 &conn,
                 &path,
                 mode,
@@ -931,8 +957,8 @@ fn main() -> Result<()> {
                     j.shown as f64 / j.prompts as f64
                 );
                 if let Some(name) = judge_with {
-                    let (lo, hi) = mnem::eval::wilson(j.right, j.judged_shown);
-                    let (plo, phi) = mnem::eval::wilson(j.helped, j.judged_prompts);
+                    let (lo, hi) = ravnori::eval::wilson(j.right, j.judged_shown);
+                    let (plo, phi) = ravnori::eval::wilson(j.helped, j.judged_prompts);
                     println!(
                         "judged ({name}): {} of {} memories shown helped ({:.0}%, 95% CI {:.0}-{:.0}%) · {} did not",
                         j.right,
@@ -965,9 +991,9 @@ fn main() -> Result<()> {
                         );
                     }
                     if name != "chain" {
-                        let (n, agreed, kappa) = mnem::eval::agreement(
-                            &mnem::eval::judge_identity("chain")?,
-                            &mnem::eval::judge_identity(name)?,
+                        let (n, agreed, kappa) = ravnori::eval::agreement(
+                            &ravnori::eval::judge_identity("chain")?,
+                            &ravnori::eval::judge_identity(name)?,
                         );
                         println!(
                             "agreement with the default judge: {agreed} of {n} shared memories, kappa {kappa:.2}"
@@ -1017,7 +1043,8 @@ fn main() -> Result<()> {
             if ids.is_empty() && session.is_none() && project.is_none() {
                 anyhow::bail!("nothing to forget: pass ids, --session or --project");
             }
-            let f = mnem::forget::forget(&mut conn, &ids, session.as_deref(), project.as_deref())?;
+            let f =
+                ravnori::forget::forget(&mut conn, &ids, session.as_deref(), project.as_deref())?;
             println!(
                 "forgot {} memories, {} events, {} sessions (tombstoned: they will not come back)",
                 f.memories, f.events, f.sessions
@@ -1042,24 +1069,24 @@ fn main() -> Result<()> {
                         })?,
                 )
             };
-            let id = mnem::forget::remember(&conn, &fact, project.as_deref())?;
+            let id = ravnori::forget::remember(&conn, &fact, project.as_deref())?;
             println!(
                 "pinned #{id} for {}",
                 project.as_deref().unwrap_or("every project")
             );
         }
         Cmd::Snapshot { session, cwd } => {
-            let recorded = mnem::gitstate::record(&conn, &session, &cwd)?;
+            let recorded = ravnori::gitstate::record(&conn, &session, &cwd)?;
             println!("{}", if recorded { "recorded" } else { "unchanged" });
         }
         Cmd::Backup { auto: Some(a), .. } => {
             backup::set_auto(&conn, a == "on")?;
             println!(
-                "daily automatic backup: {} (mnem watch follows on its next pass)",
+                "daily automatic backup: {} (rvn watch follows on its next pass)",
                 if a == "on" {
                     "on"
                 } else {
-                    "off; take one with `mnem backup` or in the viewer"
+                    "off; take one with `rvn backup` or in the viewer"
                 }
             );
         }
@@ -1100,17 +1127,17 @@ fn main() -> Result<()> {
         } => {
             if merge {
                 let (_, origin) = backup::check_import(&snapshot)?;
-                let prefix =
-                    prefix.unwrap_or_else(|| mnem::merge::default_prefix(origin.host.as_deref()));
-                if mnem::merge::is_empty(&conn)? {
+                let prefix = prefix
+                    .unwrap_or_else(|| ravnori::merge::default_prefix(origin.host.as_deref()));
+                if ravnori::merge::is_empty(&conn)? {
                     anyhow::bail!(
                         "this memory is empty, so there is nothing to merge into; use --apply without --merge"
                     );
                 }
                 let p = if apply {
-                    mnem::merge::merge(&snapshot, &mut conn, &backup::dir(), &prefix)?
+                    ravnori::merge::merge(&snapshot, &mut conn, &backup::dir(), &prefix)?
                 } else {
-                    mnem::merge::preview(&snapshot, &conn, &prefix)?
+                    ravnori::merge::preview(&snapshot, &conn, &prefix)?
                 };
                 println!(
                     "{} {} sessions, {} events, {} memories and {} pinned facts{}",
@@ -1167,7 +1194,7 @@ fn main() -> Result<()> {
                 );
                 if settings {
                     if backup::apply_settings(&snapshot)? {
-                        println!("settings restored; restart mnem-watch to use them");
+                        println!("settings restored; restart ravnori-watch to use them");
                     } else {
                         println!("the backup carries no settings; kept the current ones");
                     }
@@ -1197,10 +1224,10 @@ fn main() -> Result<()> {
             distill_every,
             ui_port,
         } => {
-            let ui_port = ui_port.unwrap_or_else(mnem::embed::configured_port);
+            let ui_port = ui_port.unwrap_or_else(ravnori::embed::configured_port);
             // Hooks learn where the service listens only after the bind succeeds; until
             // then (or if it fails) they see no service and use keywords alone.
-            if let Err(e) = mnem::embed::record_service_port(&conn, 0) {
+            if let Err(e) = ravnori::embed::record_service_port(&conn, 0) {
                 hook::log(&format!("watch port: {e:#}"));
             }
             if ui_port != 0 {
@@ -1208,7 +1235,7 @@ fn main() -> Result<()> {
                 std::thread::spawn(move || {
                     let record = || {
                         if let Err(e) = db::open(&ui_path)
-                            .and_then(|c| mnem::embed::record_service_port(&c, ui_port))
+                            .and_then(|c| ravnori::embed::record_service_port(&c, ui_port))
                         {
                             hook::log(&format!("watch port: {e:#}"));
                         }
@@ -1233,7 +1260,7 @@ fn main() -> Result<()> {
                         std::thread::sleep(pause);
                     };
                     // Text stored under older redaction patterns is redacted again, once.
-                    if let Err(e) = mnem::privacy::catch_up(&conn) {
+                    if let Err(e) = ravnori::privacy::catch_up(&conn) {
                         hook::log(&format!("privacy: {e:#}"));
                     }
                     // Recorded even with backfill off, so doctor can tell what ages out.
@@ -1264,8 +1291,8 @@ fn main() -> Result<()> {
                     Err(e) => hook::log(&format!("watch sweep: {e:#}")),
                 }
                 // New memories (distilled, imported, pinned) get vectors on the next pass.
-                if let Some(e) = mnem::embed::shared() {
-                    match mnem::embed::backfill(&mut conn, &e, Some(500)) {
+                if let Some(e) = ravnori::embed::shared() {
+                    match ravnori::embed::backfill(&mut conn, &e, Some(500)) {
                         Ok(n) if n > 0 => hook::log(&format!("watch embed: {n} memories")),
                         Ok(_) => {}
                         Err(e) => hook::log(&format!("watch embed: {e:#}")),
@@ -1273,7 +1300,7 @@ fn main() -> Result<()> {
                 }
                 // Costly health checks happen here, not in hooks.
                 if let Err(e) =
-                    mnem::health::record_watch_report(&conn, mnem::health::stuck_files(&conn))
+                    ravnori::health::record_watch_report(&conn, ravnori::health::stuck_files(&conn))
                 {
                     hook::log(&format!("watch health: {e:#}"));
                 }
@@ -1391,7 +1418,7 @@ fn main() -> Result<()> {
         Cmd::Uptake { days } => {
             print!(
                 "{}",
-                mnem::uptake::render(&mnem::uptake::report(&conn, days)?, days)
+                ravnori::uptake::render(&ravnori::uptake::report(&conn, days)?, days)
             );
         }
         Cmd::File {
@@ -1405,23 +1432,23 @@ fn main() -> Result<()> {
                 Some(c) => std::path::PathBuf::from(c),
                 None => std::env::current_dir()?,
             };
-            let target = mnem::files::resolve(&path, &cwd);
+            let target = ravnori::files::resolve(&path, &cwd);
             if let (true, Some(session)) = (touch, session) {
                 // Same as Claude Code's file hook: quiet unless there is something to show.
                 let t0 = Instant::now();
                 if let Some(t) = &target {
-                    match mnem::files::on_touch(&conn, &session, t, mnem::eval::FILE_TOP) {
+                    match ravnori::files::on_touch(&conn, &session, t, ravnori::eval::FILE_TOP) {
                         Ok(Some(text)) => println!("{text}"),
                         Ok(None) => {}
                         Err(e) => hook::log(&format!("file touch {path}: {e:#}")),
                     }
                 }
                 let agent = session.split(':').next().unwrap_or("other");
-                let _ = mnem::uptake::hook_run(&conn, agent, "file", t0.elapsed().as_millis());
+                let _ = ravnori::uptake::hook_run(&conn, agent, "file", t0.elapsed().as_millis());
                 return Ok(());
             }
             match target {
-                Some(t) => println!("{}", mnem::files::report(&conn, &t, limit)?),
+                Some(t) => println!("{}", ravnori::files::report(&conn, &t, limit)?),
                 None => anyhow::bail!("{path} is not inside a git repository"),
             }
         }
@@ -1430,7 +1457,7 @@ fn main() -> Result<()> {
             project,
             prompt,
         } => {
-            if let Some(r) = mnem::recall::recall(&conn, &session, &project, &prompt)? {
+            if let Some(r) = ravnori::recall::recall(&conn, &session, &project, &prompt)? {
                 println!("{r}");
             }
         }
@@ -1480,7 +1507,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// `mnem eval --gate`: baseline and candidate on the same data, then the verdict.
+/// `rvn eval --gate`: baseline and candidate on the same data, then the verdict.
 fn run_gate(
     live: &std::path::Path,
     baseline: Option<PathBuf>,
@@ -1493,20 +1520,20 @@ fn run_gate(
         None => std::env::var_os("PATH")
             .into_iter()
             .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-            .map(|d| d.join("mnem"))
+            .map(|d| d.join("rvn"))
             .find(|p| p.is_file())
-            .ok_or_else(|| anyhow::anyhow!("no mnem on PATH to compare with; pass --baseline"))?,
+            .ok_or_else(|| anyhow::anyhow!("no rvn on PATH to compare with; pass --baseline"))?,
     };
     let same = std::fs::canonicalize(&baseline).ok() == std::fs::canonicalize(&candidate).ok();
     if same && candidate_config.is_none() {
         anyhow::bail!(
-            "the candidate is the installed mnem itself; run the build you want to ship (for example target/release/mnem eval --gate), or pass --candidate-config"
+            "the candidate is the installed ravnori itself; run the build you want to ship (for example target/release/rvn eval --gate), or pass --candidate-config"
         );
     }
     if let Some(c) = &candidate_config {
         let text = std::fs::read_to_string(c)?;
-        serde_json::from_str::<mnem::config::Config>(&text)
-            .map_err(|e| anyhow::anyhow!("{} is not a valid mnem config: {e}", c.display()))?;
+        serde_json::from_str::<ravnori::config::Config>(&text)
+            .map_err(|e| anyhow::anyhow!("{} is not a valid ravnori config: {e}", c.display()))?;
     }
     println!("baseline:  {}", baseline.display());
     println!(
@@ -1520,11 +1547,11 @@ fn run_gate(
     let t = Instant::now();
     // Each build gets its own copy of one snapshot (a newer build may migrate its copy),
     // and both are graded by the live settings' judge.
-    let snap = mnem::gate::Snapshot::take(live)?;
+    let snap = ravnori::gate::Snapshot::take(live)?;
     let copy = snap.copy()?;
-    let judge_config = mnem::config::path();
-    let b = mnem::gate::metrics_of(&baseline, &snap.0, None, &judge_config, judge)?;
-    let c = mnem::gate::metrics_of(
+    let judge_config = ravnori::config::path();
+    let b = ravnori::gate::metrics_of(&baseline, &snap.0, None, &judge_config, judge)?;
+    let c = ravnori::gate::metrics_of(
         &candidate,
         &copy.0,
         candidate_config.as_deref(),
@@ -1538,7 +1565,7 @@ fn run_gate(
         b.model,
         c.model
     );
-    let checks = mnem::gate::compare(&b, &c);
+    let checks = ravnori::gate::compare(&b, &c);
     let width = checks.iter().map(|k| k.name.len()).max().unwrap_or(0);
     for k in &checks {
         println!(

@@ -1,19 +1,19 @@
-use mnem::ingest::{self, Source};
-use mnem::model::Agent;
-use mnem::project::Resolver;
+use ravnori::ingest::{self, Source};
+use ravnori::model::Agent;
+use ravnori::project::Resolver;
 use rusqlite::Connection;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// MNEM_HOME is one per process and tests run in parallel: a test that points it at its
+/// RAVNORI_HOME is one per process and tests run in parallel: a test that points it at its
 /// own directory holds this until it is done.
 fn home_lock() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
     L.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-fn tmpdir(name: &str) -> mnem::TempDir {
-    mnem::TempDir::new(&format!("test-{name}"))
+fn tmpdir(name: &str) -> ravnori::TempDir {
+    ravnori::TempDir::new(&format!("test-{name}"))
 }
 
 fn fixture(agent: &str, file: &str) -> PathBuf {
@@ -50,7 +50,7 @@ fn kinds(conn: &Connection) -> Vec<String> {
 #[test]
 fn claude_fixture() {
     let d = tmpdir("claude");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     ingest(
         &mut conn,
         &fixture("claude", "session.jsonl"),
@@ -94,7 +94,7 @@ fn claude_fixture() {
 #[test]
 fn codex_fixture_collapses_duplicate_envelopes() {
     let d = tmpdir("codex");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     ingest(&mut conn, &fixture("codex", "rollout.jsonl"), Agent::Codex);
     assert_eq!(
         kinds(&conn),
@@ -116,7 +116,7 @@ fn codex_fixture_collapses_duplicate_envelopes() {
 #[test]
 fn pi_fixture() {
     let d = tmpdir("pi");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     ingest(&mut conn, &fixture("pi", "session.jsonl"), Agent::Pi);
     assert_eq!(
         kinds(&conn),
@@ -136,7 +136,7 @@ fn pi_fixture() {
 #[test]
 fn replay_from_zero_inserts_nothing() {
     let d = tmpdir("replay");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = fixture("claude", "session.jsonl");
     let first = ingest(&mut conn, &f, Agent::Claude).inserted;
     conn.execute(
@@ -151,7 +151,7 @@ fn replay_from_zero_inserts_nothing() {
 #[test]
 fn partial_tail_waits_for_newline() {
     let d = tmpdir("partial");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let lines: Vec<String> = std::fs::read_to_string(fixture("pi", "session.jsonl"))
         .unwrap()
         .lines()
@@ -180,8 +180,8 @@ fn partial_tail_waits_for_newline() {
 fn concurrent_writer_loses_race_without_duplicates() {
     let d = tmpdir("race");
     let path = d.join("m.db");
-    let mut a = mnem::db::open(&path).unwrap();
-    let mut b = mnem::db::open(&path).unwrap();
+    let mut a = ravnori::db::open(&path).unwrap();
+    let mut b = ravnori::db::open(&path).unwrap();
     let src = Source {
         path: fixture("codex", "rollout.jsonl"),
         agent: Agent::Codex,
@@ -202,7 +202,7 @@ fn concurrent_writer_loses_race_without_duplicates() {
 #[test]
 fn rewritten_file_bumps_generation_and_dedupes() {
     let d = tmpdir("rewrite");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = d.join("s.jsonl");
     let original = std::fs::read_to_string(fixture("pi", "session.jsonl")).unwrap();
     std::fs::write(&f, &original).unwrap();
@@ -223,7 +223,7 @@ fn rewritten_file_bumps_generation_and_dedupes() {
 #[test]
 fn same_length_rewrite_with_same_header_is_detected() {
     let d = tmpdir("samelen");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = d.join("s.jsonl");
     let original = std::fs::read_to_string(fixture("pi", "session.jsonl")).unwrap();
     std::fs::write(&f, &original).unwrap();
@@ -247,7 +247,7 @@ fn same_length_rewrite_with_same_header_is_detected() {
 #[test]
 fn quarantine_is_redacted() {
     let d = tmpdir("quarantine");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = d.join("s.jsonl");
     std::fs::write(
         &f,
@@ -264,7 +264,7 @@ fn quarantine_is_redacted() {
 #[test]
 fn incompatible_parser_state_replays_from_zero() {
     let d = tmpdir("state");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = d.join("s.jsonl");
     let lines: Vec<&str> = include_str!("fixtures/pi/session.jsonl").lines().collect();
     std::fs::write(&f, format!("{}\n", lines[..2].join("\n"))).unwrap();
@@ -291,8 +291,8 @@ fn incompatible_parser_state_replays_from_zero() {
 fn losing_writer_retries_and_catches_up() {
     let d = tmpdir("overlap");
     let path = d.join("m.db");
-    let mut a = mnem::db::open(&path).unwrap();
-    let mut b = mnem::db::open(&path).unwrap();
+    let mut a = ravnori::db::open(&path).unwrap();
+    let mut b = ravnori::db::open(&path).unwrap();
     let f = d.join("s.jsonl");
     let lines: Vec<&str> = include_str!("fixtures/pi/session.jsonl").lines().collect();
     std::fs::write(&f, format!("{}\n", lines[..2].join("\n"))).unwrap();
@@ -321,7 +321,7 @@ fn losing_writer_retries_and_catches_up() {
 #[test]
 fn restored_file_clears_missing_flag() {
     let d = tmpdir("missing");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let src = Source {
         path: fixture("pi", "session.jsonl"),
         agent: Agent::Pi,
@@ -338,7 +338,7 @@ fn restored_file_clears_missing_flag() {
 #[test]
 fn subagent_events_carry_thread_and_merge_into_parent_session() {
     let d = tmpdir("subagent");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let sub = d.join("s-claude/subagents");
     std::fs::create_dir_all(&sub).unwrap();
     let f = sub.join("agent-abc.jsonl");
@@ -367,7 +367,7 @@ fn subagent_events_carry_thread_and_merge_into_parent_session() {
 #[test]
 fn nested_workflow_subagent_gets_thread() {
     let d = tmpdir("nested");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let dir = d.join("s-claude/subagents/workflows/wf_1");
     std::fs::create_dir_all(&dir).unwrap();
     let f = dir.join("agent-xyz.jsonl");
@@ -389,7 +389,7 @@ fn nested_workflow_subagent_gets_thread() {
 #[test]
 fn human_repeats_are_turns_but_harness_polling_collapses() {
     let d = tmpdir("repeats");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = d.join("s.jsonl");
     let msg = |id: &str, t: &str| {
         format!(
@@ -421,13 +421,13 @@ fn human_repeats_are_turns_but_harness_polling_collapses() {
 #[test]
 fn final_answer_is_last_text_of_the_turn() {
     let d = tmpdir("final");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     ingest(
         &mut conn,
         &fixture("claude", "session.jsonl"),
         Agent::Claude,
     );
-    let a = mnem::context::final_answer(&conn, "claude:s-claude", 1).unwrap();
+    let a = ravnori::context::final_answer(&conn, "claude:s-claude", 1).unwrap();
     assert_eq!(
         a.as_deref(),
         Some("Fixed: token expiry used < instead of <=.")
@@ -453,16 +453,16 @@ fn import_summary_gets_fresh_id_when_reserved_id_is_taken() {
     )
     .unwrap();
     drop(cm);
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
-    // A distilled mnem memory already occupies 1,000,007.
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
+    // A distilled ravnori memory already occupies 1,000,007.
     conn.execute(
-        "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1000007, 'observation', 'mine', 'mnem', 'x')",
+        "INSERT INTO memories(id, kind, title, origin, origin_id) VALUES (1000007, 'observation', 'mine', 'ravnori', 'x')",
         [],
     )
     .unwrap();
     let _home = home_lock();
-    unsafe { std::env::set_var("MNEM_HOME", &*d) };
-    let s = mnem::import::claude_mem(&mut conn, &src).unwrap();
+    unsafe { std::env::set_var("RAVNORI_HOME", &*d) };
+    let s = ravnori::import::claude_mem(&mut conn, &src).unwrap();
     assert_eq!(s.summaries, 1);
     let title: String = conn
         .query_row(
@@ -486,7 +486,7 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
     // reply is stored via the same path in distill's unit tests. Here we check the
     // evidence table and its rendering in get_observations.
     let d = tmpdir("evidence");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     ingest(
         &mut conn,
         &fixture("claude", "session.jsonl"),
@@ -498,7 +498,7 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
         })
         .unwrap();
     conn.execute(
-        "INSERT INTO memories(id, session_id, kind, type, title, origin, origin_id) VALUES (2000000, 'claude:s-claude', 'observation', 'bugfix', 'Login expiry fixed', 'mnem', 'x')",
+        "INSERT INTO memories(id, session_id, kind, type, title, origin, origin_id) VALUES (2000000, 'claude:s-claude', 'observation', 'bugfix', 'Login expiry fixed', 'ravnori', 'x')",
         [],
     )
     .unwrap();
@@ -509,10 +509,10 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
         .unwrap();
     conn.execute(
         "INSERT INTO memory_evidence(memory_id, event_id, event_hash) VALUES (2000000, ?1, ?2)",
-        rusqlite::params![prompt_id, mnem::text::hash(&t)],
+        rusqlite::params![prompt_id, ravnori::text::hash(&t)],
     )
     .unwrap();
-    let out = mnem::mcp::call(
+    let out = ravnori::mcp::call(
         &conn,
         "get_observations",
         &serde_json::json!({ "ids": [2000000] }),
@@ -525,7 +525,7 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
         [prompt_id],
     )
     .unwrap();
-    let out = mnem::mcp::call(
+    let out = ravnori::mcp::call(
         &conn,
         "get_observations",
         &serde_json::json!({ "ids": [2000000] }),
@@ -537,7 +537,7 @@ fn distilled_memory_links_only_to_events_it_was_shown() {
 #[test]
 fn forgotten_data_never_comes_back() {
     let d = tmpdir("forget");
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
     let f = fixture("pi", "session.jsonl");
     ingest(&mut conn, &f, Agent::Pi);
     let prompt: i64 = conn
@@ -546,7 +546,7 @@ fn forgotten_data_never_comes_back() {
         })
         .unwrap();
     // Forget one event, then replay the whole transcript from zero.
-    mnem::forget::forget(&mut conn, &[format!("E{prompt}")], None, None).unwrap();
+    ravnori::forget::forget(&mut conn, &[format!("E{prompt}")], None, None).unwrap();
     conn.execute(
         "UPDATE sources SET byte_offset = 0, parser_state = NULL",
         [],
@@ -562,7 +562,7 @@ fn forgotten_data_never_comes_back() {
         .unwrap();
     assert_eq!(n, 0, "forgotten event resurrected by replay");
     // Forget the whole session: replay stores nothing for it.
-    mnem::forget::forget(&mut conn, &[], Some("pi:s-pi"), None).unwrap();
+    ravnori::forget::forget(&mut conn, &[], Some("pi:s-pi"), None).unwrap();
     conn.execute(
         "UPDATE sources SET byte_offset = 0, parser_state = NULL",
         [],
@@ -578,17 +578,17 @@ fn forgotten_data_never_comes_back() {
 #[test]
 fn pinned_facts_open_the_context() {
     let d = tmpdir("pin");
-    let conn = mnem::db::open(&d.join("m.db")).unwrap();
-    mnem::forget::remember(
+    let conn = ravnori::db::open(&d.join("m.db")).unwrap();
+    ravnori::forget::remember(
         &conn,
         "Deploys go through the staging branch first",
         Some("proj"),
     )
     .unwrap();
-    mnem::forget::remember(&conn, "Reply in English", None).unwrap();
-    let ctx = mnem::context::build(
+    ravnori::forget::remember(&conn, "Reply in English", None).unwrap();
+    let ctx = ravnori::context::build(
         &conn,
-        &mnem::context::Options {
+        &ravnori::context::Options {
             project: "proj",
             current: None,
             budget_chars: 8000,
@@ -603,9 +603,9 @@ fn pinned_facts_open_the_context() {
         ctx.contains("staging branch") && ctx.contains("Reply in English"),
         "{ctx}"
     );
-    let other = mnem::context::build(
+    let other = ravnori::context::build(
         &conn,
-        &mnem::context::Options {
+        &ravnori::context::Options {
             project: "other",
             current: None,
             budget_chars: 8000,
@@ -643,12 +643,12 @@ fn reimport_never_resurrects_forgotten_data() {
     )
     .unwrap();
     drop(cm);
-    let mut conn = mnem::db::open(&d.join("m.db")).unwrap();
-    // The import writes its snapshot under MNEM_HOME: this test's own directory, never
-    // the developer's ~/.mnem, nor another test's (removed when that test ends).
+    let mut conn = ravnori::db::open(&d.join("m.db")).unwrap();
+    // The import writes its snapshot under RAVNORI_HOME: this test's own directory, never
+    // the developer's ~/.ravnori, nor another test's (removed when that test ends).
     let _home = home_lock();
-    unsafe { std::env::set_var("MNEM_HOME", &*d) };
-    mnem::import::claude_mem(&mut conn, &src).unwrap();
+    unsafe { std::env::set_var("RAVNORI_HOME", &*d) };
+    ravnori::import::claude_mem(&mut conn, &src).unwrap();
     let prompt: i64 = conn
         .query_row(
             "SELECT id FROM events WHERE record_key = 'cm:prompt:10'",
@@ -656,11 +656,11 @@ fn reimport_never_resurrects_forgotten_data() {
             |r| r.get(0),
         )
         .unwrap();
-    mnem::forget::forget(&mut conn, &[format!("E{prompt}")], Some("claude:c2"), None).unwrap();
+    ravnori::forget::forget(&mut conn, &[format!("E{prompt}")], Some("claude:c2"), None).unwrap();
     // Re-import: the forgotten prompt and the forgotten session's observation stay gone.
     conn.execute("DELETE FROM events WHERE session_id = 'claude:c1'", [])
         .unwrap();
-    mnem::import::claude_mem(&mut conn, &src).unwrap();
+    ravnori::import::claude_mem(&mut conn, &src).unwrap();
     let keys: Vec<String> = conn
         .prepare("SELECT record_key FROM events ORDER BY record_key")
         .unwrap()

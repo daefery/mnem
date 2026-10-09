@@ -1,13 +1,13 @@
 //! Merging a teammate's backup: every row already here is left exactly as it was, their
 //! sessions and memories are added, a project name both sides use is renamed to
 //! `<prefix>/<name>` on their side, what was forgotten here stays forgotten, and
-//! merging the same backup twice adds nothing. Its own test binary: it sets MNEM_HOME.
+//! merging the same backup twice adds nothing. Its own test binary: it sets RAVNORI_HOME.
 
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
-fn home() -> mnem::TempDir {
-    mnem::TempDir::new("merge")
+fn home() -> ravnori::TempDir {
+    ravnori::TempDir::new("merge")
 }
 
 /// A session with two events and one distilled memory citing both, in `project`.
@@ -33,7 +33,7 @@ fn seed(c: &Connection, sid: &str, project: &str, title: &str) -> i64 {
     }
     c.execute(
         "INSERT INTO memories(session_id, project, kind, type, title, narrative, files_modified, origin, origin_id, created_at)
-         VALUES (?1, ?2, 'observation', 'bugfix', ?3, 'n', '[\"src/retry.rs\"]', 'mnem', ?4, 1500)",
+         VALUES (?1, ?2, 'observation', 'bugfix', ?3, 'n', '[\"src/retry.rs\"]', 'ravnori', ?4, 1500)",
         params![sid, project, title, format!("{sid}@{}-{}#0", ids[0], ids[1])],
     )
     .unwrap();
@@ -79,8 +79,8 @@ fn fingerprint(c: &Connection) -> Vec<String> {
 }
 
 fn snapshot_of(src: &Path, dir: &Path) -> PathBuf {
-    let c = mnem::db::open(src).unwrap();
-    let m = mnem::backup::create(&c, dir, 7).unwrap();
+    let c = ravnori::db::open(src).unwrap();
+    let m = ravnori::backup::create(&c, dir, 7).unwrap();
     dir.join(m.file)
 }
 
@@ -88,11 +88,11 @@ fn snapshot_of(src: &Path, dir: &Path) -> PathBuf {
 fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
     let home = home();
     // SAFETY: set before any other thread starts.
-    unsafe { std::env::set_var("MNEM_HOME", &home) };
+    unsafe { std::env::set_var("RAVNORI_HOME", &home) };
 
     // Mine: a project we share, one only I have, a pin, a forgotten session of theirs.
-    let mine_path = home.join("mnem.db");
-    let mine = mnem::db::open(&mine_path).unwrap();
+    let mine_path = home.join("ravnori.db");
+    let mine = ravnori::db::open(&mine_path).unwrap();
     seed(
         &mine,
         "claude:mine-1",
@@ -105,7 +105,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
         "github.com/me/private",
         "My private work",
     );
-    mnem::forget::remember(
+    ravnori::forget::remember(
         &mine,
         "Run tests with --frozen",
         Some("github.com/acme/shop"),
@@ -130,7 +130,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
     std::fs::create_dir_all(&theirs_dir).unwrap();
     let theirs_path = theirs_dir.join("ana.db");
     {
-        let t = mnem::db::open(&theirs_path).unwrap();
+        let t = ravnori::db::open(&theirs_path).unwrap();
         seed(
             &t,
             "claude:theirs-1",
@@ -145,14 +145,14 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
             "Forgotten here",
         );
         seed(&t, "claude:mine-1", "github.com/acme/shop", "My retry fix");
-        mnem::forget::remember(&t, "Deploy on Tuesdays only", Some("github.com/acme/shop"))
+        ravnori::forget::remember(&t, "Deploy on Tuesdays only", Some("github.com/acme/shop"))
             .unwrap();
     }
     let snap = snapshot_of(&theirs_path, &theirs_dir);
     let backups = home.join("backups");
 
-    let mut conn = mnem::db::open(&mine_path).unwrap();
-    let plan = mnem::merge::preview(&snap, &conn, "ana").unwrap();
+    let mut conn = ravnori::db::open(&mine_path).unwrap();
+    let plan = ravnori::merge::preview(&snap, &conn, "ana").unwrap();
     assert_eq!(
         plan.renamed,
         vec![(
@@ -167,7 +167,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
     );
     assert_eq!((plan.skipped_sessions, plan.events), (2, 4), "{plan:?}");
 
-    let done = mnem::merge::merge(&snap, &mut conn, &backups, "ana").unwrap();
+    let done = ravnori::merge::merge(&snap, &mut conn, &backups, "ana").unwrap();
     assert_eq!(done, plan, "the merge does what the preview said");
 
     // Every row of mine is exactly as it was.
@@ -176,7 +176,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
         assert!(after.contains(row), "changed or lost: {row}");
     }
     // A safety snapshot of my memory was taken first.
-    assert_eq!(mnem::backup::list(&backups).unwrap().len(), 1);
+    assert_eq!(ravnori::backup::list(&backups).unwrap().len(), 1);
 
     // Theirs, added, under the right names.
     fn strings(conn: &Connection, sql: &str) -> Vec<String> {
@@ -186,7 +186,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     }
-    let q = |sql: &str| strings(&mnem::db::open(&mine_path).unwrap(), sql);
+    let q = |sql: &str| strings(&ravnori::db::open(&mine_path).unwrap(), sql);
     assert_eq!(
         q("SELECT project FROM sessions WHERE id = 'claude:theirs-1'"),
         vec!["ana/github.com/acme/shop"]
@@ -217,7 +217,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
         q("SELECT project FROM memories WHERE kind = 'pinned' AND title LIKE 'Deploy%'"),
         vec!["ana/github.com/acme/shop"]
     );
-    let my_pins = mnem::forget::pinned(&conn, "github.com/acme/shop").unwrap();
+    let my_pins = ravnori::forget::pinned(&conn, "github.com/acme/shop").unwrap();
     assert_eq!(
         my_pins.len(),
         1,
@@ -268,7 +268,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
         )
         .unwrap();
     assert_eq!(live, 0);
-    let (pending, _) = mnem::distill::pending(&conn).unwrap();
+    let (pending, _) = ravnori::distill::pending(&conn).unwrap();
     assert_eq!(pending, 0, "merged sessions must not wait for distillation");
 
     // Search finds their memory through the full-text index.
@@ -283,9 +283,9 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
 
     // Merging the same backup again adds nothing, and moves nothing: her project that
     // came in under its own name is not renamed now that it is "shared".
-    let preview2 = mnem::merge::preview(&snap, &conn, "ana").unwrap();
+    let preview2 = ravnori::merge::preview(&snap, &conn, "ana").unwrap();
     assert_eq!(preview2.renamed, plan.renamed, "{preview2:?}");
-    let again = mnem::merge::merge(&snap, &mut conn, &backups, "ana").unwrap();
+    let again = ravnori::merge::merge(&snap, &mut conn, &backups, "ana").unwrap();
     assert_eq!(
         (again.sessions, again.memories, again.pins),
         (0, 0, 0),
@@ -294,7 +294,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
 
     // A newer backup from her: only the new session comes in, in the same places.
     {
-        let t = mnem::db::open(&theirs_path).unwrap();
+        let t = ravnori::db::open(&theirs_path).unwrap();
         seed(
             &t,
             "claude:theirs-3",
@@ -309,7 +309,7 @@ fn a_teammate_merge_adds_theirs_and_leaves_mine_untouched() {
         );
     }
     let snap2 = snapshot_of(&theirs_path, &theirs_dir);
-    let third = mnem::merge::merge(&snap2, &mut conn, &backups, "ana").unwrap();
+    let third = ravnori::merge::merge(&snap2, &mut conn, &backups, "ana").unwrap();
     assert_eq!((third.sessions, third.memories), (2, 2), "{third:?}");
     assert_eq!(
         q(

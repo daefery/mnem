@@ -27,6 +27,7 @@ pub mod model;
 pub mod privacy;
 pub mod project;
 pub mod recall;
+pub mod rename;
 pub mod rerank;
 pub mod scripted;
 pub mod search;
@@ -44,11 +45,11 @@ pub mod when;
 pub struct TempDir(std::path::PathBuf);
 
 impl TempDir {
-    /// `<temp>/mnem-<name>-<pid>-<n>`, empty and created.
+    /// `<temp>/ravnori-<name>-<pid>-<n>`, empty and created.
     pub fn new(name: &str) -> TempDir {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("mnem-{name}-{}-{n}", std::process::id()));
+        let p = std::env::temp_dir().join(format!("ravnori-{name}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("create a test directory");
         TempDir(p)

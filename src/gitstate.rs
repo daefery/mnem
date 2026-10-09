@@ -169,6 +169,6 @@ mod tests {
         assert!(desc.contains("branch main"), "{desc}");
         assert!(desc.contains("first"), "{desc}");
         assert!(desc.contains("uncommitted (1): ?? wip.rs"), "{desc}");
-        assert!(describe(&std::env::temp_dir().join("definitely-not-a-repo-mnem")).is_none());
+        assert!(describe(&std::env::temp_dir().join("definitely-not-a-repo-ravnori")).is_none());
     }
 }

@@ -1,6 +1,6 @@
 //! The record API (/v1) over real HTTP: the token is required and compared exactly,
 //! lists page by cursor without gaps or repeats, personal details stay out unless asked
-//! for, and a memory comes with its evidence. Its own test binary: it sets MNEM_HOME.
+//! for, and a memory comes with its evidence. Its own test binary: it sets RAVNORI_HOME.
 
 use rusqlite::params;
 use serde_json::Value;
@@ -28,11 +28,11 @@ fn get(port: u16, path: &str, token: Option<&str>, host: Option<&str>) -> (u16, 
 
 #[test]
 fn the_record_api_is_private_paged_and_complete() {
-    let home = mnem::TempDir::new("api");
+    let home = ravnori::TempDir::new("api");
     // SAFETY: set before any other thread starts.
-    unsafe { std::env::set_var("MNEM_HOME", &home) };
-    let path = home.join("mnem.db");
-    let c = mnem::db::open(&path).unwrap();
+    unsafe { std::env::set_var("RAVNORI_HOME", &home) };
+    let path = home.join("ravnori.db");
+    let c = ravnori::db::open(&path).unwrap();
     for i in 0..5 {
         c.execute(
             "INSERT INTO sessions(id, agent, native_id, project, last_event_at) VALUES (?1, 'pi', ?1, 'proj', ?2)",
@@ -56,7 +56,7 @@ fn the_record_api_is_private_paged_and_complete() {
     ] {
         c.execute(
             "INSERT INTO memories(session_id, project, kind, type, title, narrative, origin, origin_id, created_at)
-             VALUES ('pi:s0', 'proj', 'observation', ?1, ?2, 'n', 'mnem', ?2, 2000)",
+             VALUES ('pi:s0', 'proj', 'observation', ?1, ?2, 'n', 'ravnori', ?2, 2000)",
             params![ty, title],
         )
         .unwrap();
@@ -101,7 +101,7 @@ fn the_record_api_is_private_paged_and_complete() {
     .unwrap();
     c.execute(
         "INSERT INTO memories(session_id, project, kind, type, title, origin, origin_id, files_modified, created_at)
-         VALUES ('pi:edit', 'proj2', 'observation', 'bugfix', 'Backoff added', 'mnem', 'pi:edit@900-900#0', ?1, 3000)",
+         VALUES ('pi:edit', 'proj2', 'observation', 'bugfix', 'Backoff added', 'ravnori', 'pi:edit@900-900#0', ?1, 3000)",
         [serde_json::json!([repo.join("src/net.rs")]).to_string()],
     )
     .unwrap();
@@ -116,14 +116,14 @@ fn the_record_api_is_private_paged_and_complete() {
 
     let port = 39000 + (std::process::id() % 1000) as u16;
     let served = path.clone();
-    std::thread::spawn(move || mnem::ui::serve(served, port, || {}));
+    std::thread::spawn(move || ravnori::ui::serve(served, port, || {}));
     std::thread::sleep(std::time::Duration::from_millis(300));
-    let token = mnem::api::token().unwrap();
+    let token = ravnori::api::token().unwrap();
     assert_eq!(token.len(), 64);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(mnem::api::token_path())
+        let mode = std::fs::metadata(ravnori::api::token_path())
             .unwrap()
             .permissions()
             .mode();

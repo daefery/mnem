@@ -22,7 +22,7 @@ pkgs = {p["id"]: p for p in meta["packages"]}
 root = meta["resolve"]["root"]
 nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
 
-# Only what the binary links: normal (and build) dependencies reachable from mnem,
+# Only what the binary links: normal (and build) dependencies reachable from ravnori,
 # not dev-dependencies.
 seen, todo = set(), [root]
 while todo:
@@ -74,9 +74,9 @@ if missing:
     sys.exit("no licence declared or shipped by: " + ", ".join(missing))
 
 header = [
-    "Third-party software in mnem",
+    "Third-party software in ravnori",
     "",
-    "mnem is licensed under the GNU Affero General Public License v3.0 (see LICENSE).",
+    "ravnori is licensed under the GNU Affero General Public License v3.0 (see LICENSE).",
     "This binary also contains the following third-party software, each under its own",
     "licence, reproduced below as those licences require.",
     "",

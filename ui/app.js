@@ -1,4 +1,4 @@
-// mnem viewer: live feed of observations, session summaries and prompts across
+// ravnori viewer: live feed of observations, session summaries and prompts across
 // Claude Code, Codex and pi. Markup mirrors the claude-mem viewer so its stylesheet
 // applies unchanged.
 (() => {
@@ -177,7 +177,7 @@
       it.itemType === "observation" ? observationCard(it) : it.itemType === "summary" ? summaryCard(it) : promptCard(it);
     if (it.match) {
       card.querySelector(".card-header-left, .summary-badge-row")?.append(
-        el("span", { class: `mnem-match match-${it.match}`, title: "What matched your search" }, MATCH[it.match] || it.match));
+        el("span", { class: `ravnori-match match-${it.match}`, title: "What matched your search" }, MATCH[it.match] || it.match));
     }
     return card;
   }
@@ -200,7 +200,7 @@
 
   const feedContent = $("feed-content");
   const sentinel = el("div", { style: "height:20px;margin:10px 0" });
-  const footer = el("div", { class: "mnem-empty" });
+  const footer = el("div", { class: "ravnori-empty" });
 
   function renderFooter() {
     footer.replaceChildren();
@@ -351,7 +351,7 @@
     const btn = $("theme");
     btn.replaceChildren(svg(THEME_ICONS[pref]));
     btn.title = `Theme: ${pref}`;
-    store.set("mnem-theme", pref);
+    store.set("ravnori-theme", pref);
   }
 
   // ---------- context preview ----------
@@ -404,18 +404,18 @@
     const missing = [];
     if (!a.hooks) missing.push("memory at session start and on each prompt");
     if (!a.tools) missing.push("memory tools");
-    if (a.stale_binary) missing.push("its mnem link points at a program that no longer exists");
+    if (a.stale_binary) missing.push("its ravnori link points at a program that no longer exists");
     const status = el("span", { class: "move-status", role: "status" });
     if (a.state === "needs_trust") {
-      return el("div", { class: "mnem-agent" },
+      return el("div", { class: "ravnori-agent" },
         el("b", {}, a.name),
-        el("span", { class: "why" }, "Connected, but Codex has not been told to trust mnem's hooks yet. Open Codex, type ",
-          el("code", {}, "/hooks"), ", review mnem's hooks and trust them."),
+        el("span", { class: "why" }, "Connected, but Codex has not been told to trust ravnori's hooks yet. Open Codex, type ",
+          el("code", {}, "/hooks"), ", review ravnori's hooks and trust them."),
         el("button", { class: "move-btn", onclick: () => loadAgents() }, "Check again"),
         status);
     }
     const button = el("button", { class: "move-btn primary" }, `Connect ${a.name}`);
-    const row = el("div", { class: "mnem-agent" },
+    const row = el("div", { class: "ravnori-agent" },
       el("b", {}, a.name),
       el("span", { class: "why" }, `Installed, but missing ${missing.join(" and ")}.`),
       button,
@@ -427,7 +427,7 @@
         const r = await postJSON(`/api/agents/connect?agent=${encodeURIComponent(a.agent)}`);
         const s = r.status;
         if (s.state === "connected") setStatusEl(status, `${a.name} is connected. New sessions get memory; restart one that is open.`);
-        else if (s.state === "needs_trust") setStatusEl(status, "Hooks written. Now open Codex, type /hooks and trust mnem's hooks.");
+        else if (s.state === "needs_trust") setStatusEl(status, "Hooks written. Now open Codex, type /hooks and trust ravnori's hooks.");
         else setStatusEl(status, `Still not connected: ${s.action || "see the details below"}`, true);
         row.append(el("pre", {}, (r.log || []).join("\n")));
       } catch (e) {
@@ -455,7 +455,7 @@
 
   // Actions that change something carry this header; the server refuses them without it.
   async function postJSON(url) {
-    const r = await fetch(url, { method: "POST", headers: { "X-Mnem": "1" } });
+    const r = await fetch(url, { method: "POST", headers: { "X-Ravnori": "1" } });
     const data = await r.json().catch(() => ({ error: `${r.status}` }));
     if (!r.ok) throw Object.assign(new Error(data.error || `${r.status}`), { data });
     return data;
@@ -509,7 +509,7 @@
   function showAuto(on) {
     $("move-auto").checked = !!on;
     $("move-auto-note").textContent = on
-      ? "mnem-watch takes one when the newest is a day old."
+      ? "ravnori-watch takes one when the newest is a day old."
       : "Off: backups are taken only when you press Create backup now.";
   }
 
@@ -548,7 +548,7 @@
     return new Promise((resolve, reject) => {
       const x = new XMLHttpRequest();
       x.open("POST", "/api/import");
-      x.setRequestHeader("X-Mnem", "1");
+      x.setRequestHeader("X-Ravnori", "1");
       x.setRequestHeader("Content-Type", "application/octet-stream");
       x.upload.onprogress = (e) => {
         if (e.lengthComputable) $("move-progress-bar").style.width = `${(100 * e.loaded) / e.total}%`;
@@ -573,7 +573,7 @@
     setStatus("move-upload-status", `Uploading ${file.name} (${fmtBytes(file.size)})…`);
     try {
       const p = await upload(file);
-      setStatus("move-upload-status", "Backup checked: it is sound and this mnem can read it.");
+      setStatus("move-upload-status", "Backup checked: it is sound and this ravnori can read it.");
       renderPreview(p);
     } catch (e) {
       setStatus("move-upload-status", `Not imported: ${e.message}`, true);
@@ -723,11 +723,11 @@
           result.append(` The settings could not be written (${r.settings_error}); this machine keeps its own.`);
         } else if (r.settings_applied) {
           if (r.can_restart) {
-            const restart = el("button", { class: "move-btn primary" }, "Restart mnem to use the settings");
-            restart.addEventListener("click", () => restartMnem(restart, result));
+            const restart = el("button", { class: "move-btn primary" }, "Restart ravnori to use the settings");
+            restart.addEventListener("click", () => restartRavnori(restart, result));
             result.append(" ", restart);
           } else {
-            result.append(" Restart mnem to use the restored settings.");
+            result.append(" Restart ravnori to use the restored settings.");
           }
         }
         reset();
@@ -762,7 +762,7 @@
     return lines;
   }
 
-  async function restartMnem(button, result) {
+  async function restartRavnori(button, result) {
     button.disabled = true;
     try {
       await postJSON("/api/restart");
@@ -770,7 +770,7 @@
       result.append(` ${e.message}`);
       return;
     }
-    result.textContent = "Restarting mnem (about 10 s)…";
+    result.textContent = "Restarting ravnori (about 10 s)…";
     await new Promise((r) => setTimeout(r, 3000));
     for (let i = 0; i < 40; i++) {
       try {
@@ -781,7 +781,7 @@
         await new Promise((r) => setTimeout(r, 1000));
       }
     }
-    result.textContent = "mnem has not come back yet; run `mnem doctor` to see what the watch service is doing.";
+    result.textContent = "ravnori has not come back yet; run `rvn doctor` to see what the watch service is doing.";
   }
 
   function init() {
@@ -790,7 +790,8 @@
     state.query = url.searchParams.get("q") || "";
     $("search").value = state.query;
 
-    let pref = store.get("mnem-theme") || "system";
+    // "mnem-theme": the setting saved before the rename to ravnori.
+    let pref = store.get("ravnori-theme") || store.get("mnem-theme") || "system";
     applyTheme(pref);
     $("theme").addEventListener("click", () => {
       const cycle = ["system", "light", "dark"];

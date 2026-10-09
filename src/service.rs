@@ -1,4 +1,4 @@
-//! The background `mnem watch` service: a systemd user unit on Linux (and WSL), a
+//! The background `rvn watch` service: a systemd user unit on Linux (and WSL), a
 //! launchd agent on macOS. One place decides which, where its file lives, and how to
 //! start, stop and ask about it, so install, uninstall, the health checks and the
 //! viewer's restart button agree on every system.
@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 /// The launchd label and systemd unit name.
-pub const LABEL: &str = "dev.mnem.watch";
-pub const UNIT: &str = "mnem-watch.service";
+pub const LABEL: &str = "dev.ravnori.watch";
+pub const UNIT: &str = "ravnori-watch.service";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Manager {
@@ -41,7 +41,7 @@ impl Manager {
     pub fn definition(self, bin: &str) -> String {
         match self {
             Manager::Systemd => format!(
-                "[Unit]\nDescription=mnem transcript watcher\n\n[Service]\nExecStart={bin} watch\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n"
+                "[Unit]\nDescription=ravnori transcript watcher\n\n[Service]\nExecStart={bin} watch\nRestart=always\nRestartSec=10\nNice=10\n\n[Install]\nWantedBy=default.target\n"
             ),
             // KeepAlive restarts it after any exit (the viewer's restart button relies on
             // that); ThrottleInterval spaces restarts like RestartSec. launchd starts
@@ -164,7 +164,7 @@ fn systemd_running() -> bool {
     std::path::Path::new("/run/systemd/system").is_dir()
 }
 
-/// What to do where there is no systemd: WSL can turn it on; anywhere, `mnem watch`
+/// What to do where there is no systemd: WSL can turn it on; anywhere, `rvn watch`
 /// can run in a terminal. Without one of them no memories are made.
 fn no_systemd_hint() -> String {
     // /run/WSL exists inside a WSL distro, not in a container on a WSL kernel (whose
@@ -172,10 +172,10 @@ fn no_systemd_hint() -> String {
     let wsl = std::path::Path::new("/run/WSL").is_dir();
     if wsl {
         format!(
-            "this WSL has no systemd: add `[boot]` and `systemd=true` to /etc/wsl.conf, run `wsl --shutdown` in Windows, then `systemctl --user enable --now {UNIT}`; or keep `mnem watch` running in a terminal"
+            "this WSL has no systemd: add `[boot]` and `systemd=true` to /etc/wsl.conf, run `wsl --shutdown` in Windows, then `systemctl --user enable --now {UNIT}`; or keep `rvn watch` running in a terminal"
         )
     } else {
-        "this system has no systemd: keep `mnem watch` running (a terminal, tmux, or your init system)".to_string()
+        "this system has no systemd: keep `rvn watch` running (a terminal, tmux, or your init system)".to_string()
     }
 }
 
@@ -188,7 +188,7 @@ pub fn supervised_with_restart() -> bool {
             std::env::var_os("INVOCATION_ID").is_some()
                 && systemd_restart_policy().is_some_and(|p| p == "always" || p == "on-failure")
         }
-        // launchd sets XPC_SERVICE_NAME to the job's label; mnem's agent has KeepAlive.
+        // launchd sets XPC_SERVICE_NAME to the job's label; ravnori's agent has KeepAlive.
         Manager::Launchd => std::env::var("XPC_SERVICE_NAME").is_ok_and(|n| n == LABEL),
     }
 }
@@ -243,13 +243,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_manager_runs_mnem_watch_and_restarts_it() {
-        let unit = Manager::Systemd.definition("/opt/mnem");
-        assert!(unit.contains("ExecStart=/opt/mnem watch") && unit.contains("Restart=always"));
-        let plist = Manager::Launchd.definition("/Users/me/my <tools>/mnem");
+    fn each_manager_runs_ravnori_watch_and_restarts_it() {
+        let unit = Manager::Systemd.definition("/opt/rvn");
+        assert!(unit.contains("ExecStart=/opt/rvn watch") && unit.contains("Restart=always"));
+        let plist = Manager::Launchd.definition("/Users/me/my <tools>/rvn");
         assert!(
-            plist
-                .contains("<string>/Users/me/my &lt;tools&gt;/mnem</string><string>watch</string>")
+            plist.contains("<string>/Users/me/my &lt;tools&gt;/rvn</string><string>watch</string>")
         );
         assert!(plist.contains("<key>KeepAlive</key><true/>"));
         assert!(plist.contains(&format!("<string>{LABEL}</string>")));
@@ -260,12 +259,12 @@ mod tests {
         assert!(
             Manager::Launchd
                 .file()
-                .ends_with("Library/LaunchAgents/dev.mnem.watch.plist")
+                .ends_with("Library/LaunchAgents/dev.ravnori.watch.plist")
         );
         assert!(
             Manager::Systemd
                 .file()
-                .ends_with(".config/systemd/user/mnem-watch.service")
+                .ends_with(".config/systemd/user/ravnori-watch.service")
         );
     }
 }

@@ -9,7 +9,7 @@ use std::fmt::Write;
 
 pub struct Options<'a> {
     pub project: &'a str,
-    /// mnem session id of the caller ("claude:<uuid>"), excluded from "recent".
+    /// ravnori session id of the caller ("claude:<uuid>"), excluded from "recent".
     pub current: Option<&'a str>,
     pub budget_chars: usize,
     pub sessions: usize,
@@ -244,7 +244,7 @@ fn render(
 ) -> Result<String> {
     let now = db::now_ms();
     let mut w = String::new();
-    writeln!(w, "# mnem memory · {}", o.project)?;
+    writeln!(w, "# ravnori memory · {}", o.project)?;
     if !pins.is_empty() {
         writeln!(
             w,
@@ -400,7 +400,7 @@ mod tests {
         ] {
             c.execute(
                 "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, ?2, 'p', ?3, 'change', ?4, 'mnem', ?1, ?5)",
+                 VALUES (?1, ?2, 'p', ?3, 'change', ?4, 'ravnori', ?1, ?5)",
                 rusqlite::params![id, session, kind, title, at],
             )
             .unwrap();

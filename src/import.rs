@@ -26,7 +26,7 @@ pub struct Stats {
 }
 
 struct CmSession {
-    mnem_id: String,
+    ravnori_id: String,
     agent: String,
     native: String,
     project: String,
@@ -35,7 +35,7 @@ struct CmSession {
     title: Option<String>,
 }
 
-/// claude-mem platform names -> mnem agent names.
+/// claude-mem platform names -> ravnori agent names.
 fn agent_of(platform: &str) -> &str {
     match platform {
         "claude" | "claude-code" => "claude",
@@ -76,7 +76,7 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
     let cm = Connection::open_with_flags(&snap.0, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stats = Stats::default();
 
-    // claude-mem session -> mnem session. memory_session_id is what observations reference.
+    // claude-mem session -> ravnori session. memory_session_id is what observations reference.
     let mut all: Vec<CmSession> = Vec::new();
     let mut by_memory: HashMap<String, String> = HashMap::new();
     let mut by_content: HashMap<String, String> = HashMap::new();
@@ -100,14 +100,14 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
         for row in rows {
             let (memory, content, platform, project, started, completed, title) = row?;
             let agent = agent_of(&platform).to_string();
-            let mnem_id = format!("{agent}:{content}");
-            by_content.insert(content.clone(), mnem_id.clone());
+            let ravnori_id = format!("{agent}:{content}");
+            by_content.insert(content.clone(), ravnori_id.clone());
             stats.sessions_seen += 1;
             if let Some(m) = memory {
-                by_memory.insert(m, mnem_id.clone());
+                by_memory.insert(m, ravnori_id.clone());
             }
             all.push(CmSession {
-                mnem_id,
+                ravnori_id,
                 agent,
                 native: content,
                 project,
@@ -135,16 +135,16 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?;
         for s in &all {
-            if crate::forget::session_blocked(&tx, &s.mnem_id, Some(&proj(&s.project)))? {
+            if crate::forget::session_blocked(&tx, &s.ravnori_id, Some(&proj(&s.project)))? {
                 continue;
             }
             if exists
-                .query_row(params![s.mnem_id], |_| Ok(()))
+                .query_row(params![s.ravnori_id], |_| Ok(()))
                 .optional()?
                 .is_none()
             {
                 add.execute(params![
-                    s.mnem_id,
+                    s.ravnori_id,
                     s.agent,
                     s.native,
                     proj(&s.project),
@@ -251,7 +251,7 @@ pub fn claude_mem(conn: &mut Connection, src: &Path) -> Result<Stats> {
             {
                 continue;
             }
-            // The reserved id may already belong to a memory mnem distilled after an
+            // The reserved id may already belong to a memory ravnori distilled after an
             // earlier import; then take a fresh id. `sum:<id>` still identifies it.
             let wanted = SUMMARY_ID_BASE + id;
             let taken = tx
@@ -370,7 +370,7 @@ fn blocked(conn: &Connection, session: Option<&String>, project: &str) -> Result
 }
 
 /// claude-mem names projects by folder basename ("firstmate", but also "code" or a home
-/// directory). A name maps to a mnem project (git identity) only when the repo name
+/// directory). A name maps to a ravnori project (git identity) only when the repo name
 /// matches it; among several such repos, the one most often seen for sessions both
 /// systems know wins. Folder names like "code" stay as they are.
 fn map_projects(conn: &Connection, sessions: &[CmSession]) -> Result<HashMap<String, String>> {
@@ -391,7 +391,7 @@ fn map_projects(conn: &Connection, sessions: &[CmSession]) -> Result<HashMap<Str
     )?;
     for s in sessions {
         if let Some(p) = q
-            .query_row(params![s.mnem_id], |r| r.get::<_, String>(0))
+            .query_row(params![s.ravnori_id], |r| r.get::<_, String>(0))
             .optional()?
         {
             *votes.entry((s.project.clone(), p)).or_default() += 1;

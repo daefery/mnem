@@ -1,9 +1,9 @@
-//! Uptake: whether agents use what mnem gives them.
+//! Uptake: whether agents use what ravnori gives them.
 //!
 //! The judged evals measure whether recalled memories *would* help. This measures what
-//! happens in real sessions: every memory mnem injects (session start, prompt recall,
+//! happens in real sessions: every memory ravnori injects (session start, prompt recall,
 //! file recall) is recorded as an offer; every MCP call is recorded with the memory ids
-//! it asked for; every hook run with its duration. `mnem uptake` then reports, per
+//! it asked for; every hook run with its duration. `rvn uptake` then reports, per
 //! source, how many offers were followed up: the memory fetched in full over MCP in the
 //! same project within a day, or cited by id (`#123`) in the agent's replies in the same
 //! session. Transcripts keep neither hook context nor MCP arguments, so this starts
@@ -238,7 +238,7 @@ pub fn render(r: &Report, days: i64) -> String {
         ));
     }
     if r.mcp.is_empty() {
-        w.push_str("  MCP: no calls to mnem's tools\n");
+        w.push_str("  MCP: no calls to ravnori's tools\n");
     } else {
         let calls: Vec<String> = r.mcp.iter().map(|(t, n)| format!("{t} {n}")).collect();
         w.push_str(&format!("  MCP calls: {}\n", calls.join(", ")));
@@ -302,6 +302,9 @@ mod tests {
         assert_eq!(r.mcp, vec![("get_observations".to_string(), 1)]);
         assert_eq!(r.hooks, vec![("prompt".to_string(), 2, 20, 40)]);
         assert!(render(&r, 7).contains("prompt recall"));
-        assert_eq!(ids_in("mnem: x\n#12 a · b\n  #13 no\n#14 c"), vec![12, 14]);
+        assert_eq!(
+            ids_in("ravnori: x\n#12 a · b\n  #13 no\n#14 c"),
+            vec![12, 14]
+        );
     }
 }

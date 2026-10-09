@@ -1,10 +1,10 @@
-//! Which coding agents are connected to mnem on this machine, and what is missing.
+//! Which coding agents are connected to ravnori on this machine, and what is missing.
 //!
-//! One check shared by `mnem install` (which prints what it could not do), `mnem doctor`
-//! and the viewer (which offers to connect an agent installed after mnem). Each agent is
-//! looked at the same three ways: is it installed, are mnem's hooks (or pi's extension)
-//! in its settings, and are mnem's tools registered. Codex adds a fourth: it runs a hook
-//! only once the user has trusted that exact definition, which mnem cannot do for them.
+//! One check shared by `rvn install` (which prints what it could not do), `rvn doctor`
+//! and the viewer (which offers to connect an agent installed after ravnori). Each agent is
+//! looked at the same three ways: is it installed, are ravnori's hooks (or pi's extension)
+//! in its settings, and are ravnori's tools registered. Codex adds a fourth: it runs a hook
+//! only once the user has trusted that exact definition, which ravnori cannot do for them.
 //! Everything here reads files; nothing runs an agent.
 
 use crate::db;
@@ -52,13 +52,13 @@ pub struct Status {
     pub name: &'static str,
     /// The agent is on this machine (its settings folder or its command exists).
     pub installed: bool,
-    /// Memory is given to it automatically: mnem's hooks, or pi's extension.
+    /// Memory is given to it automatically: ravnori's hooks, or pi's extension.
     pub hooks: bool,
-    /// It can call mnem's tools (search, get_observations, recall_file...).
+    /// It can call ravnori's tools (search, get_observations, recall_file...).
     pub tools: bool,
-    /// Codex only: every mnem hook is trusted (None when it cannot be told or n/a).
+    /// Codex only: every rvn hook is trusted (None when it cannot be told or n/a).
     pub trusted: Option<bool>,
-    /// Hooks point at a mnem binary that no longer exists.
+    /// Hooks point at a ravnori binary that no longer exists.
     pub stale_binary: bool,
     /// connected | not_installed | needs_install | needs_trust
     pub state: &'static str,
@@ -66,8 +66,15 @@ pub struct Status {
     pub action: Option<String>,
 }
 
-/// Hook commands mnem writes contain this.
-const HOOK_MARK: &str = "mnem hook ";
+/// Hook commands ravnori writes contain this.
+const HOOK_MARK: &str = "rvn hook ";
+/// Hooks written before 0.6.0, when ravnori was mnem: ravnori's to replace or remove.
+const OLD_HOOK_MARK: &str = "mnem hook ";
+
+/// A hook command ravnori owns: written by this version or by mnem, its earlier name.
+pub fn is_hook_command(c: &str) -> bool {
+    c.contains(HOOK_MARK) || c.contains(OLD_HOOK_MARK)
+}
 
 pub fn status_all() -> Vec<Status> {
     Agent::ALL.into_iter().map(status).collect()
@@ -83,13 +90,13 @@ pub fn status(agent: Agent) -> Status {
         .iter()
         .any(|b| Path::new(b).is_absolute() && !is_executable(Path::new(b)));
     let (state, action) = if !installed {
-        // Nothing to connect yet; if mnem already wrote its part, it works from the start.
+        // Nothing to connect yet; if ravnori already wrote its part, it works from the start.
         ("not_installed", None)
     } else if !hooks || !tools || stale_binary {
         (
             "needs_install",
             Some(format!(
-                "Connect {}: press Connect in the viewer, or run `mnem install --only {}`",
+                "Connect {}: press Connect in the viewer, or run `rvn install --only {}`",
                 agent.name(),
                 agent.id()
             )),
@@ -98,7 +105,7 @@ pub fn status(agent: Agent) -> Status {
         (
             "needs_trust",
             Some(
-                "Open Codex and trust mnem's hooks: type /hooks, review them and trust them (Codex skips hooks it has not been told to trust)"
+                "Open Codex and trust ravnori's hooks: type /hooks, review them and trust them (Codex skips hooks it has not been told to trust)"
                     .into(),
             ),
         )
@@ -124,7 +131,7 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// The mnem hook commands in a Claude-style `{"hooks": {Event: [group]}}` document.
+/// The rvn hook commands in a Claude-style `{"hooks": {Event: [group]}}` document.
 fn hook_commands(doc: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(events) = doc.get("hooks").and_then(Value::as_object) {
@@ -137,7 +144,7 @@ fn hook_commands(doc: &Value) -> Vec<String> {
                     .flatten()
                 {
                     if let Some(c) = h.get("command").and_then(Value::as_str)
-                        && c.contains(HOOK_MARK)
+                        && is_hook_command(c)
                     {
                         out.push(c.to_string());
                     }
@@ -182,7 +189,7 @@ pub fn command_path(cmd: &str) -> Option<PathBuf> {
         dirs.extend(v);
     }
     dirs.into_iter()
-        // Only absolute folders: a relative PATH entry depends on where mnem runs.
+        // Only absolute folders: a relative PATH entry depends on where ravnori runs.
         .filter(|d| d.is_absolute())
         .map(|d| d.join(cmd))
         .find(|p| is_executable(p))
@@ -203,8 +210,8 @@ fn is_executable(p: &Path) -> bool {
     }
 }
 
-/// Whether every hook mnem installs for `agent` is in `doc`, with this event and command
-/// (whatever mnem binary it names).
+/// Whether every hook ravnori installs for `agent` is in `doc`, with this event and command
+/// (whatever ravnori binary it names).
 fn all_hooks(doc: &Value, agent: &str) -> bool {
     crate::install::hook_entries("", agent)
         .iter()
@@ -234,7 +241,7 @@ pub fn active_claude_dir() -> PathBuf {
         .unwrap_or_else(|| db::home().join(".claude"))
 }
 
-/// Whether `mnem install` already put mnem's hook for `event` (session-start, prompt,
+/// Whether `rvn install` already put ravnori's hook for `event` (session-start, prompt,
 /// stop, file) into the active profile's settings: the plugin's copy then stays quiet,
 /// so a hook never runs twice.
 pub fn settings_has_hook(event: &str) -> bool {
@@ -243,7 +250,7 @@ pub fn settings_has_hook(event: &str) -> bool {
     hook_commands(&doc).iter().any(|c| c.ends_with(&suffix))
 }
 
-/// Whether the active profile already has mnem's tools registered by `mnem install`.
+/// Whether the active profile already has ravnori's tools registered by `rvn install`.
 pub fn settings_has_tools() -> bool {
     crate::install::claude_mcp_command(&active_claude_dir()).is_some()
 }
@@ -253,13 +260,13 @@ fn claude() -> Found {
         .into_iter()
         .filter(|d| d.is_dir())
         .collect();
-    // mnem may create a settings folder and a bare state file; only Claude Code creates
+    // ravnori may create a settings folder and a bare state file; only Claude Code creates
     // projects/ or puts anything else in its state file.
     let installed = command_path("claude").is_some()
         || dirs.iter().any(|d| {
             d.join("projects").is_dir()
                 || read_json(&crate::install::claude_state(d))
-                    .is_some_and(|v| !crate::install::only_mnem_state(&v))
+                    .is_some_and(|v| !crate::install::only_ravnori_state(&v))
         });
     // Every profile must be wired: a profile without hooks gets no memory.
     let mut hooks = !dirs.is_empty();
@@ -279,7 +286,7 @@ fn claude() -> Found {
 
 fn codex() -> Found {
     let dir = db::home().join(".codex");
-    // mnem writes hooks.json and config.toml itself; only Codex writes sessions/.
+    // ravnori writes hooks.json and config.toml itself; only Codex writes sessions/.
     let installed = command_path("codex").is_some() || dir.join("sessions").is_dir();
     let hooks_path = dir.join("hooks.json");
     let doc = read_json(&hooks_path).unwrap_or(Value::Null);
@@ -297,9 +304,9 @@ fn codex() -> Found {
     (installed, hooks, server.is_some(), trusted, bins)
 }
 
-/// The command of `[mcp_servers.mnem]` when it runs mnem's MCP server (`args` = `["mcp"]`).
+/// The command of `[mcp_servers.ravnori]` when it runs ravnori's MCP server (`args` = `["mcp"]`).
 pub(crate) fn codex_mcp_command(cfg: &toml_edit::DocumentMut) -> Option<String> {
-    let m = cfg.get("mcp_servers")?.get("mnem")?;
+    let m = cfg.get("mcp_servers")?.get("ravnori")?;
     let args = m.get("args")?.as_array()?;
     (args.len() == 1 && args.get(0)?.as_str() == Some("mcp"))
         .then(|| m.get("command")?.as_str().map(str::to_string))
@@ -308,7 +315,7 @@ pub(crate) fn codex_mcp_command(cfg: &toml_edit::DocumentMut) -> Option<String> 
 
 /// Codex records trust per hook as `[hooks.state."<hooks.json>:<event>:<group>:<hook>"]`
 /// with a `trusted_hash` (of the exact definition, so a changed hook needs trusting
-/// again). mnem cannot recompute that hash; it checks that each of its hooks has a
+/// again). ravnori cannot recompute that hash; it checks that each of its hooks has a
 /// trust entry at its position. A definition changed since trusting still reads as
 /// trusted here, and Codex itself asks again on its next start.
 fn codex_trusted(cfg: &toml_edit::DocumentMut, hooks_path: &Path) -> bool {
@@ -334,7 +341,7 @@ fn codex_trusted(cfg: &toml_edit::DocumentMut, hooks_path: &Path) -> bool {
                 let ours = h
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains(HOOK_MARK));
+                    .is_some_and(is_hook_command);
                 if !ours {
                     continue;
                 }
@@ -368,15 +375,15 @@ fn snake_case(s: &str) -> String {
 
 fn pi() -> Found {
     let home = db::home();
-    // mnem writes the extension itself; only pi writes sessions/.
+    // ravnori writes the extension itself; only pi writes sessions/.
     let installed = command_path("pi").is_some() || home.join(".pi/agent/sessions").is_dir();
-    let ext = home.join(".pi/agent/extensions/mnem/index.ts");
+    let ext = home.join(".pi/agent/extensions/ravnori/index.ts");
     let src = std::fs::read_to_string(&ext).unwrap_or_default();
-    let wired = src.contains("MNEM_BIN");
+    let wired = src.contains("RAVNORI_BIN");
     // The extension names the binary as a JSON string literal after `?? `.
     let bins = src
         .lines()
-        .find(|l| l.contains("process.env.MNEM_BIN ??"))
+        .find(|l| l.contains("process.env.RAVNORI_BIN ??"))
         .and_then(|l| l.split("?? ").nth(1))
         .and_then(|s| serde_json::from_str::<String>(s.trim_end_matches(';')).ok())
         .into_iter()
@@ -385,18 +392,17 @@ fn pi() -> Found {
     (installed, wired, wired, None, bins)
 }
 
-/// One line per agent, for `mnem doctor` and the end of `mnem install`.
+/// One line per agent, for `rvn doctor` and the end of `rvn install`.
 pub fn render(statuses: &[Status]) -> String {
     let mut w = String::new();
     for s in statuses {
         let what = match s.state {
             "connected" => "connected".to_string(),
             "not_installed" if s.hooks && s.tools => {
-                "not installed yet; mnem is ready for it (nothing to do when you install it)".into()
+                "not installed yet; ravnori is ready for it (nothing to do when you install it)"
+                    .into()
             }
-            "not_installed" => {
-                "not installed (run `mnem install` again after installing it)".into()
-            }
+            "not_installed" => "not installed (run `rvn install` again after installing it)".into(),
             "needs_trust" => {
                 "hooks written, not trusted yet: in Codex type /hooks and trust them".into()
             }
@@ -409,10 +415,10 @@ pub fn render(statuses: &[Status]) -> String {
                     missing.push("tools");
                 }
                 if s.stale_binary {
-                    missing.push("points at a mnem binary that no longer exists");
+                    missing.push("points at a ravnori binary that no longer exists");
                 }
                 format!(
-                    "NOT CONNECTED ({}): run `mnem install --only {}`",
+                    "NOT CONNECTED ({}): run `rvn install --only {}`",
                     missing.join(", "),
                     s.agent.id()
                 )
@@ -429,21 +435,21 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn finds_mnem_hooks_and_their_binary() {
+    fn finds_ravnori_hooks_and_their_binary() {
         let doc = json!({ "hooks": {
             "Stop": [{ "hooks": [
                 { "type": "command", "command": "notify-send done" },
-                { "type": "command", "command": "/opt/mnem hook claude stop" }
+                { "type": "command", "command": "/opt/rvn hook claude stop" }
             ] }],
         } });
         let cmds = hook_commands(&doc);
-        assert_eq!(cmds, ["/opt/mnem hook claude stop"]);
-        assert_eq!(binary_of(&cmds[0]).as_deref(), Some("/opt/mnem"));
+        assert_eq!(cmds, ["/opt/rvn hook claude stop"]);
+        assert_eq!(binary_of(&cmds[0]).as_deref(), Some("/opt/rvn"));
         assert!(hook_commands(&json!({})).is_empty());
     }
 
     #[test]
-    fn codex_trust_needs_an_entry_for_every_mnem_hook() {
+    fn codex_trust_needs_an_entry_for_every_ravnori_hook() {
         let dir = crate::TempDir::new("agents");
         let hooks = dir.join("hooks.json");
         std::fs::write(
@@ -451,9 +457,9 @@ mod tests {
             json!({ "hooks": {
                 "SessionStart": [
                     { "hooks": [{ "type": "command", "command": "gh-axi" }] },
-                    { "hooks": [{ "type": "command", "command": "/x/mnem hook codex session-start" }] }
+                    { "hooks": [{ "type": "command", "command": "/x/rvn hook codex session-start" }] }
                 ],
-                "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/x/mnem hook codex prompt" }] }],
+                "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "/x/rvn hook codex prompt" }] }],
             } })
             .to_string(),
         )
@@ -468,7 +474,7 @@ mod tests {
         let both =
             format!("{one}[hooks.state.\"{f}:user_prompt_submit:0:0\"]\ntrusted_hash = \"b\"\n");
         assert!(codex_trusted(&doc(both), &hooks));
-        // Another hook's trust (gh-axi at 0:0) does not count for mnem's.
+        // Another hook's trust (gh-axi at 0:0) does not count for ravnori's.
         let wrong = format!(
             "[hooks.state.\"{f}:session_start:0:0\"]\ntrusted_hash = \"a\"\n[hooks.state.\"{f}:user_prompt_submit:0:0\"]\ntrusted_hash = \"b\"\n"
         );
@@ -491,23 +497,23 @@ mod tests {
         let cfg = |s: &str| -> toml_edit::DocumentMut { s.parse().unwrap() };
         assert_eq!(
             codex_mcp_command(&cfg(
-                "[mcp_servers.mnem]\ncommand = \"/m\"\nargs = [\n  \"mcp\",\n]\n"
+                "[mcp_servers.ravnori]\ncommand = \"/m\"\nargs = [\n  \"mcp\",\n]\n"
             ))
             .as_deref(),
             Some("/m")
         );
         assert_eq!(
-            codex_mcp_command(&cfg("[mcp_servers.mnem]\n")),
+            codex_mcp_command(&cfg("[mcp_servers.ravnori]\n")),
             None,
             "empty table"
         );
         assert_eq!(
-            codex_mcp_command(&cfg("# [mcp_servers.mnem]\n# command = \"/m\"\n")),
+            codex_mcp_command(&cfg("# [mcp_servers.ravnori]\n# command = \"/m\"\n")),
             None
         );
         assert_eq!(
             codex_mcp_command(&cfg(
-                "[mcp_servers.mnem]\ncommand = \"/m\"\nargs = [\"mcp\", \"x\"]\n"
+                "[mcp_servers.ravnori]\ncommand = \"/m\"\nargs = [\"mcp\", \"x\"]\n"
             )),
             None
         );

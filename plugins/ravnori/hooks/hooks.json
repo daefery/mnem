@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/mnem-session-start\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/ravnori-session-start\"",
             "timeout": 15
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/mnem-prompt\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/ravnori-prompt\"",
             "timeout": 10
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/mnem-stop\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/ravnori-stop\"",
             "timeout": 10
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/mnem-file\"",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/ravnori-file\"",
             "timeout": 10
           }
         ]

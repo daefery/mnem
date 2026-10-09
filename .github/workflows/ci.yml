@@ -28,9 +28,9 @@ jobs:
       - run: cargo test --locked --release
       - name: Shell scripts
         if: runner.os == 'Linux'
-        run: shellcheck install.sh plugins/mnem/scripts/*
+        run: shellcheck install.sh plugins/ravnori/scripts/*
       - name: Plugin manifests are valid JSON
         run: |
-          for f in .claude-plugin/marketplace.json plugins/mnem/.claude-plugin/plugin.json plugins/mnem/hooks/hooks.json plugins/mnem/.mcp.json; do
+          for f in .claude-plugin/marketplace.json plugins/ravnori/.claude-plugin/plugin.json plugins/ravnori/hooks/hooks.json plugins/ravnori/.mcp.json; do
             python3 -m json.tool "$f" > /dev/null || { echo "invalid: $f"; exit 1; }
           done

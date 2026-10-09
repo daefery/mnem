@@ -304,7 +304,7 @@ fn rewrite_origin_id(
     {
         return format!("pin:{p}:{hash}");
     }
-    if origin == "mnem"
+    if origin == "ravnori"
         && let Some(map) = events
         && let Some((sid, tail)) = origin_id.rsplit_once('@')
         && let Some((range, n)) = tail.split_once('#')
@@ -566,12 +566,12 @@ mod tests {
         );
         let map: HashMap<i64, i64> = [(10, 510), (11, 511), (14, 514)].into_iter().collect();
         assert_eq!(
-            rewrite_origin_id("mnem", "claude:s@10-14#2", Some("p"), Some(&map)),
+            rewrite_origin_id("ravnori", "claude:s@10-14#2", Some("p"), Some(&map)),
             "claude:s@510-514#2"
         );
         // An end that was not copied falls back to the nearest copied id in the range.
         assert_eq!(
-            rewrite_origin_id("mnem", "claude:s@9-15#0", Some("p"), Some(&map)),
+            rewrite_origin_id("ravnori", "claude:s@9-15#0", Some("p"), Some(&map)),
             "claude:s@510-514#0"
         );
         assert_eq!(

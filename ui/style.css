@@ -1,5 +1,5 @@
 /*
- * mnem viewer stylesheet.
+ * ravnori viewer stylesheet.
  *
  * The look only: every element, filter and behaviour comes from index.html and app.js.
  * System fonts (no web font), no blur, no entrance animations, so it stays light on
@@ -12,6 +12,8 @@
 
 :root {
   color-scheme: light;
+  --logo-ink: #122D2B;
+  --logo-dot: #168F76;
   --bg: #f6f8fa;
   --surface: #ffffff;
   --surface-2: #f6f8fa;
@@ -62,6 +64,8 @@
 /* Dark: one set of values, for the explicit choice and for the system default. */
 [data-theme="dark"] {
   color-scheme: dark;
+  --logo-ink: #E9F2E7;
+  --logo-dot: #B5E38B;
   --bg: #0d1117;
   --surface: #151b23;
   --surface-2: #1b222c;
@@ -103,6 +107,8 @@
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
+    --logo-ink: #E9F2E7;
+    --logo-dot: #B5E38B;
     --bg: #0d1117;
     --surface: #151b23;
     --surface-2: #1b222c;
@@ -216,8 +222,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--ink);
 }
 
-.logomark, .mnem-logomark { width: 30px; height: 30px; display: block; }
-.logomark.spinning, .mnem-logomark.spinning { animation: spin 1.2s linear infinite; }
+.logomark, .ravnori-logomark { width: 30px; height: 30px; display: block; }
+/* The strata logo, in the theme's own colours (light: deep green; dark: pale). */
+.ravnori-logomark .logo-ink { fill: var(--logo-ink); }
+.ravnori-logomark .logo-line { fill: none; stroke: var(--logo-ink); stroke-width: 12; stroke-linecap: round; stroke-linejoin: round; }
+.ravnori-logomark .logo-dot { fill: var(--logo-dot); }
+.logomark.spinning, .ravnori-logomark.spinning { animation: spin 1.2s linear infinite; }
 
 .logo-text {
   font-family: var(--font-mono);
@@ -229,7 +239,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .status { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 
-.mnem-search {
+.ravnori-search {
   height: 36px;
   min-width: 240px;
   padding: 0 12px 0 34px;
@@ -243,15 +253,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   outline: none;
 }
 
-.mnem-search::placeholder { color: var(--ink-4); }
+.ravnori-search::placeholder { color: var(--ink-4); }
 
-.mnem-search:focus {
+.ravnori-search:focus {
   background-color: var(--surface);
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--ring);
 }
 
-.mnem-health {
+.ravnori-health {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -267,7 +277,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-variant-numeric: tabular-nums;
 }
 
-.mnem-health .dot {
+.ravnori-health .dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
@@ -275,7 +285,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent);
 }
 
-.mnem-health.behind .dot {
+.ravnori-health.behind .dot {
   background: var(--warn);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent);
 }
@@ -443,7 +453,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--ink-3);
 }
 
-.mnem-match {
+.ravnori-match {
   display: inline-flex;
   align-items: center;
   height: 20px;
@@ -458,8 +468,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   opacity: 0.9;
 }
 
-.mnem-match.match-both { color: var(--ok); }
-.mnem-match.match-meaning { color: var(--warn); }
+.ravnori-match.match-both { color: var(--ok); }
+.ravnori-match.match-meaning { color: var(--warn); }
 
 /* Titles and text. */
 .card-title {
@@ -668,7 +678,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ------------------------------------------------------------ feed states */
 
-.mnem-empty {
+.ravnori-empty {
   padding: 36px 16px 48px;
   text-align: center;
   font-size: 13px;
@@ -709,7 +719,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ------------------------------------------------------------ agents banner */
 
-.mnem-agents {
+.ravnori-agents {
   position: relative;
   margin-bottom: 18px;
   padding: 14px 16px 12px 18px;
@@ -721,7 +731,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--ink);
 }
 
-.mnem-agents h3 {
+.ravnori-agents h3 {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -731,7 +741,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--summary-title);
 }
 
-.mnem-agents h3::before {
+.ravnori-agents h3::before {
   content: "!";
   display: inline-flex;
   align-items: center;
@@ -745,7 +755,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 800;
 }
 
-.mnem-agent {
+.ravnori-agent {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -754,13 +764,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-top: 1px solid var(--summary-line);
 }
 
-.mnem-agent:first-of-type { border-top: 0; }
-.mnem-agent b { min-width: 96px; font-weight: 650; }
-.mnem-agent .why { flex: 1 1 260px; color: var(--ink-2); }
-.mnem-agent code { font-family: var(--font-mono); font-size: 12px; padding: 1px 5px; border-radius: 5px; background: var(--surface-3); }
-.mnem-agent .move-status { flex-basis: 100%; }
+.ravnori-agent:first-of-type { border-top: 0; }
+.ravnori-agent b { min-width: 96px; font-weight: 650; }
+.ravnori-agent .why { flex: 1 1 260px; color: var(--ink-2); }
+.ravnori-agent code { font-family: var(--font-mono); font-size: 12px; padding: 1px 5px; border-radius: 5px; background: var(--surface-3); }
+.ravnori-agent .move-status { flex-basis: 100%; }
 
-.mnem-agent pre {
+.ravnori-agent pre {
   flex-basis: 100%;
   max-height: 160px;
   margin: 4px 0 0;
@@ -1064,7 +1074,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .move-plan code { font-family: var(--font-mono); font-size: 12px; overflow-wrap: anywhere; }
 .move-plan.error { color: var(--danger); }
 
-.move-preview[hidden], .move-progress[hidden], .mnem-agents[hidden] { display: none; }
+.move-preview[hidden], .move-progress[hidden], .ravnori-agents[hidden] { display: none; }
 
 /* ------------------------------------------------------------ scrollbars */
 
@@ -1076,9 +1086,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* ------------------------------------------------------------ narrower screens */
 
 @media (max-width: 900px) {
-  .mnem-search { min-width: 0; width: 150px; }
-  .mnem-health .label { display: none; }
-  .mnem-health { padding: 0 12px; }
+  .ravnori-search { min-width: 0; width: 150px; }
+  .ravnori-health .label { display: none; }
+  .ravnori-health { padding: 0 12px; }
 }
 
 @media (max-width: 768px) and (min-width: 481px) {
@@ -1107,7 +1117,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   .header { padding: 10px 14px; gap: 10px; }
   .header h1 { gap: 8px; font-size: 15px; }
   .header-main { gap: 10px; }
-  .logomark, .mnem-logomark { width: 26px; height: 26px; }
+  .logomark, .ravnori-logomark { width: 26px; height: 26px; }
   .logo-text { font-size: 17px; }
   .status {
     gap: 6px;
@@ -1118,8 +1128,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     padding-bottom: 2px;
   }
   .status::-webkit-scrollbar { display: none; }
-  .mnem-search { width: 130px; height: 32px; }
-  .mnem-health { height: 32px; }
+  .ravnori-search { width: 130px; height: 32px; }
+  .ravnori-health { height: 32px; }
   .settings-btn, .theme-toggle-btn { width: 32px; height: 32px; flex-shrink: 0; }
   .settings-icon, .theme-toggle-btn svg { width: 16px; height: 16px; }
   .feed { padding: 14px 10px 90px; }

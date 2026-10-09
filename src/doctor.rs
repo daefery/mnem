@@ -1,4 +1,4 @@
-//! Capture health. The point of mnem is that silent loss becomes a visible number.
+//! Capture health. The point of ravnori is that silent loss becomes a visible number.
 
 use crate::db;
 use crate::ingest;
@@ -79,7 +79,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
         );
     }
     if lost_files > 0 {
-        // Permanent: the agent deleted these before mnem read their tail.
+        // Permanent: the agent deleted these before ravnori read their tail.
         println!(
             "  LOST: {lost_files} files deleted with {:.1} KB never captured",
             lost_bytes as f64 / 1e3
@@ -126,7 +126,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
     let auto = crate::backup::auto_enabled(conn);
     match crate::backup::newest_age(&crate::backup::dir()) {
         age if !auto => println!(
-            "backup: automatic off (manual: viewer or `mnem backup`){}",
+            "backup: automatic off (manual: viewer or `rvn backup`){}",
             age.map(|a| format!("; newest verified snapshot {} ago", crate::context::ago(a)))
                 .unwrap_or_else(|| "; none taken yet".into())
         ),
@@ -139,13 +139,13 @@ pub fn run(conn: &Connection) -> Result<bool> {
         Some(age) => {
             healthy = false;
             println!(
-                "backup: STALE, newest verified snapshot {} ago (run `mnem backup`)",
+                "backup: STALE, newest verified snapshot {} ago (run `rvn backup`)",
                 crate::context::ago(age)
             );
         }
         None => {
             healthy = false;
-            println!("backup: NONE, run `mnem backup` (the watch service does this daily)");
+            println!("backup: NONE, run `rvn backup` (the watch service does this daily)");
         }
     }
     let model = crate::embed::model_name();
@@ -165,7 +165,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
     if crate::config::CONFIG.semantic.enabled == Some(false) {
         println!("semantic: off (config)");
     } else if vectors == 0 && memories > 0 {
-        println!("semantic: off, run `mnem embed` to download {model} and embed memories");
+        println!("semantic: off, run `rvn embed` to download {model} and embed memories");
     } else if vectors == 0 {
         // No memories yet: nothing to embed. Say whether the model is ready for them.
         if crate::embed::downloaded() {
@@ -177,25 +177,25 @@ pub fn run(conn: &Connection) -> Result<bool> {
                 "about 30 MB"
             };
             println!(
-                "semantic: {model} downloads once ({size}) when mnem-watch starts; or run `mnem embed`"
+                "semantic: {model} downloads once ({size}) when ravnori-watch starts; or run `rvn embed`"
             );
         }
     } else {
         // Ask the service, not the records: a build without the model's feature serves
         // nothing, and every search, recall and answer quietly loses meaning matching.
         let served = match crate::embed::service_port(conn) {
-            None => "mnem-watch not running: hooks and ask match by words only".to_string(),
-            Some(_) => match crate::embed::query_from_service(conn, "mnem doctor probe") {
+            None => "ravnori-watch not running: hooks and ask match by words only".to_string(),
+            Some(_) => match crate::embed::query_from_service(conn, "rvn doctor probe") {
                 // The service names its vectors' key: the model, '@', a fingerprint.
                 Some(q) if q.model.split('@').next() == Some(model.as_str()) => {
-                    "served by mnem-watch".to_string()
+                    "served by ravnori-watch".to_string()
                 }
-                Some(q) => format!("but mnem-watch serves {}", q.model),
+                Some(q) => format!("but ravnori-watch serves {}", q.model),
                 None => {
                     semantic_down = true;
-                    "but mnem-watch serves NO model: reinstall a build with the model's \
+                    "but ravnori-watch serves NO model: reinstall a build with the model's \
                      feature (`cargo install --path . --locked --features fastembed`), then \
-                     restart mnem-watch"
+                     restart ravnori-watch"
                         .to_string()
                 }
             },
@@ -217,7 +217,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
         let backfill = match b.since {
             _ if b.budget == 0 => "backfill off (distill.daily_calls = 0)".to_string(),
             Some(_) => format!("backfill covers the last {} days", b.days),
-            None => "backfill starts when mnem-watch runs".to_string(),
+            None => "backfill starts when ravnori-watch runs".to_string(),
         };
         println!(
             "distill: {} pending · {} of {} requests used in 24 h · {backfill}",
@@ -235,7 +235,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
                 b.before_backfill
             );
             println!(
-                "  catch up, newest first: mnem distill --since-days 30 --limit 1000 --max-calls 200 (repeat until done; add --dry-run to see the cost)"
+                "  catch up, newest first: rvn distill --since-days 30 --limit 1000 --max-calls 200 (repeat until done; add --dry-run to see the cost)"
             );
         }
     }
@@ -255,7 +255,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
             .collect();
         let calls: usize = u.mcp.iter().map(|(_, n)| n).sum();
         println!(
-            "uptake (7 days): {}; {calls} MCP calls (details: mnem uptake)",
+            "uptake (7 days): {}; {calls} MCP calls (details: rvn uptake)",
             if parts.is_empty() {
                 "nothing offered".to_string()
             } else {
@@ -269,7 +269,7 @@ pub fn run(conn: &Connection) -> Result<bool> {
     print!("{}", crate::agents::render(&agents));
     let mut alerts = crate::health::alerts(conn, crate::health::stuck_files(conn));
     if semantic_down {
-        alerts.push("mnem-watch serves no embedding model (see semantic above)".to_string());
+        alerts.push("ravnori-watch serves no embedding model (see semantic above)".to_string());
     }
     alerts.extend(
         agents
@@ -292,13 +292,13 @@ pub fn run(conn: &Connection) -> Result<bool> {
         } else if !alerts.is_empty() {
             "ATTENTION, see alerts above"
         } else {
-            "BEHIND, run `mnem backfill`"
+            "BEHIND, run `rvn backfill`"
         }
     );
     Ok(healthy)
 }
 
-/// For sessions where claude-mem stored zero observations, does mnem have the work?
+/// For sessions where claude-mem stored zero observations, does ravnori have the work?
 fn claude_mem_comparison(conn: &Connection) -> Result<()> {
     let path = db::home().join(".claude-mem/claude-mem.db");
     if !path.exists() {
@@ -344,7 +344,7 @@ fn claude_mem_comparison(conn: &Connection) -> Result<()> {
             .filter(|(_, id, _)| have.contains(&format!("{agent}:{id}")))
             .count();
         println!(
-            "  {agent:<6} {total:>4} sessions, {} with 0 observations -> {recovered} recovered by mnem, {} transcript gone",
+            "  {agent:<6} {total:>4} sessions, {} with 0 observations -> {recovered} recovered by ravnori, {} transcript gone",
             empty.len(),
             empty.len() - recovered
         );

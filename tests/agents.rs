@@ -1,31 +1,31 @@
-//! Connecting agents in any order: mnem installed before an agent, after it, or with
+//! Connecting agents in any order: ravnori installed before an agent, after it, or with
 //! the agent's own command missing. Runs the real binary in a scratch home folder.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn scratch(name: &str) -> mnem::TempDir {
-    mnem::TempDir::new(&format!("agents-{name}"))
+fn scratch(name: &str) -> ravnori::TempDir {
+    ravnori::TempDir::new(&format!("agents-{name}"))
 }
 
-/// `mnem <args>` with HOME in the scratch folder and a PATH holding only `bin`
+/// `ravnori <args>` with HOME in the scratch folder and a PATH holding only `bin`
 /// (fake agent commands) and the system's basics.
-fn mnem(home: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_mnem"))
+fn ravnori(home: &Path, args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_rvn"))
         .args(args)
         .env("HOME", home)
-        .env("MNEM_HOME", home.join(".mnem"))
+        .env("RAVNORI_HOME", home.join(".ravnori"))
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", home.join("bin").display()),
         )
-        .env_remove("MNEM_CLAUDE_DIRS")
+        .env_remove("RAVNORI_CLAUDE_DIRS")
         .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "mnem {args:?} failed: {}",
+        "ravnori {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -38,7 +38,7 @@ fn fake_command(home: &Path, name: &str) {
     std::fs::create_dir_all(&bin).unwrap();
     let script = if name == "claude" {
         format!(
-            "#!/bin/sh\necho \"$@\" >> {log}\nif [ \"$1 $2\" = \"mcp add\" ]; then printf '{{\"mcpServers\":{{\"mnem\":{{\"type\":\"stdio\",\"command\":\"x\",\"args\":[\"mcp\"]}}}}}}' > {state}; fi\n",
+            "#!/bin/sh\necho \"$@\" >> {log}\nif [ \"$1 $2\" = \"mcp add\" ]; then printf '{{\"mcpServers\":{{\"ravnori\":{{\"type\":\"stdio\",\"command\":\"x\",\"args\":[\"mcp\"]}}}}}}' > {state}; fi\n",
             log = home.join("claude-calls.log").display(),
             state = home.join(".claude.json").display()
         )
@@ -61,22 +61,22 @@ fn line<'a>(report: &'a str, agent: &str) -> &'a str {
 }
 
 #[test]
-fn mnem_first_then_agents_later() {
+fn ravnori_first_then_agents_later() {
     let home = scratch("first");
-    // Nothing installed yet: mnem still writes every agent's part.
-    let out = mnem(&home, &["install"]);
+    // Nothing installed yet: ravnori still writes every agent's part.
+    let out = ravnori(&home, &["install"]);
     assert!(out.contains("Claude Code ("), "{out}");
     assert!(home.join(".claude/settings.json").is_file());
     assert!(home.join(".codex/hooks.json").is_file());
-    assert!(home.join(".pi/agent/extensions/mnem/index.ts").is_file());
+    assert!(home.join(".pi/agent/extensions/ravnori/index.ts").is_file());
     // Without the claude command, the tools are registered directly.
     let state: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(home.join(".claude.json")).unwrap()).unwrap();
-    assert_eq!(state["mcpServers"]["mnem"]["args"][0], "mcp");
-    let doctor = mnem(&home, &["doctor"]);
+    assert_eq!(state["mcpServers"]["ravnori"]["args"][0], "mcp");
+    let doctor = ravnori(&home, &["doctor"]);
     for agent in ["Claude Code", "Codex", "pi"] {
         assert!(
-            line(&doctor, agent).contains("not installed yet; mnem is ready"),
+            line(&doctor, agent).contains("not installed yet; ravnori is ready"),
             "{doctor}"
         );
     }
@@ -86,7 +86,7 @@ fn mnem_first_then_agents_later() {
     fake_command(&home, "claude");
     fake_command(&home, "codex");
     fake_command(&home, "pi");
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Claude Code").contains("connected"),
         "{doctor}"
@@ -120,73 +120,73 @@ fn mnem_first_then_agents_later() {
         }
     }
     std::fs::write(home.join(".codex/config.toml"), trust).unwrap();
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(line(&doctor, "Codex").contains("connected"), "{doctor}");
     let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
-fn an_agent_whose_settings_lost_mnem_is_reported_and_reconnected() {
+fn an_agent_whose_settings_lost_ravnori_is_reported_and_reconnected() {
     let home = scratch("lost");
     fake_command(&home, "claude");
     fake_command(&home, "pi");
-    mnem(&home, &["install", "--only", "claude,pi"]);
-    // The agent was reinstalled over its settings: mnem's hooks are gone.
+    ravnori(&home, &["install", "--only", "claude,pi"]);
+    // The agent was reinstalled over its settings: ravnori's hooks are gone.
     std::fs::write(home.join(".claude/settings.json"), "{}").unwrap();
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Claude Code").contains("NOT CONNECTED (memory hooks)"),
         "{doctor}"
     );
-    assert!(doctor.contains("mnem install --only claude"), "{doctor}");
+    assert!(doctor.contains("rvn install --only claude"), "{doctor}");
     assert!(doctor.contains("status: ATTENTION"), "{doctor}");
     // Connecting it again, as the viewer's button does.
-    mnem(&home, &["install", "--only", "claude"]);
-    let doctor = mnem(&home, &["doctor"]);
+    ravnori(&home, &["install", "--only", "claude"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Claude Code").contains("connected"),
         "{doctor}"
     );
     // The claude command was used for the tools when it existed.
     let calls = std::fs::read_to_string(home.join("claude-calls.log")).unwrap();
-    assert!(calls.contains("mcp add --scope user mnem"), "{calls}");
+    assert!(calls.contains("mcp add --scope user ravnori"), "{calls}");
     let _ = std::fs::remove_dir_all(&home);
 }
 
 #[test]
-fn uninstall_removes_only_what_mnem_created() {
+fn uninstall_removes_only_what_ravnori_created() {
     let home = scratch("uninstall");
-    mnem(&home, &["install", "--only", "claude"]);
+    ravnori(&home, &["install", "--only", "claude"]);
     let state = std::fs::read_to_string(home.join(".claude.json")).unwrap();
-    assert!(state.contains("\"mnem\""));
-    mnem(&home, &["uninstall"]);
+    assert!(state.contains("\"ravnori\""));
+    ravnori(&home, &["uninstall"]);
     assert!(
         !home.join(".claude.json").exists(),
-        "mnem's own file is removed"
+        "ravnori's own file is removed"
     );
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// Claude Code's own state file is never edited by mnem: without the `claude` command it
+/// Claude Code's own state file is never edited by ravnori: without the `claude` command it
 /// says what to run instead.
 #[test]
 fn claude_code_state_is_left_to_claude_code() {
     let home = scratch("state");
     let theirs = r#"{"numStartups": 7, "projects": {"/w": {"allowedTools": []}}}"#;
     std::fs::write(home.join(".claude.json"), theirs).unwrap();
-    let out = mnem(&home, &["install", "--only", "claude"]);
+    let out = ravnori(&home, &["install", "--only", "claude"]);
     assert_eq!(
         std::fs::read_to_string(home.join(".claude.json")).unwrap(),
         theirs
     );
-    assert!(out.contains("claude mcp add --scope user mnem"), "{out}");
+    assert!(out.contains("claude mcp add --scope user ravnori"), "{out}");
     // Claude Code's own state means it is installed: reported, with what is missing.
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Claude Code").contains("NOT CONNECTED (tools)"),
         "{doctor}"
     );
-    mnem(&home, &["uninstall"]);
+    ravnori(&home, &["uninstall"]);
     assert_eq!(
         std::fs::read_to_string(home.join(".claude.json")).unwrap(),
         theirs
@@ -200,27 +200,27 @@ fn half_wired_agents_are_not_reported_connected() {
     let home = scratch("half");
     fake_command(&home, "codex");
     fake_command(&home, "pi");
-    mnem(&home, &["install", "--only", "codex,pi"]);
+    ravnori(&home, &["install", "--only", "codex,pi"]);
     // One hook gone.
     let hooks = home.join(".codex/hooks.json");
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
     doc["hooks"].as_object_mut().unwrap().remove("SessionStart");
     std::fs::write(&hooks, doc.to_string()).unwrap();
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Codex").contains("NOT CONNECTED (memory hooks)"),
         "{doctor}"
     );
     // Reconnect, then point the tools at a binary that no longer exists.
-    mnem(&home, &["install", "--only", "codex"]);
+    ravnori(&home, &["install", "--only", "codex"]);
     let cfg = home.join(".codex/config.toml");
     let text = std::fs::read_to_string(&cfg).unwrap();
     let moved = text
         .lines()
         .map(|l| {
             if l.starts_with("command = ") {
-                "command = \"/gone/mnem\"".to_string()
+                "command = \"/gone/rvn\"".to_string()
             } else {
                 l.to_string()
             }
@@ -228,16 +228,16 @@ fn half_wired_agents_are_not_reported_connected() {
         .collect::<Vec<_>>()
         .join("\n");
     std::fs::write(&cfg, moved).unwrap();
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         line(&doctor, "Codex").contains("no longer exists"),
         "{doctor}"
     );
     // Reinstalling corrects the command in place.
-    mnem(&home, &["install", "--only", "codex"]);
+    ravnori(&home, &["install", "--only", "codex"]);
     let text = std::fs::read_to_string(&cfg).unwrap();
-    assert!(!text.contains("/gone/mnem"), "{text}");
-    assert_eq!(text.matches("[mcp_servers.mnem]").count(), 1, "{text}");
+    assert!(!text.contains("/gone/rvn"), "{text}");
+    assert_eq!(text.matches("[mcp_servers.ravnori]").count(), 1, "{text}");
     let _ = std::fs::remove_dir_all(&home);
 }
 
@@ -245,18 +245,18 @@ fn half_wired_agents_are_not_reported_connected() {
 #[test]
 fn a_repeat_install_writes_nothing() {
     let home = scratch("repeat");
-    mnem(&home, &["install"]);
+    ravnori(&home, &["install"]);
     let files = |home: &Path| -> Vec<String> {
         let mut v: Vec<String> = walk(home)
             .into_iter()
-            .filter(|p| p.to_string_lossy().contains(".bak-mnem-"))
+            .filter(|p| p.to_string_lossy().contains(".bak-ravnori-"))
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         v.sort();
         v
     };
     let before = files(&home);
-    let out = mnem(&home, &["install"]);
+    let out = ravnori(&home, &["install"]);
     assert_eq!(files(&home), before, "no new backups:\n{out}");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -280,17 +280,17 @@ fn walk(d: &Path) -> Vec<PathBuf> {
 fn without_a_model_install_and_doctor_say_no_memories_are_made() {
     let home = scratch("no-model");
     let warning = "no memories are being made";
-    let report = mnem(&home, &["install", "--only", "pi"]);
+    let report = ravnori(&home, &["install", "--only", "pi"]);
     assert!(report.contains(warning), "install report:\n{report}");
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(doctor.contains(warning), "doctor:\n{doctor}");
 
     std::fs::write(
-        home.join(".mnem/config.json"),
-        r#"{"distill": {"api_key_env": "MNEM_TEST_KEY"}}"#,
+        home.join(".ravnori/config.json"),
+        r#"{"distill": {"api_key_env": "RAVNORI_TEST_KEY"}}"#,
     )
     .unwrap();
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(!doctor.contains(warning), "doctor with a key:\n{doctor}");
     let _ = std::fs::remove_dir_all(&home);
 }
@@ -328,24 +328,24 @@ JSON
 fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
     let home = scratch("cli-provider");
     fake_claude_distiller(&home);
-    let report = mnem(&home, &["install", "--only", "pi"]);
+    let report = ravnori(&home, &["install", "--only", "pi"]);
     assert!(
         report.contains("distillation: using `claude`"),
         "install report:\n{report}"
     );
     let cfg: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(home.join(".mnem/config.json")).unwrap())
+        serde_json::from_str(&std::fs::read_to_string(home.join(".ravnori/config.json")).unwrap())
             .unwrap();
     assert_eq!(cfg["distill"]["provider"], "claude-cli");
     assert_eq!(cfg["distill"]["daily_calls"], 100);
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         !doctor.contains("no memories are being made"),
         "doctor:\n{doctor}"
     );
 
     // One session with enough to distil, then a distillation run through the fake.
-    let c = mnem::db::open(&home.join(".mnem/mnem.db")).unwrap();
+    let c = ravnori::db::open(&home.join(".ravnori/ravnori.db")).unwrap();
     c.execute("INSERT INTO sessions(id, agent, native_id, project, last_event_at) VALUES ('pi:s1','pi','s1','proj',1)", [])
         .unwrap();
     for (i, (kind, text)) in [
@@ -366,7 +366,7 @@ fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
         .unwrap();
     }
     drop(c);
-    let out = mnem(
+    let out = ravnori(
         &home,
         &["distill", "--since-days", "100000", "--limit", "5"],
     );
@@ -386,13 +386,13 @@ fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
     );
     let cwd = std::fs::read_to_string(home.join("claude-distill.cwd")).unwrap();
     assert!(
-        cwd.contains("mnem-distill-"),
+        cwd.contains("ravnori-distill-"),
         "runs in its own empty directory: {cwd}"
     );
-    let c = mnem::db::open(&home.join(".mnem/mnem.db")).unwrap();
+    let c = ravnori::db::open(&home.join(".ravnori/ravnori.db")).unwrap();
     let title: String = c
         .query_row(
-            "SELECT title FROM memories WHERE origin = 'mnem'",
+            "SELECT title FROM memories WHERE origin = 'ravnori'",
             [],
             |r| r.get(0),
         )
@@ -402,16 +402,16 @@ fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
 
     // A user's own setup is never replaced.
     std::fs::write(
-        home.join(".mnem/config.json"),
+        home.join(".ravnori/config.json"),
         r#"{"distill": {"api_key_env": "MY_KEY", "base_url": "http://x/v1"}}"#,
     )
     .unwrap();
-    let report = mnem(&home, &["install", "--only", "pi"]);
+    let report = ravnori(&home, &["install", "--only", "pi"]);
     assert!(
         !report.contains("distillation: using"),
         "install report:\n{report}"
     );
-    let cfg = std::fs::read_to_string(home.join(".mnem/config.json")).unwrap();
+    let cfg = std::fs::read_to_string(home.join(".ravnori/config.json")).unwrap();
     assert!(
         cfg.contains("MY_KEY") && !cfg.contains("claude-cli"),
         "{cfg}"
@@ -420,16 +420,16 @@ fn install_uses_claude_code_for_distillation_when_nothing_is_configured() {
 }
 
 /// The Claude Code plugin's hooks and tools run through `--plugin`: they work when the
-/// plugin is the only setup, and stay quiet when `mnem install` already wired the same
+/// plugin is the only setup, and stay quiet when `rvn install` already wired the same
 /// hook or registered the tools, so nothing runs twice.
 #[test]
 fn plugin_hooks_and_tools_never_run_twice() {
     let home = scratch("plugin");
     let run = |args: &[&str], stdin: &str| -> String {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_mnem"))
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rvn"))
             .args(args)
             .env("HOME", &home)
-            .env("MNEM_HOME", home.join(".mnem"))
+            .env("RAVNORI_HOME", home.join(".ravnori"))
             .env_remove("CLAUDE_CONFIG_DIR")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -442,7 +442,7 @@ fn plugin_hooks_and_tools_never_run_twice() {
             assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
         }
         let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "mnem {args:?}");
+        assert!(out.status.success(), "ravnori {args:?}");
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
     let tools = |args: &[&str]| -> usize {
@@ -472,8 +472,8 @@ fn plugin_hooks_and_tools_never_run_twice() {
     let all = tools(&["mcp"]);
     assert!(all > 0);
     assert_eq!(tools(&["mcp", "--plugin"]), all);
-    // After mnem install wired Claude Code: the plugin's copies stay quiet.
-    mnem(&home, &["install", "--only", "claude"]);
+    // After rvn install wired Claude Code: the plugin's copies stay quiet.
+    ravnori(&home, &["install", "--only", "claude"]);
     assert!(
         run(
             &["hook", "claude", "session-start", "--plugin"],
@@ -482,7 +482,7 @@ fn plugin_hooks_and_tools_never_run_twice() {
         .is_empty()
     );
     assert_eq!(tools(&["mcp", "--plugin"]), 0);
-    // mnem's own hooks and tools are unaffected.
+    // ravnori's own hooks and tools are unaffected.
     assert!(!run(&["hook", "claude", "session-start"], session_start).is_empty());
     assert_eq!(tools(&["mcp"]), all);
     let _ = std::fs::remove_dir_all(&home);

@@ -1,6 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect x="4" y="4" width="56" height="56" rx="14" fill="#0f766e"/>
-  <rect x="14" y="17" width="36" height="7" rx="3.5" fill="#99f6e4"/>
-  <rect x="14" y="28.5" width="28" height="7" rx="3.5" fill="#5eead4"/>
-  <rect x="14" y="40" width="20" height="7" rx="3.5" fill="#2dd4bf"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 132" role="img" aria-label="ravnori">
+  <style>
+    .ink { fill: #122D2B; stroke: #122D2B; }
+    .dot { fill: #168F76; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #E9F2E7; stroke: #E9F2E7; }
+      .dot { fill: #B5E38B; }
+    }
+  </style>
+  <g transform="translate(1 1)">
+    <path class="ink" d="M19 44L65 20L111 44L65 68Z" stroke="none"/>
+    <path class="ink" d="M19 66L65 90L111 66" style="fill:none" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <path class="ink" d="M19 88L65 112L111 88" style="fill:none" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle class="dot" cx="65" cy="44" r="9"/>
+  </g>
 </svg>

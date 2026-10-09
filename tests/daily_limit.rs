@@ -1,34 +1,34 @@
 //! The daily request limit holds for all background distillation: the per-turn Stop
 //! hook stops at `distill.daily_calls` like the watcher's backfill does, while a person
-//! running `mnem distill` by hand is not limited. Runs the real binary in a scratch home
+//! running `rvn distill` by hand is not limited. Runs the real binary in a scratch home
 //! with a fake `claude` that counts its calls.
 
 use std::path::Path;
 use std::process::Command;
 
-fn scratch(name: &str) -> mnem::TempDir {
-    let d = mnem::TempDir::new(&format!("limit-{name}"));
+fn scratch(name: &str) -> ravnori::TempDir {
+    let d = ravnori::TempDir::new(&format!("limit-{name}"));
     std::fs::create_dir_all(d.join("bin")).unwrap();
-    std::fs::create_dir_all(d.join(".mnem")).unwrap();
+    std::fs::create_dir_all(d.join(".ravnori")).unwrap();
     d
 }
 
-fn mnem(home: &Path, args: &[&str]) -> String {
-    let out = Command::new(env!("CARGO_BIN_EXE_mnem"))
+fn ravnori(home: &Path, args: &[&str]) -> String {
+    let out = Command::new(env!("CARGO_BIN_EXE_rvn"))
         .args(args)
         .env("HOME", home)
-        .env("MNEM_HOME", home.join(".mnem"))
+        .env("RAVNORI_HOME", home.join(".ravnori"))
         .env(
             "PATH",
             format!("{}:/usr/bin:/bin", home.join("bin").display()),
         )
-        .env_remove("MNEM_CLAUDE_DIRS")
+        .env_remove("RAVNORI_CLAUDE_DIRS")
         .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     assert!(
         out.status.success(),
-        "mnem {args:?} failed: {}",
+        "ravnori {args:?} failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
@@ -58,8 +58,8 @@ fn calls(home: &Path) -> usize {
 /// One idle session with enough work for a digest, and `spent` requests already
 /// recorded in the last 24 hours.
 fn seed(home: &Path, spent: usize) {
-    let conn = mnem::db::open(&home.join(".mnem/mnem.db")).unwrap();
-    let now = mnem::db::now_ms();
+    let conn = ravnori::db::open(&home.join(".ravnori/ravnori.db")).unwrap();
+    let now = ravnori::db::now_ms();
     conn.execute(
         "INSERT INTO sessions(id, agent, native_id, project, last_event_at) VALUES ('claude:s1', 'claude', 's1', 'p', ?1)",
         [now - 600_000],
@@ -84,7 +84,7 @@ fn background_distillation_stops_at_the_daily_limit_and_manual_does_not() {
     let home = scratch("spent");
     fake_claude(&home);
     std::fs::write(
-        home.join(".mnem/config.json"),
+        home.join(".ravnori/config.json"),
         r#"{"distill": {"provider": "claude-cli", "daily_calls": 5}}"#,
     )
     .unwrap();
@@ -101,16 +101,16 @@ fn background_distillation_stops_at_the_daily_limit_and_manual_does_not() {
         "--limit",
         "1",
     ];
-    mnem(&home, &stop);
+    ravnori(&home, &stop);
     assert_eq!(calls(&home), 0, "the Stop hook went past the daily limit");
-    let doctor = mnem(&home, &["doctor"]);
+    let doctor = ravnori(&home, &["doctor"]);
     assert!(
         doctor.contains("daily limit reached: 1 session(s) wait"),
         "doctor does not say the limit holds work back:\n{doctor}"
     );
 
     // The same session by hand: a person asked, so it is sent.
-    mnem(
+    ravnori(
         &home,
         &["distill", "--session", "claude:s1", "--active", "--quiet"],
     );
@@ -123,12 +123,12 @@ fn the_stop_hook_distils_while_the_limit_has_room() {
     let home = scratch("room");
     fake_claude(&home);
     std::fs::write(
-        home.join(".mnem/config.json"),
+        home.join(".ravnori/config.json"),
         r#"{"distill": {"provider": "claude-cli", "daily_calls": 5}}"#,
     )
     .unwrap();
     seed(&home, 4);
-    mnem(
+    ravnori(
         &home,
         &[
             "distill",
@@ -150,12 +150,12 @@ fn daily_calls_zero_turns_off_backfill_not_memories() {
     let home = scratch("zero");
     fake_claude(&home);
     std::fs::write(
-        home.join(".mnem/config.json"),
+        home.join(".ravnori/config.json"),
         r#"{"distill": {"provider": "claude-cli", "daily_calls": 0}}"#,
     )
     .unwrap();
     seed(&home, 3);
-    mnem(
+    ravnori(
         &home,
         &[
             "distill",

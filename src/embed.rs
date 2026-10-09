@@ -52,7 +52,7 @@ fn model_dir(name: &str) -> PathBuf {
 }
 
 /// Whether the configured model's files are on this machine, without loading it (for
-/// doctor: "downloaded, no memories yet" is not "run `mnem embed`").
+/// doctor: "downloaded, no memories yet" is not "run `rvn embed`").
 pub fn downloaded() -> bool {
     let name = model_name();
     #[cfg(feature = "fastembed")]
@@ -63,7 +63,7 @@ pub fn downloaded() -> bool {
     FILES.iter().all(|f| dir.join(f).is_file())
 }
 
-/// Download the model's three files from Hugging Face into ~/.mnem/models once.
+/// Download the model's three files from Hugging Face into ~/.ravnori/models once.
 /// ONNX models (fastembed:...) download themselves when first loaded.
 pub fn fetch(name: &str) -> Result<PathBuf> {
     if name.starts_with("fastembed:") {
@@ -96,7 +96,7 @@ pub fn fetch(name: &str) -> Result<PathBuf> {
         for f in FILES {
             let _ = std::fs::remove_file(dir.join(f));
         }
-        bail!("downloaded model {name} does not load ({e:#}); removed it, run `mnem embed` again");
+        bail!("downloaded model {name} does not load ({e:#}); removed it, run `rvn embed` again");
     }
     Ok(dir)
 }
@@ -120,7 +120,7 @@ pub struct Embedder {
 
 impl Embedder {
     /// Load the configured model if it has been downloaded (never downloads a static
-    /// model; ONNX models are fetched into ~/.mnem/models on first use).
+    /// model; ONNX models are fetched into ~/.ravnori/models on first use).
     pub fn load() -> Result<Embedder> {
         let name = model_name();
         #[cfg(feature = "fastembed")]
@@ -137,7 +137,7 @@ impl Embedder {
             let prefixes = prefixes(m);
             let long = "memory fingerprint probe sentence ".repeat(80);
             let probes: Vec<String> = [
-                "mnem fingerprint",
+                "ravnori fingerprint",
                 "why does the backup restore hang",
                 &long,
             ]
@@ -168,7 +168,7 @@ impl Embedder {
         }
         let dir = model_dir(&name);
         if !FILES.iter().all(|f| dir.join(f).exists()) {
-            bail!("embedding model {name} not downloaded (run `mnem embed`)");
+            bail!("embedding model {name} not downloaded (run `rvn embed`)");
         }
         let model = StaticModel::from_pretrained(&dir, None, Some(true), None)?;
         let mut h = Sha256::new();
@@ -212,7 +212,7 @@ impl Embedder {
 const MAX_TOKENS: usize = 256;
 
 /// The files fastembed loads for a model, found the way its Hugging Face cache finds
-/// them: HF_HOME if set, else mnem's model cache; `refs/main` names the snapshot.
+/// them: HF_HOME if set, else ravnori's model cache; `refs/main` names the snapshot.
 /// Any missing file is an error: an incomplete fingerprint would not tell models apart.
 #[cfg(feature = "fastembed")]
 fn onnx_assets(
@@ -349,7 +349,7 @@ pub fn backfill(conn: &mut Connection, e: &Embedder, limit: Option<usize>) -> Re
     Ok(done)
 }
 
-/// Copy this model's vectors from another mnem database (for example one where a model
+/// Copy this model's vectors from another ravnori database (for example one where a model
 /// was tried out), keeping only those whose memory text here still hashes the same.
 /// Returns (copied, skipped).
 pub fn import(
@@ -394,7 +394,7 @@ pub fn import(
     Ok((copied, skipped))
 }
 
-/// Delete vectors of every other model or model revision. Only `mnem embed` calls this:
+/// Delete vectors of every other model or model revision. Only `rvn embed` calls this:
 /// the long-running service never deletes, so a process still holding an older model
 /// cannot remove vectors a newer one wrote.
 pub fn prune(conn: &Connection, e: &Embedder) -> Result<usize> {
@@ -492,20 +492,23 @@ pub fn shared() -> Option<std::sync::Arc<Embedder>> {
     None
 }
 
-/// Port `mnem watch` serves the viewer and embeddings on unless told otherwise:
-/// MNEM_UI_PORT, then config `ui_port`, then 37777.
+/// Port `rvn watch` serves the viewer and embeddings on unless told otherwise:
+/// RAVNORI_UI_PORT, then config `ui_port`, then 37777.
 pub fn configured_port() -> u16 {
-    std::env::var("MNEM_UI_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
+    env_port()
         .or(crate::config::CONFIG.ui_port)
         .unwrap_or(37777)
+}
+
+/// RAVNORI_UI_PORT (or MNEM_UI_PORT from before the rename), when set to a port.
+fn env_port() -> Option<u16> {
+    crate::db::env_var("UI_PORT")?.to_str()?.parse().ok()
 }
 
 const PORT_KEY: &str = "watch.ui_port";
 
 /// Record the port this watch process listens on (0: none), with its pid, so hooks find
-/// it even when it came from `mnem watch --ui-port`.
+/// it even when it came from `rvn watch --ui-port`.
 pub fn record_service_port(conn: &Connection, port: u16) -> Result<()> {
     conn.execute(
         "INSERT INTO meta(k, v) VALUES (?1, ?2) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
@@ -514,15 +517,12 @@ pub fn record_service_port(conn: &Connection, port: u16) -> Result<()> {
     Ok(())
 }
 
-/// Port of the running watch service, None when there is none. MNEM_UI_PORT wins; then
+/// Port of the running watch service, None when there is none. RAVNORI_UI_PORT wins; then
 /// the port the service recorded, as long as the process that recorded it is alive (a
 /// stale record must not send prompts to whatever took the port later); without any
 /// record, the configured default.
 pub fn service_port(conn: &Connection) -> Option<u16> {
-    if let Some(p) = std::env::var("MNEM_UI_PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-    {
+    if let Some(p) = env_port() {
         return Some(p);
     }
     let rec: Option<String> = conn
@@ -684,7 +684,7 @@ mod tests {
             db::open_with(std::path::Path::new(":memory:"), Duration::from_secs(1)).unwrap();
         for id in [1, 2, 3] {
             conn.execute(
-                "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'mnem', ?1, 0)",
+                "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'ravnori', ?1, 0)",
                 params![id, format!("title {id}")],
             )
             .unwrap();
@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn service_port_follows_live_watch() {
-        if std::env::var("MNEM_UI_PORT").is_ok() {
+        if crate::db::env_var("UI_PORT").is_some() {
             return;
         }
         let conn = db::open_with(std::path::Path::new(":memory:"), Duration::from_secs(1)).unwrap();
@@ -741,7 +741,7 @@ mod tests {
         let seed = |c: &Connection| {
             for id in [1, 2, 3] {
                 c.execute(
-                    "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'mnem', ?1, 0)",
+                    "INSERT INTO memories(id, project, kind, title, narrative, origin, origin_id, created_at) VALUES (?1, 'p', 'observation', ?2, 'n', 'ravnori', ?1, 0)",
                     params![id, format!("title {id}")],
                 )
                 .unwrap();

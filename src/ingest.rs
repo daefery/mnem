@@ -53,7 +53,7 @@ pub struct Batch {
 
 /// Every Claude Code config dir: `~/.claude` plus extra profiles such as
 /// `~/.claude-prod` (used via `CLAUDE_CONFIG_DIR`), recognised by a `projects/` dir.
-/// `MNEM_CLAUDE_DIRS` (colon-separated) adds more.
+/// `RAVNORI_CLAUDE_DIRS` (colon-separated) adds more.
 pub fn claude_config_dirs() -> Vec<PathBuf> {
     let h = db::home();
     let mut dirs = vec![h.join(".claude")];
@@ -69,7 +69,7 @@ pub fn claude_config_dirs() -> Vec<PathBuf> {
         extra.sort();
         dirs.extend(extra);
     }
-    if let Ok(v) = std::env::var("MNEM_CLAUDE_DIRS") {
+    if let Some(v) = crate::db::env_var("CLAUDE_DIRS").and_then(|v| v.into_string().ok()) {
         dirs.extend(v.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     dirs.dedup();

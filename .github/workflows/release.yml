@@ -1,4 +1,4 @@
-# Prebuilt binaries, so nobody needs Rust to use mnem. A tag like v0.2.0 builds every
+# Prebuilt binaries, so nobody needs Rust to use ravnori. A tag like v0.2.0 builds every
 # target, tests it on the machine it runs on, and attaches the archives and their
 # checksums to a GitHub release. `workflow_dispatch` builds and tests without
 # releasing (the artifacts stay on the run), for checking a change first.
@@ -23,7 +23,7 @@ jobs:
           # on glibc 2.39+ (Ubuntu 24.04, Debian 13, Fedora 40 and newer).
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-24.04, features: fastembed, suffix: "" }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm, features: fastembed, suffix: "" }
-          # For older Linux (glibc 2.35+: Ubuntu 22.04, Debian 12): the same mnem without
+          # For older Linux (glibc 2.35+: Ubuntu 22.04, Debian 12): the same ravnori without
           # ONNX Runtime, so meaning search uses the small potion model.
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-22.04, features: "", suffix: "-lite" }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-22.04-arm, features: "", suffix: "-lite" }
@@ -50,18 +50,18 @@ jobs:
         if: matrix.target != 'x86_64-apple-darwin'
         shell: bash
         run: |
-          bin=target/${{ matrix.target }}/release/mnem
+          bin=target/${{ matrix.target }}/release/rvn
           "$bin" --version
-          export HOME="$RUNNER_TEMP/home" MNEM_HOME="$RUNNER_TEMP/home/.mnem"
+          export HOME="$RUNNER_TEMP/home" RAVNORI_HOME="$RUNNER_TEMP/home/.ravnori"
           mkdir -p "$HOME"
           "$bin" install --dry-run --watch
           "$bin" doctor
       - name: Package
         shell: bash
         run: |
-          name=mnem-${{ matrix.target }}${{ matrix.suffix }}
+          name=ravnori-${{ matrix.target }}${{ matrix.suffix }}
           mkdir -p "dist/$name"
-          cp target/${{ matrix.target }}/release/mnem README.md NOTICE LICENSE "dist/$name/"
+          cp target/${{ matrix.target }}/release/rvn README.md NOTICE LICENSE "dist/$name/"
           features=""
           [ -n "${{ matrix.features }}" ] && features="--features ${{ matrix.features }}"
           python3 scripts/third-party-licenses.py $features --target ${{ matrix.target }} > "dist/$name/THIRD-PARTY-LICENSES.txt"
@@ -69,8 +69,8 @@ jobs:
           cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
-          name: mnem-${{ matrix.target }}${{ matrix.suffix }}
-          path: dist/mnem-${{ matrix.target }}${{ matrix.suffix }}.tar.gz*
+          name: ravnori-${{ matrix.target }}${{ matrix.suffix }}
+          path: dist/ravnori-${{ matrix.target }}${{ matrix.suffix }}.tar.gz*
 
   release:
     needs: build
@@ -95,4 +95,4 @@ jobs:
           latest=false
           [ "$GITHUB_REF_NAME" = "$highest" ] && latest=true
           gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/checksums.txt install.sh \
-            --title "mnem $GITHUB_REF_NAME" --generate-notes --latest=$latest
+            --title "ravnori $GITHUB_REF_NAME" --generate-notes --latest=$latest

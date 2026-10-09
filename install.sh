@@ -1,22 +1,23 @@
 #!/bin/sh
-# Install mnem from a GitHub release: no Rust, no build.
+# Install ravnori from a GitHub release: no Rust, no build.
 #
-#   curl -fsSL https://github.com/daefery/mnem/releases/latest/download/install.sh | sh
-#   gh release download -R daefery/mnem -p install.sh -O - | sh    # while the repo is private
+#   curl -fsSL https://github.com/daefery/ravnori/releases/latest/download/install.sh | sh
+#   gh release download -R daefery/ravnori -p install.sh -O - | sh    # while the repo is private
 #
 # Downloads the binary for this system, checks its SHA-256 against the release's
-# checksums, puts it in ~/.local/bin (MNEM_BIN_DIR to change), then runs
-# `mnem install --watch`: connects Claude Code, Codex and pi, starts the background
+# checksums, puts it in ~/.local/bin (RAVNORI_BIN_DIR to change), then runs
+# `rvn install --watch`: connects Claude Code, Codex and pi, starts the background
 # service, and sets up distillation through Claude Code or Codex if nothing is set.
-# MNEM_VERSION=v0.2.0 picks a release; MNEM_NO_SETUP=1 only installs the binary.
+# RAVNORI_VERSION=v0.6.0 picks a release; RAVNORI_NO_SETUP=1 only installs the binary.
+# MNEM_*: the same settings under ravnori's name before 0.6.0 (read until 0.7.0).
 set -eu
 
-REPO="${MNEM_REPO:-daefery/mnem}"
-VERSION="${MNEM_VERSION:-latest}"
-BIN_DIR="${MNEM_BIN_DIR:-$HOME/.local/bin}"
+REPO="${RAVNORI_REPO:-${MNEM_REPO:-daefery/ravnori}}"
+VERSION="${RAVNORI_VERSION:-${MNEM_VERSION:-latest}}"
+BIN_DIR="${RAVNORI_BIN_DIR:-${MNEM_BIN_DIR:-$HOME/.local/bin}}"
 
-say() { printf 'mnem: %s\n' "$*"; }
-fail() { printf 'mnem: %s\n' "$*" >&2; exit 1; }
+say() { printf 'ravnori: %s\n' "$*"; }
+fail() { printf 'ravnori: %s\n' "$*" >&2; exit 1; }
 
 os=$(uname -s)
 arch=$(uname -m)
@@ -53,7 +54,7 @@ if [ "$os" = Linux ]; then
   fi
 fi
 
-asset="mnem-$target$flavour.tar.gz"
+asset="ravnori-$target$flavour.tar.gz"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
@@ -93,24 +94,24 @@ fi
 tar -xzf "$tmp/$asset" -C "$tmp"
 mkdir -p "$BIN_DIR"
 # Replace atomically: a running watcher keeps its old file until it restarts.
-cp "$tmp/mnem-$target$flavour/mnem" "$BIN_DIR/mnem.new"
-chmod 755 "$BIN_DIR/mnem.new"
+cp "$tmp/ravnori-$target$flavour/rvn" "$BIN_DIR/rvn.new"
+chmod 755 "$BIN_DIR/rvn.new"
 # macOS marks downloaded files; a binary fetched by curl is not, but one fetched by a
 # browser or some tools is, and Gatekeeper would then block an unsigned binary.
 if [ "$os" = Darwin ]; then
-  xattr -d com.apple.quarantine "$BIN_DIR/mnem.new" 2>/dev/null || true
+  xattr -d com.apple.quarantine "$BIN_DIR/rvn.new" 2>/dev/null || true
 fi
-mv -f "$BIN_DIR/mnem.new" "$BIN_DIR/mnem"
-say "installed $("$BIN_DIR/mnem" --version) to $BIN_DIR/mnem"
+mv -f "$BIN_DIR/rvn.new" "$BIN_DIR/rvn"
+say "installed $("$BIN_DIR/rvn" --version) to $BIN_DIR/rvn"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
   *) say "add $BIN_DIR to your PATH (for example in ~/.bashrc or ~/.zshrc): export PATH=\"$BIN_DIR:\$PATH\"" ;;
 esac
 
-if [ "${MNEM_NO_SETUP:-0}" = 1 ]; then
-  say "skipped setup (MNEM_NO_SETUP=1); run: mnem install --watch"
+if [ "${RAVNORI_NO_SETUP:-${MNEM_NO_SETUP:-0}}" = 1 ]; then
+  say "skipped setup (RAVNORI_NO_SETUP=1); run: rvn install --watch"
   exit 0
 fi
-"$BIN_DIR/mnem" install --watch
-say "done. Check with: mnem doctor (it ends with \"status: OK\" once the first sessions are read)"
+"$BIN_DIR/rvn" install --watch
+say "done. Check with: rvn doctor (it ends with \"status: OK\" once the first sessions are read)"

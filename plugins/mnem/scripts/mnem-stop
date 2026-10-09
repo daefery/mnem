@@ -1,6 +1,0 @@
-#!/bin/sh
-# Claude Code plugin hook: pass the event to the mnem program. Quiet when mnem is not
-# installed yet (run /mnem:setup), when mnem install already wired this hook, or when
-# the installed mnem is older than 0.3.0 (run /mnem:setup to update it).
-command -v mnem >/dev/null 2>&1 || exit 0
-mnem hook claude stop --plugin 2>/dev/null || exit 0

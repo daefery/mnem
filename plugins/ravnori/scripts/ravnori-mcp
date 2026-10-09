@@ -1,0 +1,4 @@
+#!/bin/sh
+# Claude Code plugin MCP server: ravnori's tools (search, get_observations, timeline, ...).
+# Offers none when rvn install already registered them, so they are not listed twice.
+exec rvn mcp --plugin

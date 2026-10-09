@@ -13,7 +13,7 @@ use rusqlite::{Connection, OptionalExtension, ToSql, params_from_iter};
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
 
-const INSTRUCTIONS: &str = "mnem is this machine's memory of past work: decisions, bugs, fixes and what was tried, \
+const INSTRUCTIONS: &str = "ravnori is this machine's memory of past work: decisions, bugs, fixes and what was tried, \
 captured from every Claude Code, Codex and pi session. Use it when:
 - the user asks about earlier work (\"why did we\", \"what did we decide\", \"what did we do yesterday\", \"like \
 last time\"): ask(question) answers from the record with sources; use it before reconstructing history from git \
@@ -28,7 +28,7 @@ when a file is first opened): recall_file(path), once per file.
 Numeric ids are memories; ids like \"E123\" are raw transcript events. \
 Call remember(fact) only when the user asks you to remember something.";
 
-/// Set when this server stays out of the way of another registration of mnem's tools.
+/// Set when this server stays out of the way of another registration of ravnori's tools.
 static QUIET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Protocol versions this server implements, newest first.
@@ -38,7 +38,7 @@ pub fn serve(conn: &Connection) -> Result<()> {
     serve_with(conn, false)
 }
 
-/// Serve; with `quiet`, list no tools (another registration of mnem already offers them).
+/// Serve; with `quiet`, list no tools (another registration of ravnori already offers them).
 pub fn serve_with(conn: &Connection, quiet: bool) -> Result<()> {
     QUIET.store(quiet, std::sync::atomic::Ordering::Relaxed);
     let stdin = std::io::stdin();
@@ -92,7 +92,7 @@ pub fn handle(conn: &Connection, line: &str) -> Option<Value> {
             json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "mnem", "version": env!("CARGO_PKG_VERSION") },
+                "serverInfo": { "name": "ravnori", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
             })
         }
@@ -206,7 +206,7 @@ fn tools() -> Value {
             "name": "search",
             "description": "Search past work across all agents (decisions, bugs, fixes, what was tried): use when the user refers to earlier work, or when unsure whether a design question was already settled in this project (pass project). Not for general programming knowledge. Words or a plain question; returns a one-line-per-hit index with ids for get_observations.",
             "inputSchema": { "type": "object", "properties": {
-                "query": { "type": "string", "description": "Words or a plain-language question (empty: most recent). Relevance order also matches meaning when mnem-watch runs" },
+                "query": { "type": "string", "description": "Words or a plain-language question (empty: most recent). Relevance order also matches meaning when ravnori-watch runs" },
                 "limit": { "type": "number", "description": "Max results (default 20)" },
                 "project": { "type": "string", "description": "Filter by project (substring, e.g. repo name)" },
                 "platformSource": { "type": "string", "description": "Filter by agent: claude, codex or pi" },
@@ -264,12 +264,12 @@ fn tools() -> Value {
                 "path": { "type": "string", "description": "The file, absolute or relative to cwd" },
                 "cwd": { "type": "string", "description": "Directory relative paths start from (default: this server's working directory)" },
                 "limit": { "type": "number", "description": "Max memories (default 5)" },
-                "session": { "type": "string", "description": "Caller's mnem session id, if known: the file then counts as seen, so its memories are not shown again when it is opened" }
+                "session": { "type": "string", "description": "Caller's ravnori session id, if known: the file then counts as seen, so its memories are not shown again when it is opened" }
             }}
         },
         {
             "name": "session_start_context",
-            "description": "The context mnem injects at session start for a project (recent sessions across agents, last summary, observations). Use only if no mnem context appeared at the start of this session.",
+            "description": "The context ravnori injects at session start for a project (recent sessions across agents, last summary, observations). Use only if no rvn context appeared at the start of this session.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string", "description": "Project id (default: this server's working directory)" },
                 "cwd": { "type": "string", "description": "Resolve the project from this directory" }
@@ -1067,7 +1067,7 @@ fn evidence(conn: &Connection, memory_id: i64) -> Result<String> {
         [memory_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    if origin == "mnem"
+    if origin == "ravnori"
         && let Some((session, range)) = origin_id.split_once('@')
         && let Some((from, through)) = range.split('#').next().and_then(|r| r.split_once('-'))
     {
@@ -1241,7 +1241,7 @@ mod tests {
         ] {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'mnem', ?1, 0)",
+                 VALUES (?1, 'p', 'observation', 'bugfix', ?2, 'ravnori', ?1, 0)",
                 rusqlite::params![id, title],
             )
             .unwrap();
@@ -1270,7 +1270,7 @@ mod tests {
         for id in 1..=6 {
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, 'p', 'observation', ?2, ?3, 'mnem', ?1, ?1)",
+                 VALUES (?1, 'p', 'observation', ?2, ?3, 'ravnori', ?1, ?1)",
                 rusqlite::params![
                     id,
                     if id == 6 { "sensitive" } else { "bugfix" },

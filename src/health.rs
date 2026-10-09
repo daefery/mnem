@@ -1,4 +1,4 @@
-//! Health checks shared by `mnem doctor`, session-start hooks (shown to the user) and
+//! Health checks shared by `rvn doctor`, session-start hooks (shown to the user) and
 //! the viewer. The original failure this tool replaces was silent: memory stopped
 //! being saved and nobody noticed. Every check here exists so that cannot happen.
 
@@ -14,7 +14,7 @@ use std::collections::HashMap;
 const STUCK_MS: i64 = 5 * 60_000;
 
 /// Full check, including the costly parts (a stat per transcript, asking the service manager).
-/// For `mnem doctor`, the viewer and the watcher; hooks use `for_hook`.
+/// For `rvn doctor`, the viewer and the watcher; hooks use `for_hook`.
 pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
     let mut out = Vec::new();
     if stuck_files > 0 {
@@ -24,7 +24,7 @@ pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
     let m = crate::service::manager();
     if watch_installed() && !m.active() {
         out.push(format!(
-            "the mnem watch service is not running ({})",
+            "the rvn watch service is not running ({})",
             m.start_hint()
         ));
     }
@@ -33,7 +33,7 @@ pub fn alerts(conn: &Connection, stuck_files: usize) -> Vec<String> {
 
 fn stuck_message(n: usize) -> String {
     format!(
-        "capture is stuck: {n} transcript(s) changed over 5 minutes ago and are still not indexed (run `mnem doctor`)"
+        "capture is stuck: {n} transcript(s) changed over 5 minutes ago and are still not indexed (run `rvn doctor`)"
     )
 }
 
@@ -64,7 +64,7 @@ pub fn for_hook(conn: &Connection) -> Vec<String> {
                 let age = db::now_ms() - r["at"].as_i64().unwrap_or(0);
                 if age > 5 * 60_000 {
                     out.push(format!(
-                        "mnem-watch has not reported for {} (is it running? {})",
+                        "ravnori-watch has not reported for {} (is it running? {})",
                         ago(age),
                         crate::service::manager().status_hint()
                     ));
@@ -73,7 +73,7 @@ pub fn for_hook(conn: &Connection) -> Vec<String> {
                 }
             }
             None => out.push(format!(
-                "mnem-watch has never reported ({})",
+                "ravnori-watch has never reported ({})",
                 crate::service::manager().status_hint()
             )),
         }
@@ -87,12 +87,12 @@ fn cheap(conn: &Connection) -> Vec<String> {
     let mut out = Vec::new();
     let now = db::now_ms();
 
-    // Backups (only when mnem takes them itself: switched off, backing up is the user's).
+    // Backups (only when ravnori takes them itself: switched off, backing up is the user's).
     match backup::newest_age(&backup::dir()) {
         _ if !backup::auto_enabled(conn) => {}
-        None => out.push("no verified backup yet (run `mnem backup`)".into()),
+        None => out.push("no verified backup yet (run `rvn backup`)".into()),
         Some(age) if age > 2 * backup::INTERVAL_MS => out.push(format!(
-            "last verified backup is {} old (run `mnem backup`)",
+            "last verified backup is {} old (run `rvn backup`)",
             ago(age)
         )),
         _ => {}
@@ -109,13 +109,13 @@ fn cheap(conn: &Connection) -> Vec<String> {
     if let Ok(b) = distill::backlog(conn) {
         if b.falling_behind() {
             out.push(format!(
-                "{} session(s) will leave the distillation window undistilled within a day (backfill is not keeping up; see mnem doctor): run `mnem distill --oldest-first --since-days {} --limit 1000` or raise distill.daily_calls",
+                "{} session(s) will leave the distillation window undistilled within a day (backfill is not keeping up; see rvn doctor): run `rvn distill --oldest-first --since-days {} --limit 1000` or raise distill.daily_calls",
                 b.at_risk, b.days
             ));
         }
         if b.expired > 0 {
             out.push(format!(
-                "{} session(s) aged out of distillation undistilled: no memories were made from them (run `mnem distill --aged-out --limit {}`)",
+                "{} session(s) aged out of distillation undistilled: no memories were made from them (run `rvn distill --aged-out --limit {}`)",
                 b.expired, b.expired
             ));
         }

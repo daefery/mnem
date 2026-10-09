@@ -27,9 +27,9 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 fn hook(home: &Path, db: &Path, payload: &serde_json::Value) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mnem"))
-        .env("MNEM_HOME", home)
-        .env("MNEM_UI_PORT", "0")
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rvn"))
+        .env("RAVNORI_HOME", home)
+        .env("RAVNORI_UI_PORT", "0")
         .arg("--db")
         .arg(db)
         .args(["hook", "claude", "file"])
@@ -50,7 +50,7 @@ fn hook(home: &Path, db: &Path, payload: &serde_json::Value) -> String {
 
 #[test]
 fn first_touch_of_a_file_brings_its_memories_once() {
-    let base = mnem::TempDir::new("file-hook");
+    let base = ravnori::TempDir::new("file-hook");
     let (repo, home) = (base.join("repo"), base.join("home"));
     std::fs::create_dir_all(repo.join("src")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
@@ -60,9 +60,9 @@ fn first_touch_of_a_file_brings_its_memories_once() {
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-qm", "one"]);
 
-    let t = mnem::files::resolve("src/a.rs", &repo).unwrap();
-    let db = home.join("mnem.db");
-    let c = mnem::db::open(&db).unwrap();
+    let t = ravnori::files::resolve("src/a.rs", &repo).unwrap();
+    let db = home.join("ravnori.db");
+    let c = ravnori::db::open(&db).unwrap();
     // One memory from before an uncommitted edit, one from this very session.
     for (id, session, title) in [
         (1, "claude:earlier", "Retry loop in a() must stay bounded"),
@@ -70,8 +70,8 @@ fn first_touch_of_a_file_brings_its_memories_once() {
     ] {
         c.execute(
             "INSERT INTO memories(id, project, kind, type, title, files_modified, session_id, origin, origin_id, created_at)
-             VALUES (?1, ?2, 'observation', 'decision', ?3, '[\"src/a.rs\"]', ?4, 'mnem', ?1, ?5)",
-            params![id, t.project, title, session, mnem::db::now_ms() - 60_000],
+             VALUES (?1, ?2, 'observation', 'decision', ?3, '[\"src/a.rs\"]', ?4, 'ravnori', ?1, ?5)",
+            params![id, t.project, title, session, ravnori::db::now_ms() - 60_000],
         )
         .unwrap();
     }
@@ -112,11 +112,11 @@ fn first_touch_of_a_file_brings_its_memories_once() {
     });
     assert_eq!(hook(&home, &db, &loose).trim(), "");
 
-    // pi's extension asks through `mnem file --touch`: same memories, plain text, once.
+    // pi's extension asks through `rvn file --touch`: same memories, plain text, once.
     let touch_as = |session: &str, file: &str| {
-        let out = Command::new(env!("CARGO_BIN_EXE_mnem"))
-            .env("MNEM_HOME", &home)
-            .env("MNEM_UI_PORT", "0")
+        let out = Command::new(env!("CARGO_BIN_EXE_rvn"))
+            .env("RAVNORI_HOME", &home)
+            .env("RAVNORI_UI_PORT", "0")
             .arg("--db")
             .arg(&db)
             .args(["file", file, "--touch", "--session", session, "--cwd"])
@@ -135,7 +135,7 @@ fn first_touch_of_a_file_brings_its_memories_once() {
     );
     assert_eq!(touch_pi("src/a.rs").trim(), "");
     assert_eq!(touch_pi("src/quiet.rs").trim(), "");
-    let c = mnem::db::open(&db).unwrap();
+    let c = ravnori::db::open(&db).unwrap();
     let (offers, runs): (i64, i64) = c
         .query_row(
             "SELECT (SELECT count(*) FROM offers WHERE session_id = 'pi:p1' AND source = 'file'),
@@ -147,8 +147,8 @@ fn first_touch_of_a_file_brings_its_memories_once() {
     assert_eq!((offers, runs), (2, 3));
 
     // Asked for explicitly with the session first: opening the file adds nothing more.
-    let asked = Command::new(env!("CARGO_BIN_EXE_mnem"))
-        .env("MNEM_HOME", &home)
+    let asked = Command::new(env!("CARGO_BIN_EXE_rvn"))
+        .env("RAVNORI_HOME", &home)
         .arg("--db")
         .arg(&db)
         .args(["tool", "recall_file"])

@@ -1,4 +1,4 @@
-//! Optional user configuration: `$MNEM_HOME/config.json` (default `~/.mnem/config.json`).
+//! Optional user configuration: `$RAVNORI_HOME/config.json` (default `~/.ravnori/config.json`).
 //!
 //! ```json
 //! {
@@ -32,7 +32,7 @@ pub struct Config {
     pub semantic: SemanticConfig,
     #[serde(default)]
     pub recall: RecallConfig,
-    /// Port of the viewer and embedding service run by `mnem watch` (default 37777).
+    /// Port of the viewer and embedding service run by `rvn watch` (default 37777).
     pub ui_port: Option<u16>,
     /// When this process read the settings (ms): a long-running process keeps what it
     /// read at start.
@@ -70,7 +70,7 @@ pub struct RecallConfig {
 pub struct DistillConfig {
     /// Where requests go: "openai" (an OpenAI-compatible endpoint, the default),
     /// "claude-cli" (`claude -p`) or "codex-cli" (`codex exec`), signed in as the user
-    /// already is. `mnem install` picks one when nothing is configured.
+    /// already is. `rvn install` picks one when nothing is configured.
     pub provider: Option<String>,
     /// Default: http://127.0.0.1:8317/v1 (CLIProxyAPI)
     pub base_url: Option<String>,
@@ -93,8 +93,8 @@ pub struct DistillConfig {
     /// back. Default 7.
     pub backfill_days: Option<i64>,
     /// At most this many requests per 24 hours by all background distillation (Stop hook,
-    /// watcher, backfill). Default 300 (`mnem install` sets 100 for a sign-in); 0 turns
-    /// backfill off and leaves the rest unlimited. A manual `mnem distill` is not limited.
+    /// watcher, backfill). Default 300 (`rvn install` sets 100 for a sign-in); 0 turns
+    /// backfill off and leaves the rest unlimited. A manual `rvn distill` is not limited.
     pub daily_calls: Option<usize>,
     /// Never use models from these providers (the endpoint's `owned_by`, e.g. "antigravity").
     #[serde(default)]
@@ -104,10 +104,10 @@ pub struct DistillConfig {
     pub exclude_models: Vec<String>,
 }
 
-/// The settings file: $MNEM_CONFIG when set (the recall gate evaluates a candidate
-/// config this way), else config.json in mnem's data directory.
+/// The settings file: $RAVNORI_CONFIG when set (the recall gate evaluates a candidate
+/// config this way), else config.json in ravnori's data directory.
 pub fn path() -> std::path::PathBuf {
-    std::env::var_os("MNEM_CONFIG")
+    crate::db::env_var("CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| db::data_dir().join("config.json"))
 }
@@ -116,7 +116,7 @@ pub static CONFIG: LazyLock<Config> = LazyLock::new(|| {
     let path = path();
     let mut c: Config = match std::fs::read_to_string(&path) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
-            eprintln!("mnem: ignoring {}: {e}", path.display());
+            eprintln!("ravnori: ignoring {}: {e}", path.display());
             Config::default()
         }),
         Err(_) => Config::default(),
@@ -132,7 +132,7 @@ pub static HARNESS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .filter_map(|p| match Regex::new(p) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("mnem: bad harness_prompts pattern {p:?}: {e}");
+                eprintln!("ravnori: bad harness_prompts pattern {p:?}: {e}");
                 None
             }
         })

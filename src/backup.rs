@@ -6,8 +6,8 @@
 //! never verified is not counted as a backup.
 //!
 //! A snapshot also records where it came from and the settings in use (config.json,
-//! which names key files but never holds keys), so one file moves mnem to a new
-//! machine: copy it over, import it in the viewer or with `mnem restore --apply`.
+//! which names key files but never holds keys), so one file moves ravnori to a new
+//! machine: copy it over, import it in the viewer or with `rvn restore --apply`.
 
 use crate::db;
 use anyhow::{Context, Result, bail, ensure};
@@ -58,7 +58,7 @@ fn sha256(path: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Open a snapshot read-only and check it is a sound mnem database.
+/// Open a snapshot read-only and check it is a sound ravnori database.
 pub fn inspect(path: &Path) -> Result<Manifest> {
     let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("open {}", path.display()))?;
@@ -86,14 +86,17 @@ pub fn inspect(path: &Path) -> Result<Manifest> {
 /// Snapshot `conn`'s database into `dir`, verify it, write its manifest, rotate old ones.
 pub fn create(conn: &Connection, dir: &Path, keep: usize) -> Result<Manifest> {
     std::fs::create_dir_all(dir)?;
-    // One snapshot at a time: the watcher and a manual `mnem backup` can start together.
+    // One snapshot at a time: the watcher and a manual `rvn backup` can start together.
     let _lock = Lock::acquire(dir)?;
     let stamp = chrono_stamp(db::now_ms());
-    let mut path = dir.join(format!("mnem-{stamp}.db"));
+    let mut path = dir.join(format!("ravnori-{stamp}.db"));
     if path.exists() {
-        path = dir.join(format!("mnem-{stamp}-{}.db", std::process::id()));
+        path = dir.join(format!("ravnori-{stamp}-{}.db", std::process::id()));
     }
-    let tmp = dir.join(format!(".mnem-{stamp}-{}.db.partial", std::process::id()));
+    let tmp = dir.join(format!(
+        ".ravnori-{stamp}-{}.db.partial",
+        std::process::id()
+    ));
     let _ = std::fs::remove_file(&tmp);
     conn.execute("VACUUM INTO ?1", params![tmp.to_string_lossy()])?;
     if let Err(e) = stamp_origin(&tmp) {
@@ -172,7 +175,7 @@ pub fn origin(snapshot: &Path) -> Result<Origin> {
 }
 
 /// Check a database file from elsewhere before it can be restored: it must be a sound
-/// mnem database this build can read. Returns its manifest and origin.
+/// ravnori database this build can read. Returns its manifest and origin.
 pub fn check_import(path: &Path) -> Result<(Manifest, Origin)> {
     let mut head = [0u8; 16];
     std::io::Read::read_exact(&mut std::fs::File::open(path)?, &mut head)
@@ -182,7 +185,7 @@ pub fn check_import(path: &Path) -> Result<(Manifest, Origin)> {
         .query_row("PRAGMA user_version", [], |r| r.get(0))?;
     ensure!(
         schema <= db::SCHEMA_VERSION,
-        "this backup comes from a newer mnem (schema {schema}, this build reads up to {}); update mnem first",
+        "this backup comes from a newer ravnori (schema {schema}, this build reads up to {}); update ravnori first",
         db::SCHEMA_VERSION
     );
     let m = verify(path)?;
@@ -196,7 +199,7 @@ pub fn check_import(path: &Path) -> Result<(Manifest, Origin)> {
 /// What adopting a snapshot's settings would change on this machine.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsReview {
-    /// The settings parse as a mnem config.
+    /// The settings parse as a ravnori config.
     pub valid: bool,
     pub error: Option<String>,
     /// Setting paths (e.g. distill.base_url) whose value differs: (path, here, backup).
@@ -261,11 +264,11 @@ pub fn review_settings(snapshot: &Path) -> Result<Option<SettingsReview>> {
         .unwrap_or("");
     let warning = if model.starts_with("fastembed:") && !cfg!(feature = "fastembed") {
         Some(format!(
-            "this mnem was built without ONNX support, so it cannot run {model}; recall would use keywords only. Install with `cargo install --features fastembed` first, or keep this machine's settings."
+            "this ravnori was built without ONNX support, so it cannot run {model}; recall would use keywords only. Install with `cargo install --features fastembed` first, or keep this machine's settings."
         ))
     } else if !model.is_empty() && model != crate::embed::model_name() {
         Some(format!(
-            "{model} is not this machine's embedding model: after the restart mnem downloads it if needed (internet required) and re-embeds every memory in the background, which can take a while; recall uses keywords until then."
+            "{model} is not this machine's embedding model: after the restart ravnori downloads it if needed (internet required) and re-embeds every memory in the background, which can take a while; recall uses keywords until then."
         ))
     } else {
         None
@@ -316,7 +319,7 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 
 /// Replace config.json with the settings a snapshot carried, keeping the current file
 /// as config.json.bak-<time>. Returns false when the snapshot carried none. The
-/// settings must parse as a mnem config; they take effect when mnem restarts.
+/// settings must parse as a ravnori config; they take effect when ravnori restarts.
 pub fn apply_settings(snapshot: &Path) -> Result<bool> {
     let Some(cfg) = origin(snapshot)?.config else {
         return Ok(false);
@@ -328,7 +331,7 @@ pub fn apply_settings(snapshot: &Path) -> Result<bool> {
 /// Write settings text as config.json (validated first), keeping the old file.
 pub fn apply_settings_file(cfg: &str) -> Result<()> {
     serde_json::from_str::<crate::config::Config>(cfg)
-        .context("the backup's settings are not a valid mnem config")?;
+        .context("the backup's settings are not a valid ravnori config")?;
     let path = crate::config::path();
     if path.exists() {
         std::fs::copy(
@@ -342,6 +345,11 @@ pub fn apply_settings_file(cfg: &str) -> Result<()> {
     Ok(())
 }
 
+/// A snapshot's file name: `ravnori-<time>.db`, or `mnem-<time>.db` from before 0.6.0.
+pub fn is_snapshot_name(n: &str) -> bool {
+    (n.starts_with("ravnori-") || n.starts_with("mnem-")) && n.ends_with(".db")
+}
+
 /// Snapshots in `dir`, newest first, with their manifests when present.
 pub fn list(dir: &Path) -> Result<Vec<(PathBuf, Option<Manifest>)>> {
     let mut out: Vec<(PathBuf, Option<Manifest>)> = match std::fs::read_dir(dir) {
@@ -350,7 +358,7 @@ pub fn list(dir: &Path) -> Result<Vec<(PathBuf, Option<Manifest>)>> {
             .map(|e| e.path())
             .filter(|p| {
                 let n = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                n.starts_with("mnem-") && n.ends_with(".db")
+                is_snapshot_name(n)
             })
             .map(|p| {
                 let m = std::fs::read_to_string(manifest_path(&p))
@@ -375,8 +383,8 @@ fn rotate(dir: &Path, keep: usize) -> Result<()> {
     Ok(())
 }
 
-/// Whether `mnem watch` takes a snapshot by itself every day (on unless switched off in
-/// the viewer or with `mnem backup --auto off`). Kept in the database, so the running
+/// Whether `rvn watch` takes a snapshot by itself every day (on unless switched off in
+/// the viewer or with `rvn backup --auto off`). Kept in the database, so the running
 /// watcher follows a change on its next pass.
 pub fn auto_enabled(conn: &Connection) -> bool {
     conn.query_row("SELECT v FROM meta WHERE k = 'backup.auto'", [], |r| {
@@ -400,8 +408,7 @@ pub fn set_auto(conn: &Connection, on: bool) -> Result<()> {
 /// (as `list` returns it): nothing outside the folder, nothing else in it.
 pub fn remove(dir: &Path, file: &str) -> Result<()> {
     ensure!(
-        file.starts_with("mnem-")
-            && file.ends_with(".db")
+        is_snapshot_name(file)
             && !file.contains('/')
             && !file.contains('\\')
             && !file.contains(".."),
@@ -459,8 +466,8 @@ pub(crate) fn stage(snapshot: &Path) -> Result<(Manifest, PathBuf)> {
             );
         }
         // Its own triggers, views and indexes go before anything writes to it (a trigger
-        // smuggled in the file would run on mnem's schema setup and migrations); then it
-        // is opened through mnem, which migrates it exactly as a restored database.
+        // smuggled in the file would run on ravnori's schema setup and migrations); then it
+        // is opened through ravnori, which migrates it exactly as a restored database.
         {
             let raw = rusqlite::Connection::open(&staged)?;
             db::sanitize_schema(&raw)?;
@@ -553,7 +560,7 @@ fn restore_with_wait(
                     std::thread::sleep(std::time::Duration::from_millis(100))
                 }
                 Busy | Locked => bail!(
-                    "another process kept the database locked for {}s; nothing was changed. Retry, or stop mnem-watch.service first",
+                    "another process kept the database locked for {}s; nothing was changed. Retry, or stop ravnori-watch.service first",
                     wait.as_secs()
                 ),
                 _ => bail!("unexpected backup step result"),
@@ -675,18 +682,18 @@ mod tests {
             "its manifest too"
         );
         // Anything that is not a backup in this folder is refused.
-        std::fs::write(d.join("mnem-outside.db"), "x").unwrap();
+        std::fs::write(d.join("ravnori-outside.db"), "x").unwrap();
         for bad in [
-            "../mnem-outside.db",
+            "../ravnori-outside.db",
             "m.db",
-            "mnem-x.json",
+            "ravnori-x.json",
             "/etc/passwd",
-            "mnem-..db",
+            "ravnori-..db",
             &a.file,
         ] {
             assert!(remove(&backups, bad).is_err(), "{bad}");
         }
-        assert!(d.join("mnem-outside.db").exists() && d.join("m.db").exists());
+        assert!(d.join("ravnori-outside.db").exists() && d.join("m.db").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -737,10 +744,10 @@ mod tests {
         let d = crate::TempDir::new("restore-locked");
         let backups = d.join("backups");
         let mut conn = db::open(&d.join("m.db")).unwrap();
-        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'snap', 'mnem', 'a')", [])
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'snap', 'ravnori', 'a')", [])
             .unwrap();
         let snap = create(&conn, &backups, 7).unwrap();
-        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'live', 'mnem', 'b')", [])
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'live', 'ravnori', 'b')", [])
             .unwrap();
         // Another writer holds the write lock for the whole attempt.
         let holder = db::open(&d.join("m.db")).unwrap();
@@ -766,7 +773,7 @@ mod tests {
         assert_eq!(n, 2, "live database unchanged");
     }
 
-    /// A trigger in the backup never runs: not on the writes mnem's schema setup makes
+    /// A trigger in the backup never runs: not on the writes ravnori's schema setup makes
     /// while the backup is checked, and not by a name that looks like SQLite's own.
     #[test]
     fn a_smuggled_trigger_never_runs_during_restore() {
@@ -827,7 +834,7 @@ mod tests {
         let evil = d.join("evil.db");
         {
             let c = db::open(&evil).unwrap();
-            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'kept', 'mnem', 'a')", [])
+            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'kept', 'ravnori', 'a')", [])
                 .unwrap();
             c.execute_batch(
                 "CREATE TRIGGER wipe AFTER INSERT ON memories BEGIN DELETE FROM memories; END;
@@ -859,7 +866,7 @@ mod tests {
             sql.contains("memory_vectors") && !sql.contains("sessions"),
             "{sql}"
         );
-        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'new', 'mnem', 'b')", [])
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'new', 'ravnori', 'b')", [])
             .unwrap();
         let n: i64 = conn
             .query_row("SELECT count(*) FROM memories", [], |r| r.get(0))
@@ -876,7 +883,7 @@ mod tests {
         let src = d.join("other.db");
         {
             let c = db::open(&src).unwrap();
-            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'imported', 'mnem', 'x')", [])
+            c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'imported', 'ravnori', 'x')", [])
                 .unwrap();
         }
         // A writer keeps committing while the restore runs.
@@ -890,7 +897,7 @@ mod tests {
                 while !stop.load(std::sync::atomic::Ordering::SeqCst) {
                     i += 1;
                     let key = format!("w{i}");
-                    if c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'w', 'mnem', ?1)", [&key]).is_ok() {
+                    if c.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'w', 'ravnori', ?1)", [&key]).is_ok() {
                         ok.push(key);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -926,7 +933,7 @@ mod tests {
         let d = crate::TempDir::new("backup-test");
         let conn = db::open(&d.join("m.db")).unwrap();
         conn.execute(
-            "INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'the queue stalled', 'mnem', 'x')",
+            "INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'the queue stalled', 'ravnori', 'x')",
             [],
         )
         .unwrap();
@@ -943,7 +950,7 @@ mod tests {
         assert_eq!(v.memories, 1);
         // Restore the older snapshot over a live database that has moved on.
         conn.execute(
-            "INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'later', 'mnem', 'y')",
+            "INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'later', 'ravnori', 'y')",
             [],
         )
         .unwrap();
@@ -972,7 +979,7 @@ mod tests {
         let d = crate::TempDir::new("restore-oldest");
         let backups = d.join("backups");
         let mut conn = db::open(&d.join("m.db")).unwrap();
-        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'first', 'mnem', 'a')", [])
+        conn.execute("INSERT INTO memories(kind, title, origin, origin_id) VALUES ('observation', 'first', 'ravnori', 'a')", [])
             .unwrap();
         // Fill the rotation window so the pre-restore snapshot pushes the oldest out.
         let mut made = Vec::new();

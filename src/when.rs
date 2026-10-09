@@ -1,6 +1,6 @@
 //! The time a question about past work is about: "yesterday", "last week", "on 4 October",
 //! "kemarin", "since 2026-09-28". Read from the question itself, in the asker's local time,
-//! so `mnem ask` can look at what happened in that window instead of matching the word
+//! so `rvn ask` can look at what happened in that window instead of matching the word
 //! "yesterday" against memory text.
 //!
 //! The clock and the UTC offset are parameters: replaying a question as of when it was
@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn yesterday_is_the_whole_previous_local_day() {
-        let w = window("what did we do on mnem yesterday?", tue(), WIB).unwrap();
+        let w = window("what did we do on ravnori yesterday?", tue(), WIB).unwrap();
         assert_eq!(w.start, ms("2026-10-05T00:00:00+07:00"));
         assert_eq!(w.end, ms("2026-10-06T00:00:00+07:00"));
         assert_eq!(w.label, "yesterday (2026-10-05)");
@@ -238,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_named_date_without_a_year_is_the_latest_one_not_in_the_future() {
-        let w = window("what did we ship in mnem on 4 October?", tue(), WIB).unwrap();
+        let w = window("what did we ship in ravnori on 4 October?", tue(), WIB).unwrap();
         assert_eq!(w.start, ms("2026-10-04T00:00:00+07:00"));
         assert_eq!(w.end, ms("2026-10-05T00:00:00+07:00"));
         let w = window("what happened on December 24", tue(), WIB).unwrap();
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn weeks_start_on_monday() {
-        let w = window("what did we work on in mnem last week?", tue(), WIB).unwrap();
+        let w = window("what did we work on in ravnori last week?", tue(), WIB).unwrap();
         assert_eq!(w.start, ms("2026-09-28T00:00:00+07:00"));
         assert_eq!(w.end, ms("2026-10-05T00:00:00+07:00"));
         let w = window("minggu ini", tue(), WIB).unwrap();

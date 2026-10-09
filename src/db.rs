@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS memories(
   files_read TEXT,                   -- JSON array
   files_modified TEXT,               -- JSON array
   data TEXT,                         -- JSON: original structured fields
-  origin TEXT NOT NULL,              -- claude-mem | mnem
+  origin TEXT NOT NULL,              -- claude-mem | ravnori
   origin_id TEXT NOT NULL,
   model TEXT,
   created_at INTEGER,
@@ -224,8 +224,8 @@ CREATE TRIGGER IF NOT EXISTS memories_files_ad AFTER DELETE ON memories BEGIN
   DELETE FROM memory_files WHERE memory_id = old.id;
 END;
 
--- Uptake: what mnem put in front of agents, what they asked mnem for, and what the
--- hooks cost (`mnem uptake`). Kept locally like everything else.
+-- Uptake: what ravnori put in front of agents, what they asked ravnori for, and what the
+-- hooks cost (`rvn uptake`). Kept locally like everything else.
 CREATE TABLE IF NOT EXISTS offers(
   session_id TEXT NOT NULL,
   memory_id INTEGER NOT NULL,
@@ -297,10 +297,33 @@ CREATE TABLE IF NOT EXISTS quarantine(
 );
 "#;
 
+/// A setting from the environment: `RAVNORI_<name>`, else `MNEM_<name>` (ravnori's name
+/// before 0.6.0; read for one release so an older setup keeps working, then dropped).
+pub fn env_var(name: &str) -> Option<std::ffi::OsString> {
+    std::env::var_os(format!("RAVNORI_{name}"))
+        .or_else(|| std::env::var_os(format!("{}_{name}", crate::rename::OLD_ENV)))
+}
+
+/// Where ravnori keeps its data: `RAVNORI_HOME`, else `~/.ravnori`. An install from
+/// before 0.6.0 keeps it in `~/.mnem` (or `MNEM_HOME`); that is used where it is until
+/// `rvn install` moves it, so nothing is lost in between.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("MNEM_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".mnem"))
+    if let Some(d) = env_var("HOME") {
+        return PathBuf::from(d);
+    }
+    let new = home().join(".ravnori");
+    let old = crate::rename::old_dir();
+    if !new.exists() && crate::rename::holds_data(&old) {
+        return old;
+    }
+    new
+}
+
+/// The live database, `ravnori.db` in the data folder. A folder that came from mnem holds
+/// `mnem.db`: it is renamed once nothing has it open, and used under its old name until
+/// then (`rename::adopt_database`).
+pub fn database_path() -> PathBuf {
+    crate::rename::adopt_database(&data_dir())
 }
 
 pub fn home() -> PathBuf {
@@ -311,7 +334,7 @@ pub fn home() -> PathBuf {
 
 /// Bump whenever SCHEMA or `migrate` changes; an up-to-date database then opens
 /// without taking a write lock.
-pub const SCHEMA_VERSION: i64 = 23;
+pub const SCHEMA_VERSION: i64 = 24;
 
 pub fn open(path: &Path) -> Result<Connection> {
     open_with(path, Duration::from_secs(5))
@@ -424,6 +447,14 @@ fn migrate(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS events_turn ON events(session_id, turn, kind);",
     )?;
+    // Memories distilled before 0.6.0 carry origin 'mnem' (ravnori's earlier name), and so
+    // do their tombstones: renamed so every reader knows one name. A backup from before
+    // the rename is migrated the same way when it is restored or merged.
+    conn.execute_batch(
+        "UPDATE OR IGNORE memories SET origin = 'ravnori' WHERE origin = 'mnem';
+         UPDATE OR IGNORE forgotten SET key = 'ravnori:' || substr(key, 6)
+          WHERE kind = 'memory' AND key LIKE 'mnem:%';",
+    )?;
     // memory_vectors was first keyed by memory_id alone, so a second model overwrote the
     // first. Rebuild it keyed by (memory_id, model); vectors are cheap to recompute.
     let keyed_by_model: bool = conn.query_row(
@@ -491,7 +522,7 @@ mod tests {
             let at = 1000 + (i * 7) % 13;
             c.execute(
                 "INSERT INTO memories(id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, ?2, ?3, 'change', 't', 'mnem', ?1, ?4)",
+                 VALUES (?1, ?2, ?3, 'change', 't', 'ravnori', ?1, ?4)",
                 rusqlite::params![
                     100 - i,
                     if i % 3 == 0 { "q" } else { "p" },

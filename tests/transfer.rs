@@ -1,17 +1,17 @@
-//! Moving mnem to another machine through the viewer: back up on one, download,
-//! upload and import on the other. Its own test binary, because it points MNEM_HOME
+//! Moving ravnori to another machine through the viewer: back up on one, download,
+//! upload and import on the other. Its own test binary, because it points RAVNORI_HOME
 //! at scratch directories (the backup folder and config live there).
 
 use rusqlite::{Connection, params};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-fn home(name: &str) -> mnem::TempDir {
-    mnem::TempDir::new(&format!("transfer-{name}"))
+fn home(name: &str) -> ravnori::TempDir {
+    ravnori::TempDir::new(&format!("transfer-{name}"))
 }
 
 fn seed(db: &Path, session: &str, title: &str) {
-    let c = mnem::db::open(db).unwrap();
+    let c = ravnori::db::open(db).unwrap();
     c.execute(
         "INSERT INTO sessions(id, agent, native_id, project) VALUES (?1, 'claude', ?1, 'proj')",
         params![session],
@@ -23,7 +23,7 @@ fn seed(db: &Path, session: &str, title: &str) {
     )
     .unwrap();
     c.execute(
-        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'bugfix', ?1, 'proj', 'mnem', ?1, 1)",
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'bugfix', ?1, 'proj', 'ravnori', ?1, 1)",
         params![title],
     )
     .unwrap();
@@ -61,19 +61,19 @@ fn json(r: &Reply) -> serde_json::Value {
 }
 
 fn serve(db: PathBuf, port: u16) {
-    std::thread::spawn(move || mnem::ui::serve(db, port, || {}));
+    std::thread::spawn(move || ravnori::ui::serve(db, port, || {}));
     std::thread::sleep(std::time::Duration::from_millis(300));
 }
 
-const OK: &str = "X-Mnem: 1\r\n";
+const OK: &str = "X-Ravnori: 1\r\n";
 
 #[test]
 fn back_up_download_and_import_on_another_machine() {
     // Machine A: some history and its own settings.
     let a = home("a");
-    unsafe { std::env::set_var("MNEM_HOME", &a) };
+    unsafe { std::env::set_var("RAVNORI_HOME", &a) };
     std::fs::write(a.join("config.json"), r#"{"harness_prompts":["^from-a"]}"#).unwrap();
-    let db_a = a.join("mnem.db");
+    let db_a = a.join("ravnori.db");
     seed(&db_a, "claude:old", "Backup restore stages the database");
     // A transcript that exists only on machine A.
     Connection::open(&db_a)
@@ -89,7 +89,7 @@ fn back_up_download_and_import_on_another_machine() {
     // Changing actions need the viewer's header and origin.
     assert_eq!(request(port_a, "POST", "/api/backups", "", b"").status, 403);
     // Connecting an agent writes its settings: the same guard.
-    for extra in ["", "X-Mnem: 1\r\nOrigin: http://evil.example\r\n"] {
+    for extra in ["", "X-Ravnori: 1\r\nOrigin: http://evil.example\r\n"] {
         assert_eq!(
             request(port_a, "POST", "/api/agents/connect?agent=pi", extra, b"").status,
             403
@@ -126,14 +126,19 @@ fn back_up_download_and_import_on_another_machine() {
         request(
             port_a,
             "POST",
-            "/api/backups/remove?file=mnem-x.db",
+            "/api/backups/remove?file=ravnori-x.db",
             "",
             b""
         )
         .status,
         403
     );
-    for bad in ["..%2Fmnem.db", "mnem.db%2F..", "config.json", "mnem-x.json"] {
+    for bad in [
+        "..%2Fravnori.db",
+        "ravnori.db%2F..",
+        "config.json",
+        "ravnori-x.json",
+    ] {
         assert_eq!(
             request(
                 port_a,
@@ -151,19 +156,19 @@ fn back_up_download_and_import_on_another_machine() {
         request(
             port_a,
             "POST",
-            "/api/backups/remove?file=mnem-none.db",
+            "/api/backups/remove?file=ravnori-none.db",
             OK,
             b""
         )
         .status,
         404
     );
-    let evil = "X-Mnem: 1\r\nOrigin: http://evil.example\r\n";
+    let evil = "X-Ravnori: 1\r\nOrigin: http://evil.example\r\n";
     assert_eq!(
         request(port_a, "POST", "/api/backups", evil, b"").status,
         403
     );
-    let cross = "X-Mnem: 1\r\nSec-Fetch-Site: cross-site\r\n";
+    let cross = "X-Ravnori: 1\r\nSec-Fetch-Site: cross-site\r\n";
     assert_eq!(
         request(port_a, "POST", "/api/backups", cross, b"").status,
         403
@@ -188,23 +193,23 @@ fn back_up_download_and_import_on_another_machine() {
         std::fs::read(a.join("backups").join(&file)).unwrap()
     );
     for bad in [
-        "/api/backups/..%2Fmnem.db",
-        "/api/backups/../mnem.db",
-        "/api/backups/mnem.db",
+        "/api/backups/..%2Fravnori.db",
+        "/api/backups/../ravnori.db",
+        "/api/backups/ravnori.db",
     ] {
         assert_eq!(request(port_a, "GET", bad, "", b"").status, 404, "{bad}");
     }
 
     // Machine B: a fresh install with one session of its own and default settings.
     let b = home("b");
-    unsafe { std::env::set_var("MNEM_HOME", &b) };
+    unsafe { std::env::set_var("RAVNORI_HOME", &b) };
     std::fs::write(b.join("config.json"), "{}").unwrap();
-    let db_b = b.join("mnem.db");
+    let db_b = b.join("ravnori.db");
     seed(&db_b, "claude:new", "Viewer colours changed");
     let port_b = port_a + 1;
     serve(db_b.clone(), port_b);
 
-    // Anything that is not a mnem database is refused before it can do harm.
+    // Anything that is not a ravnori database is refused before it can do harm.
     let junk = request(port_b, "POST", "/api/import", OK, b"definitely not sqlite");
     assert_eq!(junk.status, 422, "{}", String::from_utf8_lossy(&junk.body));
 
@@ -288,7 +293,7 @@ fn back_up_download_and_import_on_another_machine() {
         request(
             port_b,
             "POST",
-            "/api/import/apply?file=../../mnem.db",
+            "/api/import/apply?file=../../ravnori.db",
             OK,
             b""
         )
@@ -339,7 +344,7 @@ fn back_up_download_and_import_on_another_machine() {
     assert!(
         names
             .iter()
-            .any(|n| n.starts_with("mnem-") && n.ends_with(".db")),
+            .any(|n| n.starts_with("ravnori-") && n.ends_with(".db")),
         "{names:?}"
     );
     // The upload is gone once applied.

@@ -1,5 +1,5 @@
 //! Cross-encoder reranking, for evaluation: the model reads the prompt and a memory
-//! together and scores how well the memory answers it. `mnem eval --rerank <model>
+//! together and scores how well the memory answers it. `rvn eval --rerank <model>
 //! --dump` records its scores beside the embedding cosine so the two can be compared
 //! with `--analyze file:rerank file:cos`.
 //!

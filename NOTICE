@@ -1,7 +1,7 @@
-mnem
-Copyright 2026 Fery and the mnem contributors
+ravnori
+Copyright 2026 Fery and the ravnori contributors
 
-mnem is free software under the GNU Affero General Public License v3.0 (LICENSE).
+ravnori is free software under the GNU Affero General Public License v3.0 (LICENSE).
 A commercial licence for uses the AGPL does not suit is available from the authors.
 
 This product includes third-party material:
@@ -9,5 +9,5 @@ This product includes third-party material:
 - The summary section icons (ui/icons/icon-thick-*.svg) come from Claude-Mem
   (https://github.com/thedotmack/claude-mem), Copyright 2026 Alex Newman,
   licensed under the Apache License, Version 2.0. The web viewer's markup keeps
-  Claude-Mem's class names; its stylesheet (ui/style.css) was rewritten for mnem
+  Claude-Mem's class names; its stylesheet (ui/style.css) was rewritten for ravnori
   on 4 October 2026 and no longer derives from Claude-Mem's.

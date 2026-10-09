@@ -1,9 +1,9 @@
 //! Distillation through a coding agent's own command line (`claude -p`, `codex exec`),
 //! signed in as the user already is: no API key, no proxy.
 //!
-//! Every run is isolated so it can never become a session mnem captures, and never
+//! Every run is isolated so it can never become a session ravnori captures, and never
 //! carries the user's own instructions or tools: an empty working directory, no saved
-//! session, no tools, no MCP servers, no hooks (mnem's own included) and no user
+//! session, no tools, no MCP servers, no hooks (ravnori's own included) and no user
 //! settings. Chosen on 30 real session chunks judged against luna through an endpoint:
 //! sonnet and codex with luna matched it; haiku made up more details and lost.
 
@@ -187,7 +187,7 @@ pub fn classify_message(msg: &str) -> Failure {
     }
 }
 
-/// The command's path, found the way `mnem install` finds agents (the background
+/// The command's path, found the way `rvn install` finds agents (the background
 /// service's PATH rarely includes ~/.local/bin or nvm folders).
 pub fn locate(cli: Cli) -> Option<PathBuf> {
     crate::agents::command_path(cli.command())
@@ -210,7 +210,7 @@ pub fn call(
     // An empty directory of its own: no CLAUDE.md or AGENTS.md is read, nothing written
     // lands in a project, and codex's last-message file has a private home.
     let dir = std::env::temp_dir().join(format!(
-        "mnem-distill-{}-{}",
+        "ravnori-distill-{}-{}",
         std::process::id(),
         crate::db::now_ms()
     ));
@@ -354,7 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn every_run_is_isolated_from_the_users_setup_and_from_mnem() {
+    fn every_run_is_isolated_from_the_users_setup_and_from_ravnori() {
         let (dir, out) = (Path::new("/tmp/d"), Path::new("/tmp/d/reply.txt"));
         let c = Cli::Claude.args("sonnet", "SYS", dir, out);
         assert!(has(&c, "--tools", "") && has(&c, "--setting-sources", ""));
@@ -362,8 +362,8 @@ mod tests {
         assert!(c.contains(&"--no-session-persistence".into()));
         assert!(has(&c, "--system-prompt", "SYS") && has(&c, "--model", "sonnet"));
         let x = Cli::Codex.args("gpt-5.6-luna", "SYS", dir, out);
-        // Hooks off: otherwise codex runs mnem's own hooks and every request would
-        // become a session mnem captures and distils.
+        // Hooks off: otherwise codex runs ravnori's own hooks and every request would
+        // become a session ravnori captures and distils.
         assert!(has(&x, "--disable", "hooks"));
         assert!(x.contains(&"--ephemeral".into()) && x.contains(&"--ignore-user-config".into()));
         assert!(has(&x, "--sandbox", "read-only") && has(&x, "-C", "/tmp/d"));

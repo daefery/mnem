@@ -1,10 +1,10 @@
 //! Export and recall evaluation.
 //!
-//! `export` writes everything mnem knows as JSONL, one object per line with a `record`
+//! `export` writes everything ravnori knows as JSONL, one object per line with a `record`
 //! field (session, event, memory, evidence), so data can always leave. `eval` measures prompt-time recall with a
 //! known-item test: for sampled memories the model writes the question each one
 //! answers (without reusing its title words), and recall must find that memory.
-//! The test set lives in ~/.mnem/eval/ because it contains private work.
+//! The test set lives in ~/.ravnori/eval/ because it contains private work.
 
 use crate::db;
 use crate::distill::Llm;
@@ -23,7 +23,7 @@ pub fn export(conn: &Connection, out: &mut dyn Write, project: Option<&str>) -> 
     writeln!(
         out,
         "{}",
-        json!({ "record": "meta", "tool": "mnem", "version": env!("CARGO_PKG_VERSION"), "schema": schema,
+        json!({ "record": "meta", "tool": "ravnori", "version": env!("CARGO_PKG_VERSION"), "schema": schema,
                 "exported_at": crate::db::now_ms(), "project": project })
     )?;
     n += 1;
@@ -101,7 +101,7 @@ struct Case {
     open: bool,
 }
 
-/// A named test set in ~/.mnem/eval: `recall` (model-written) or `vague` (hand-written
+/// A named test set in ~/.ravnori/eval: `recall` (model-written) or `vague` (hand-written
 /// vague questions plus prompts that should recall nothing).
 pub fn set_path(name: &str) -> PathBuf {
     db::data_dir().join("eval").join(format!("{name}.jsonl"))
@@ -225,9 +225,9 @@ fn split_real(
 /// Memories about a file offered with each edit (at most).
 pub const FILE_TOP: usize = 3;
 
-/// Prompts typed once mnem distilled sessions itself: from the last `days` days, in
-/// projects that already held at least 20 memories mnem distilled when the prompt was
-/// typed, so recall is measured on the memories mnem now writes (the `real` sets mostly
+/// Prompts typed once ravnori distilled sessions itself: from the last `days` days, in
+/// projects that already held at least 20 memories ravnori distilled when the prompt was
+/// typed, so recall is measured on the memories ravnori now writes (the `real` sets mostly
 /// predate them and see imported claude-mem memories). No project fills more than half
 /// the sample and no session more than 6 prompts; sessions are dealt to the two halves
 /// largest first, each to the smaller half, since there are few and they run long.
@@ -240,7 +240,7 @@ pub fn build_recent(conn: &Connection, n: usize, days: i64) -> Result<(usize, us
            AND length(e.text) BETWEEN 40 AND 800 AND s.project NOT LIKE '/%'
            AND e.text NOT LIKE '%/tmp/claude-%' AND lower(e.text) NOT LIKE '%reply with only%'
            AND lower(e.text) NOT LIKE '%reply with exactly%'
-           AND (SELECT count(*) FROM memories m WHERE m.origin = 'mnem' AND m.project = s.project
+           AND (SELECT count(*) FROM memories m WHERE m.origin = 'ravnori' AND m.project = s.project
                   AND m.created_at < e.ts) >= 20
          ORDER BY abs(random())",
     )?;
@@ -386,7 +386,7 @@ fn judgment_key(judge: &str, question: &str, memory_text: &str) -> String {
 }
 
 /// Relevance of each memory to the prompt, judged by `judge_name`'s models and cached in
-/// ~/.mnem/eval/judgments.jsonl so reruns cost nothing. None if the judge failed or
+/// ~/.ravnori/eval/judgments.jsonl so reruns cost nothing. None if the judge failed or
 /// answered anything but one 0 or 1 per memory.
 #[allow(clippy::too_many_arguments)]
 fn judge(
@@ -615,7 +615,7 @@ fn auc<'a>(cases: impl Iterator<Item = &'a Dumped>) -> Option<f64> {
     Some(wins / (pos.len() * neg.len()) as f64)
 }
 
-/// Compare `mnem eval --dump` files from different models: AUC of cosine for the judged
+/// Compare `rvn eval --dump` files from different models: AUC of cosine for the judged
 /// candidates, a prompt-level bootstrap interval for each model's AUC minus the first
 /// one's, and what a relevance threshold would keep of each prompt's top five.
 pub fn analyze(paths: &[std::path::PathBuf], field: &str) -> Result<String> {
@@ -772,9 +772,9 @@ pub fn run(
     let mut dump = dump.map(std::fs::File::create).transpose()?;
     let llm = match judge_with {
         Some(j) => {
-            // The gate pins the judge to the live settings (MNEM_JUDGE_CONFIG) so a
+            // The gate pins the judge to the live settings (RAVNORI_JUDGE_CONFIG) so a
             // candidate's settings cannot change who grades it.
-            let l = match std::env::var_os("MNEM_JUDGE_CONFIG") {
+            let l = match std::env::var_os("RAVNORI_JUDGE_CONFIG") {
                 Some(p) => {
                     let cfg: crate::config::Config =
                         serde_json::from_str(&std::fs::read_to_string(&p).with_context(|| {
@@ -794,7 +794,7 @@ pub fn run(
     let embedder = recall::semantic_embedder();
     let f = std::fs::File::open(path).with_context(|| {
         format!(
-            "no test set at {}; run `mnem eval --build 40`",
+            "no test set at {}; run `rvn eval --build 40`",
             path.display()
         )
     })?;
@@ -919,9 +919,9 @@ pub fn run(
                         .count();
                     (
                         ids,
-                        // MNEM_EVAL_NO_FILE_HINT: judge without naming the file, a control
+                        // RAVNORI_EVAL_NO_FILE_HINT: judge without naming the file, a control
                         // for how much the hint alone makes memories look relevant.
-                        if std::env::var_os("MNEM_EVAL_NO_FILE_HINT").is_some() {
+                        if std::env::var_os("RAVNORI_EVAL_NO_FILE_HINT").is_some() {
                             c.question.clone()
                         } else {
                             format!(
@@ -1032,7 +1032,7 @@ pub fn run(
 /// Cosine of each question's true target, and of the best wrong candidate, under the
 /// current embedding model. Used to pick recall's similarity floor from data.
 pub fn cosines(conn: &Connection, path: &Path) -> Result<(Vec<f32>, Vec<f32>)> {
-    let e = recall::semantic_embedder().context("no embedding model (run `mnem embed`)")?;
+    let e = recall::semantic_embedder().context("no embedding model (run `rvn embed`)")?;
     let f = std::fs::File::open(path)?;
     let cases: Vec<Case> = std::io::BufReader::new(f)
         .lines()
@@ -1186,7 +1186,7 @@ pub fn titles(live: &Path, n: usize, out: &Path) -> Result<(usize, TitleArm, Tit
         let mut st = a.prepare(
             "SELECT DISTINCT substr(m.origin_id, 1, instr(m.origin_id, '#') - 1), m.project
              FROM memories m
-             WHERE m.origin = 'mnem' AND m.kind = 'observation' AND m.model = ?1
+             WHERE m.origin = 'ravnori' AND m.kind = 'observation' AND m.model = ?1
                AND m.project NOT LIKE '/%' AND instr(m.origin_id, '#') > 0
                AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.memory_id = m.id)
              ORDER BY abs(random())",
@@ -1198,7 +1198,7 @@ pub fn titles(live: &Path, n: usize, out: &Path) -> Result<(usize, TitleArm, Tit
     let mut taken: std::collections::HashMap<String, usize> = Default::default();
     let targets = |conn: &Connection, base: &str| -> Result<Vec<(i64, String)>> {
         let mut st = conn.prepare(
-            "SELECT id, title FROM memories WHERE origin = 'mnem' AND kind = 'observation'
+            "SELECT id, title FROM memories WHERE origin = 'ravnori' AND kind = 'observation'
                AND origin_id LIKE ?1 || '#%' ORDER BY id",
         )?;
         Ok(st
@@ -1251,7 +1251,7 @@ pub fn titles(live: &Path, n: usize, out: &Path) -> Result<(usize, TitleArm, Tit
             }
         };
         b.execute(
-            "DELETE FROM memories WHERE origin = 'mnem' AND origin_id LIKE ?1 || '#%'",
+            "DELETE FROM memories WHERE origin = 'ravnori' AND origin_id LIKE ?1 || '#%'",
             [&base],
         )?;
         crate::distill::store(&mut b, sid, &project, &model, &c, &v)?;
@@ -1393,7 +1393,7 @@ pub fn retitle(live: &Path, compare: &Path, out: &Path) -> Result<(usize, TitleA
         let mems: Vec<Mem> = {
             let mut st = a.prepare(
                 "SELECT id, title, coalesce(subtitle, ''), coalesce(narrative, ''), coalesce(facts, '[]')
-                 FROM memories WHERE origin = 'mnem' AND kind = 'observation'
+                 FROM memories WHERE origin = 'ravnori' AND kind = 'observation'
                    AND origin_id LIKE ?1 || '#%' ORDER BY id",
             )?;
             st.query_map([base], |r| {

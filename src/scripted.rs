@@ -26,7 +26,7 @@ static PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         .filter_map(|p| match Regex::new(p) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("mnem: bad scripted_sessions pattern {p:?}: {e}");
+                eprintln!("ravnori: bad scripted_sessions pattern {p:?}: {e}");
                 None
             }
         })
@@ -221,7 +221,7 @@ mod tests {
         let c = db();
         for (id, session) in [(1, "pi:council"), (2, "claude:me")] {
             c.execute(
-                "INSERT INTO memories(id, session_id, kind, title, origin, origin_id) VALUES (?1, ?2, 'observation', 't', 'mnem', ?1)",
+                "INSERT INTO memories(id, session_id, kind, title, origin, origin_id) VALUES (?1, ?2, 'observation', 't', 'ravnori', ?1)",
                 params![id, session],
             )
             .unwrap();

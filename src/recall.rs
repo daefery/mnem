@@ -247,13 +247,13 @@ pub fn gate(conn: &Connection, q: &crate::embed::Query, rows: &mut Vec<Hit>) -> 
 }
 
 /// Keyword hits below this cosine to the query are dropped. On the model-written and
-/// the hand-written vague eval sets together (`mnem eval --set vague`), prompts no
+/// the hand-written vague eval sets together (`rvn eval --set vague`), prompts no
 /// memory answers reached at most 0.37 (p90) while true targets rarely fell below 0.47
 /// (p10): 0.45 cut prompts that recalled something anyway from 9 of 9 to 1, and kept 40
 /// of the 43 targets keywords had found.
 pub const RELEVANCE_COSINE: f32 = 0.45;
 
-/// Thresholds (relevance, fill, search) for models tuned with `mnem eval --dump` on
+/// Thresholds (relevance, fill, search) for models tuned with `rvn eval --dump` on
 /// judged real prompts; cosine scales differ between models. Others use potion-8M's.
 fn model_thresholds() -> (f32, f32, f32) {
     match crate::embed::model_name().as_str() {
@@ -290,7 +290,7 @@ pub fn search_cosine() -> f32 {
 
 /// Reciprocal-rank-fusion constant (the usual 60).
 const RRF_K: f64 = 60.0;
-/// Weight of the vector list relative to keywords in hybrid fusion (best in `mnem eval`).
+/// Weight of the vector list relative to keywords in hybrid fusion (best in `rvn eval`).
 const VECTOR_WEIGHT: f64 = 0.5;
 /// The same for explicit search (MCP `search`, viewer): on the eval questions sent
 /// through MCP search, 0.2 beat keywords alone at hit@1 (62% vs 52%) without losing any
@@ -298,7 +298,7 @@ const VECTOR_WEIGHT: f64 = 0.5;
 pub const SEARCH_VECTOR_WEIGHT: f64 = 0.2;
 /// Vector hits below this cosine similarity are not offered. With potion-base-8M, true
 /// targets and the best wrong candidate have nearly the same cosine distribution
-/// (median 0.63 each, `mnem eval --cosines`), so vectors only fill slots; 0.55 (about
+/// (median 0.63 each, `rvn eval --cosines`), so vectors only fill slots; 0.55 (about
 /// the 10th percentile of true targets) trims the weakest filler.
 pub const MIN_COSINE: f32 = 0.55;
 
@@ -373,7 +373,7 @@ pub fn keyword_rank(
            AND NOT EXISTS (SELECT 1 FROM recall_seen r WHERE r.session_id = ?3 AND r.memory_id = m.id)
            AND (?5 = '' OR coalesce(m.session_id, '') != ?5) AND coalesce(m.created_at, 0) < ?6
            AND {not_scripted}
-         -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `mnem eval`.
+         -- Column weights (title, subtitle, narrative, facts, concepts) chosen with `rvn eval`.
          ORDER BY bm25(memories_fts, 5.0, 3.0, 1.0, 1.5, 1.0) + (strftime('%s', 'now') * 1000 - m.created_at) / 2.592e10
          LIMIT ?4",
         not_scripted = crate::scripted::MEMORY_NOT_SCRIPTED
@@ -433,7 +433,7 @@ pub fn recall(
     project: &str,
     prompt: &str,
 ) -> Result<Option<String>> {
-    // Keywords rank (they score best at top five in `mnem eval`); the query vector from
+    // Keywords rank (they score best at top five in `rvn eval`); the query vector from
     // the watch service drops keyword hits that share words but not meaning, then fills
     // empty slots. Without the service, keywords alone.
     let scope = Scope::session(session);
@@ -455,7 +455,7 @@ pub fn recall(
     }
     let now = db::now_ms();
     let mut w = String::from(
-        "mnem recall: past memories matching this prompt (full text: get_observations([ids]))\n",
+        "ravnori recall: past memories matching this prompt (full text: get_observations([ids]))\n",
     );
     let mut shown = Vec::new();
     let mut openings: Vec<String> = Vec::new();

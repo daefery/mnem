@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Build a demo mnem database with made-up sessions, for screenshots and trying mnem.
+"""Build a demo ravnori database with made-up sessions, for screenshots and trying ravnori.
 
-    mnem --db /tmp/mnem-demo.db doctor >/dev/null   # create the schema with mnem itself
-    python3 docs/demo/make-demo.py /tmp/mnem-demo.db
-    mnem --db /tmp/mnem-demo.db ui --port 37800
+    rvn --db /tmp/ravnori-demo.db doctor >/dev/null   # create the schema with ravnori itself
+    python3 docs/demo/make-demo.py /tmp/ravnori-demo.db
+    rvn --db /tmp/ravnori-demo.db ui --port 37800
 
 Everything here is fictional: the project (acme/shop-api), the sessions, the people.
 Times are relative to now, so the feed always reads as recent work. Set
-MNEM_DEMO_NOW (milliseconds since 1970) to build the same record every time.
+RAVNORI_DEMO_NOW (milliseconds since 1970) to build the same record every time.
 """
 import json
 import os
@@ -15,9 +15,9 @@ import sqlite3
 import sys
 import time
 
-db = sys.argv[1] if len(sys.argv) > 1 else "/tmp/mnem-demo.db"
+db = sys.argv[1] if len(sys.argv) > 1 else "/tmp/ravnori-demo.db"
 c = sqlite3.connect(db)
-now = int(os.environ.get("MNEM_DEMO_NOW") or time.time() * 1000)
+now = int(os.environ.get("RAVNORI_DEMO_NOW") or time.time() * 1000)
 H = 3_600_000
 PROJECT = "github.com/acme/shop-api"
 
@@ -119,20 +119,20 @@ for sid, agent, title, ago, branch in sessions:
             c.execute(
                 "INSERT OR IGNORE INTO memories(session_id, project, kind, type, title, narrative, facts, concepts, files_read, files_modified, origin, origin_id, model, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, PROJECT, "observation", ty, mt, narrative, json.dumps(facts), json.dumps(["what-changed"]),
-                 json.dumps(files[:1]), json.dumps(mfiles), "mnem", f"{sid}@{p}-{a}#0", "sonnet", nonlocal_t[0] + 120_000),
+                 json.dumps(files[:1]), json.dumps(mfiles), "ravnori", f"{sid}@{p}-{a}#0", "sonnet", nonlocal_t[0] + 120_000),
             )
-            mid = c.execute("SELECT id FROM memories WHERE origin = 'mnem' AND origin_id = ?", (f"{sid}@{p}-{a}#0",)).fetchone()[0]
+            mid = c.execute("SELECT id FROM memories WHERE origin = 'ravnori' AND origin_id = ?", (f"{sid}@{p}-{a}#0",)).fetchone()[0]
             for e in [p] + edits[:2] + [a]:
                 c.execute("INSERT OR IGNORE INTO memory_evidence(memory_id, event_id) VALUES (?,?)", (mid, e))
         c.execute(
             "INSERT OR IGNORE INTO memories(session_id, project, kind, type, title, narrative, origin, origin_id, model, created_at, data) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-            (sid, PROJECT, "summary", None, prompt, answer, "mnem", f"{sid}@{p}-{a}#s", "sonnet", nonlocal_t[0] + 150_000,
+            (sid, PROJECT, "summary", None, prompt, answer, "ravnori", f"{sid}@{p}-{a}#s", "sonnet", nonlocal_t[0] + 150_000,
              json.dumps({"request": prompt, "completed": answer})),
         )
 c.execute(
     "INSERT OR IGNORE INTO memories(project, kind, type, title, narrative, origin, origin_id, created_at) VALUES (?,?,?,?,?,?,?,?)",
     (PROJECT, "pinned", "decision", "Never call the live Stripe API from tests; use the recorded fixtures in test/fixtures/stripe.",
-     "Never call the live Stripe API from tests; use the recorded fixtures in test/fixtures/stripe.", "mnem", "pin-demo-1", now - 80 * H),
+     "Never call the live Stripe API from tests; use the recorded fixtures in test/fixtures/stripe.", "ravnori", "pin-demo-1", now - 80 * H),
 )
 c.commit()
 print(f"demo record in {db}: {c.execute('SELECT count(*) FROM sessions').fetchone()[0]} sessions, "

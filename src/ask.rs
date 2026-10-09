@@ -1,4 +1,4 @@
-//! `mnem ask`: a question about past agent work, answered from the record with sources.
+//! `rvn ask`: a question about past agent work, answered from the record with sources.
 //!
 //! The question's scope is resolved first: the project (or every project), the time it
 //! asks about ("yesterday", "on 4 October", read by `when`), and the moment it is asked
@@ -165,7 +165,7 @@ pub fn resolve(question: &str, a: Asked) -> Result<Scope> {
     })
 }
 
-/// The project `question` names ("in mnem", "on argus"): its last path part, as a word
+/// The project `question` names ("in ravnori", "on argus"): its last path part, as a word
 /// of the question, matching exactly one known project. A name two projects share, or
 /// a common word ("code", "tmp"), selects nothing.
 fn named_project(question: &str, projects: &[String]) -> Option<String> {
@@ -198,7 +198,7 @@ fn named_project(question: &str, projects: &[String]) -> Option<String> {
 /// Where a question's topic is recorded when its own project holds nothing on it: the
 /// projects whose memories hold at least two of its topic words, with how many, most
 /// first. Searching them is the
-/// asker's choice (mnem never widens on its own); this only says where to look.
+/// asker's choice (ravnori never widens on its own); this only says where to look.
 pub fn elsewhere(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<(String, i64)>> {
     let Some(q) = two_of(&topic_words(question)) else {
         return Ok(Vec::new());
@@ -438,7 +438,7 @@ fn pinned_sources(conn: &Connection, question: &str, scope: &Scope) -> Result<Ve
 /// Prompts and agent replies in scope whose words match the question, best first: what
 /// was said in a session that no memory kept (a list the agent wrote into a ticket, the
 /// reason the developer gave). Main conversations only, never another agent's script or
-/// a claude-mem copy of a prompt mnem read itself.
+/// a claude-mem copy of a prompt ravnori read itself.
 fn matching_events(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec<Source>> {
     let Some(q) = two_of(&topic_words(question)) else {
         return Ok(Vec::new());
@@ -690,7 +690,7 @@ fn best_memories(conn: &Connection, question: &str, scope: &Scope) -> Result<Vec
 /// from (`origin_id` = `session@from-through#n`; session ids contain '-' too, so the
 /// range is read after the '@'), else when it was written.
 const HAPPENED: &str = "coalesce(
-    (SELECT e.ts FROM events e WHERE m.origin = 'mnem' AND instr(m.origin_id, '@') > 0
+    (SELECT e.ts FROM events e WHERE m.origin = 'ravnori' AND instr(m.origin_id, '@') > 0
        AND e.id = CAST(substr(substr(m.origin_id, instr(m.origin_id, '@') + 1),
                               instr(substr(m.origin_id, instr(m.origin_id, '@') + 1), '-') + 1)
                        AS INTEGER)),
@@ -712,7 +712,7 @@ const WEIGHT: &str = "CASE WHEN m.kind != 'summary' AND (lower(m.title) LIKE '%s
 /// Memories about what happened in `w`: distilled from events in the window, in sessions
 /// that are not another agent's script. Imported claude-mem memories count by when they
 /// were written (claude-mem wrote them as the session ran: within 6 minutes of its last
-/// event at the median, an hour at p90), so days before mnem distilled are answerable. When more happened than fits, the most telling
+/// event at the median, an hour at p90), so days before ravnori distilled are answerable. When more happened than fits, the most telling
 /// kinds are kept, spread over the whole window so a busy afternoon cannot crowd out the
 /// morning; they are given in the order they happened.
 fn window_memories(
@@ -914,7 +914,7 @@ fn in_window(day: i64, w: &Window) -> bool {
 }
 
 /// What the developer typed in `w` (main conversations, not another agent's script,
-/// not a claude-mem copy of a prompt mnem read itself), newest last.
+/// not a claude-mem copy of a prompt ravnori read itself), newest last.
 fn window_prompts(conn: &Connection, scope: &Scope, w: &Window) -> Result<Vec<Source>> {
     let end = scope.before.map_or(w.end, |b| b.min(w.end));
     let mut st = conn.prepare_cached(
@@ -1353,7 +1353,7 @@ mod tests {
         .unwrap();
         c.execute(
             "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)
-             VALUES (?1, ?2, ?3, 'summary', NULL, ?4, 'mnem', ?5, ?6)",
+             VALUES (?1, ?2, ?3, 'summary', NULL, ?4, 'ravnori', ?5, ?6)",
             rusqlite::params![n, session, project, title, format!("{session}@{n}-{n}#summary"), written],
         )
         .unwrap();
@@ -1633,7 +1633,7 @@ mod tests {
         for n in 0..FEW_MEMORIES as i64 {
             c.execute(
                 "INSERT INTO memories(id, session_id, project, kind, type, title, origin, origin_id, created_at)
-                 VALUES (?1, 'pi:a-1', 'p', 'observation', 'feature', ?2, 'mnem', ?3, ?4)",
+                 VALUES (?1, 'pi:a-1', 'p', 'observation', 'feature', ?2, 'ravnori', ?3, ?4)",
                 rusqlite::params![100 + n, format!("shipped thing {n}"), format!("pi:a-1@1-{}#{n}", 1), day + H],
             )
             .unwrap();
@@ -1700,16 +1700,16 @@ mod tests {
             "Yesterday, 5 October 2026, across all projects"
         );
         let s = resolve(
-            "what did we ship in mnem last week",
+            "what did we ship in ravnori last week",
             Asked {
-                projects: vec!["github.com/daefery/mnem".into()],
+                projects: vec!["github.com/daefery/ravnori".into()],
                 ..a.clone()
             },
         )
         .unwrap();
         assert_eq!(
             headline(&s),
-            "Last week, 28 September 2026 to 4 October 2026, in github.com/daefery/mnem"
+            "Last week, 28 September 2026 to 4 October 2026, in github.com/daefery/ravnori"
         );
         let s = resolve("what happened on 4 October", a.clone()).unwrap();
         assert_eq!(headline(&s), "4 October 2026, across all projects");
@@ -1859,7 +1859,7 @@ mod tests {
             &c,
             1,
             "pi:a-1-x",
-            "github.com/o/mnem",
+            "github.com/o/ravnori",
             day + 9 * H,
             day + 9 * H,
             "marcom draft approve shipped",
@@ -1868,7 +1868,7 @@ mod tests {
             &c,
             2,
             "pi:b-2-x",
-            "github.com/o/mnem",
+            "github.com/o/ravnori",
             day + 10 * H,
             day + 10 * H,
             "backup merge released",
@@ -1885,7 +1885,7 @@ mod tests {
             offset_min: 0,
         };
         let scope = Scope {
-            project: Some("github.com/o/mnem".into()),
+            project: Some("github.com/o/ravnori".into()),
             window: Some(w),
             before: None,
         };
@@ -1900,7 +1900,7 @@ mod tests {
         // "marcom" is the topic: only that work.
         assert_eq!(mems("what did we ship yesterday for marcom?"), ["#1"]);
         // The project's own name and "ship" are not topics: everything that day.
-        assert_eq!(mems("what did we ship on mnem yesterday?"), ["#1", "#2"]);
+        assert_eq!(mems("what did we ship on ravnori yesterday?"), ["#1", "#2"]);
         // A topic nothing matches leaves the whole day.
         assert_eq!(
             mems("what did we do yesterday about kubernetes?"),
@@ -1981,8 +1981,8 @@ mod tests {
     #[test]
     fn a_project_the_question_names_is_selected_only_when_unique() {
         let projects: Vec<String> = [
-            "github.com/daefery/mnem",
-            "/home/feryyp/mnem-launch",
+            "github.com/daefery/ravnori",
+            "/home/feryyp/ravnori-launch",
             "github.com/fery-yp/argus",
             "github.com/kunchenguid/firstmate",
             "github.com/kunchenguid/firstmate#secondmate",
@@ -2004,8 +2004,8 @@ mod tests {
             .project
         };
         assert_eq!(
-            with("what did we ship in mnem on 4 October?").as_deref(),
-            Some("github.com/daefery/mnem")
+            with("what did we ship in ravnori on 4 October?").as_deref(),
+            Some("github.com/daefery/ravnori")
         );
         assert_eq!(
             with("in argus, why did the upload fail").as_deref(),
@@ -2027,7 +2027,7 @@ mod tests {
     fn bare_imported_names_are_not_projects_a_question_can_name() {
         let c = db();
         for (id, project) in [
-            ("claude:a", "github.com/daefery/mnem"),
+            ("claude:a", "github.com/daefery/ravnori"),
             ("claude:b", "what"),
             ("claude:c", "/home/me/argus"),
         ] {
@@ -2039,7 +2039,7 @@ mod tests {
         }
         let mut got = projects(&c).unwrap();
         got.sort();
-        assert_eq!(got, ["/home/me/argus", "github.com/daefery/mnem"]);
+        assert_eq!(got, ["/home/me/argus", "github.com/daefery/ravnori"]);
     }
 
     #[test]

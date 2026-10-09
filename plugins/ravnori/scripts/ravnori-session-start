@@ -1,0 +1,10 @@
+#!/bin/sh
+# Claude Code plugin hook: pass the event to the ravnori program, or say how to install it.
+# Quiet when rvn install already wired this hook; a ravnori older than 0.3.0 is asked to
+# be updated.
+if command -v rvn >/dev/null 2>&1; then
+  rvn hook claude session-start --plugin 2>/dev/null && exit 0
+  echo "The ravnori plugin needs ravnori 0.3.0 or newer: run /ravnori:setup to update it."
+  exit 0
+fi
+echo "The ravnori plugin is enabled but the ravnori program is not installed: run /ravnori:setup to install it (one command, no Rust needed)."

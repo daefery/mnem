@@ -1,9 +1,9 @@
-use mnem::hook::cross_agent_delta;
+use ravnori::hook::cross_agent_delta;
 use rusqlite::{Connection, params};
 
 fn db(name: &str) -> Connection {
     let _ = name;
-    mnem::db::open_with(
+    ravnori::db::open_with(
         std::path::Path::new(":memory:"),
         std::time::Duration::from_secs(1),
     )
@@ -21,7 +21,7 @@ fn seed(c: &Connection, sid: &str, kind: &str, text: &str) {
             format!("{sid}:{kind}:{text}"),
             kind,
             text,
-            mnem::db::now_ms()
+            ravnori::db::now_ms()
         ],
     )
     .unwrap();
@@ -100,13 +100,13 @@ fn imported_history_and_harness_prompts_are_not_news() {
     c.execute("INSERT INTO sessions(id, agent, native_id, project) VALUES ('pi:old', 'pi', 'old', 'proj')", []).unwrap();
     c.execute(
         "INSERT INTO events(session_id, record_key, kind, text, turn, ts) VALUES ('pi:old', 'cm:1', 'prompt', 'imported', 1, ?1)",
-        params![mnem::db::now_ms()],
+        params![ravnori::db::now_ms()],
     )
     .unwrap();
     c.execute(
         "INSERT INTO events(session_id, record_key, kind, text, turn, ts, source_path, label)
          VALUES ('pi:old', 'h', 'prompt', 'poll', 2, ?1, '/live.jsonl', 'harness')",
-        params![mnem::db::now_ms()],
+        params![ravnori::db::now_ms()],
     )
     .unwrap();
     assert!(
@@ -133,7 +133,7 @@ fn oversized_group_is_shown_whole() {
             params![
                 format!("f{i}"),
                 format!("/x/{}{i}.rs", "n".repeat(240)),
-                mnem::db::now_ms()
+                ravnori::db::now_ms()
             ],
         )
         .unwrap();
@@ -156,20 +156,20 @@ fn recall_matches_prompt_once_per_session() {
     .enumerate()
     {
         c.execute(
-            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'mnem', ?2, ?3)",
-            params![title, format!("o{i}"), mnem::db::now_ms()],
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'ravnori', ?2, ?3)",
+            params![title, format!("o{i}"), ravnori::db::now_ms()],
         )
         .unwrap();
     }
     // Distilled from the asking session itself: the agent already has it in context.
     c.execute(
         "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at, session_id)
-         VALUES ('observation', 'feature', 'Watch service blocks backup restore while running', 'proj', 'mnem', 'own', ?1, 'claude:me')",
-        params![mnem::db::now_ms()],
+         VALUES ('observation', 'feature', 'Watch service blocks backup restore while running', 'proj', 'ravnori', 'own', ?1, 'claude:me')",
+        params![ravnori::db::now_ms()],
     )
     .unwrap();
     let prompt = "why does the backup restore refuse while the watch service is running";
-    let r = mnem::recall::recall(&c, "claude:me", "proj", prompt)
+    let r = ravnori::recall::recall(&c, "claude:me", "proj", prompt)
         .unwrap()
         .expect("a match");
     assert!(r.contains("Backup restore"), "{r}");
@@ -179,25 +179,25 @@ fn recall_matches_prompt_once_per_session() {
     );
     assert!(!r.contains("Viewer"), "{r}");
     assert!(
-        mnem::recall::recall(&c, "claude:me", "proj", prompt)
+        ravnori::recall::recall(&c, "claude:me", "proj", prompt)
             .unwrap()
             .is_none(),
         "not repeated"
     );
     assert!(
-        mnem::recall::recall(&c, "claude:other", "proj", prompt)
+        ravnori::recall::recall(&c, "claude:other", "proj", prompt)
             .unwrap()
             .is_some(),
         "other sessions still get it"
     );
     assert!(
-        mnem::recall::recall(&c, "claude:x", "proj", "yes")
+        ravnori::recall::recall(&c, "claude:x", "proj", "yes")
             .unwrap()
             .is_none(),
         "short prompts skip recall"
     );
     assert!(
-        mnem::recall::recall(&c, "claude:x", "elsewhere", prompt)
+        ravnori::recall::recall(&c, "claude:x", "elsewhere", prompt)
             .unwrap()
             .is_none(),
         "project scoped"
@@ -206,8 +206,8 @@ fn recall_matches_prompt_once_per_session() {
 
 #[test]
 fn half_written_line_is_not_an_alert() {
-    let dir = mnem::TempDir::new("health");
-    let c = mnem::db::open(&dir.join("m.db")).unwrap();
+    let dir = ravnori::TempDir::new("health");
+    let c = ravnori::db::open(&dir.join("m.db")).unwrap();
     let f = dir.join("t.jsonl");
     std::fs::write(&f, "{\"a\":1}\n{\"half\":").unwrap();
     // Cursor sits after the first line; the rest is an unterminated record.
@@ -224,7 +224,7 @@ fn half_written_line_is_not_an_alert() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    assert_eq!(mnem::health::stuck_files(&c), 0);
+    assert_eq!(ravnori::health::stuck_files(&c), 0);
     // A complete unread line that old is stuck.
     std::fs::write(&f, "{\"a\":1}\n{\"b\":2}\n").unwrap();
     std::fs::File::options()
@@ -233,7 +233,7 @@ fn half_written_line_is_not_an_alert() {
         .unwrap()
         .set_modified(old)
         .unwrap();
-    assert_eq!(mnem::health::stuck_files(&c), 1);
+    assert_eq!(ravnori::health::stuck_files(&c), 1);
 }
 
 #[test]
@@ -241,12 +241,12 @@ fn export_labels_every_record() {
     let c = db("export");
     seed(&c, "pi:s", "prompt", "hello there");
     c.execute(
-        "INSERT INTO memories(kind, type, title, project, origin, origin_id) VALUES ('observation', 'bugfix', 't', 'proj', 'mnem', 'x')",
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id) VALUES ('observation', 'bugfix', 't', 'proj', 'ravnori', 'x')",
         [],
     )
     .unwrap();
     let mut out = Vec::new();
-    let n = mnem::eval::export(&c, &mut out, None).unwrap();
+    let n = ravnori::eval::export(&c, &mut out, None).unwrap();
     let rows: Vec<serde_json::Value> = String::from_utf8(out)
         .unwrap()
         .lines()
@@ -266,12 +266,12 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
     let c = db("fill");
     let add = |title: &str, v: [f32; 4]| {
         c.execute(
-            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'mnem', ?1, ?2)",
-            params![title, mnem::db::now_ms()],
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'feature', ?1, 'proj', 'ravnori', ?1, ?2)",
+            params![title, ravnori::db::now_ms()],
         )
         .unwrap();
         let id = c.last_insert_rowid();
-        let (scale, q) = mnem::embed::quantize(&v);
+        let (scale, q) = ravnori::embed::quantize(&v);
         c.execute(
             "INSERT INTO memory_vectors(memory_id, model, dim, scale, vec) VALUES (?1, 'test-model', 4, ?2, ?3)",
             params![id, scale, q],
@@ -287,19 +287,19 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
         "Database backup restore button colours",
         [0.0, 1.0, 0.0, 0.0],
     );
-    let query = mnem::embed::Query {
+    let query = ravnori::embed::Query {
         model: "test-model".into(),
         vec: vec![0.9, 0.1, 0.0, 0.0],
     };
     let prompt = "how does backup restore work for the database snapshots";
-    let ids: Vec<i64> = mnem::recall::rank(
+    let ids: Vec<i64> = ravnori::recall::rank(
         &c,
         "proj",
         prompt,
-        &mnem::recall::Scope::default(),
+        &ravnori::recall::Scope::default(),
         5,
         Some(&query),
-        mnem::recall::Mode::Fill,
+        ravnori::recall::Mode::Fill,
     )
     .unwrap()
     .into_iter()
@@ -319,12 +319,12 @@ fn fill_mode_keeps_keyword_order_and_fills_with_meaning() {
 
 fn add_vector_memory(c: &Connection, title: &str, ty: &str, v: [f32; 4]) -> i64 {
     c.execute(
-        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', ?2, ?1, 'proj', 'mnem', ?1, ?3)",
-        params![title, ty, mnem::db::now_ms()],
+        "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', ?2, ?1, 'proj', 'ravnori', ?1, ?3)",
+        params![title, ty, ravnori::db::now_ms()],
     )
     .unwrap();
     let id = c.last_insert_rowid();
-    let (scale, q) = mnem::embed::quantize(&v);
+    let (scale, q) = ravnori::embed::quantize(&v);
     c.execute(
         "INSERT INTO memory_vectors(memory_id, model, dim, scale, vec) VALUES (?1, 'test-model', 4, ?2, ?3)",
         params![id, scale, q],
@@ -353,7 +353,7 @@ fn vectors_follow_their_memory() {
     assert_eq!(n, 0, "edited memory kept a stale vector");
     // Forgetting drops it too, so a reused id cannot inherit it.
     let b = add_vector_memory(&c, "second", "feature", [0.0, 1.0, 0.0, 0.0]);
-    mnem::forget::forget(&mut c, &[b.to_string()], None, None).unwrap();
+    ravnori::forget::forget(&mut c, &[b.to_string()], None, None).unwrap();
     let n: i64 = c
         .query_row("SELECT count(*) FROM memory_vectors", [], |r| r.get(0))
         .unwrap();
@@ -381,15 +381,15 @@ fn ineligible_memories_cannot_crowd_out_vector_hits() {
         );
     }
     let eligible = add_vector_memory(&c, "eligible", "feature", [0.9, 0.3, 0.0, 0.0]);
-    let q = mnem::embed::Query {
+    let q = ravnori::embed::Query {
         model: "test-model".into(),
         vec: vec![1.0, 0.0, 0.0, 0.0],
     };
-    let hits = mnem::embed::search(
+    let hits = ravnori::embed::search(
         &c,
         &q,
         "proj",
-        &mnem::recall::Scope::session("claude:me"),
+        &ravnori::recall::Scope::session("claude:me"),
         5,
     )
     .unwrap();
@@ -398,11 +398,11 @@ fn ineligible_memories_cannot_crowd_out_vector_hits() {
 
 #[test]
 fn viewer_rejects_oversized_requests() {
-    let dir = mnem::TempDir::new("ui-limit");
+    let dir = ravnori::TempDir::new("ui-limit");
     let path = dir.join("m.db");
-    drop(mnem::db::open(&path).unwrap());
+    drop(ravnori::db::open(&path).unwrap());
     let port = 38000 + (std::process::id() % 1000) as u16;
-    std::thread::spawn(move || mnem::ui::serve(path, port, || {}));
+    std::thread::spawn(move || ravnori::ui::serve(path, port, || {}));
     std::thread::sleep(std::time::Duration::from_millis(300));
     use std::io::{Read, Write};
     let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -425,7 +425,7 @@ fn replay_measures_rarity_as_of_then() {
     let c = db("replay-rarity");
     let add = |title: &str, at: i64, key: String| {
         c.execute(
-            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'bugfix', ?1, 'proj', 'mnem', ?2, ?3)",
+            "INSERT INTO memories(kind, type, title, project, origin, origin_id, created_at) VALUES ('observation', 'bugfix', ?1, 'proj', 'ravnori', ?2, ?3)",
             params![title, key, at],
         )
         .unwrap();
@@ -448,17 +448,17 @@ fn replay_measures_rarity_as_of_then() {
         add("Zeppelin sync note", 100, format!("z{i}"));
     }
     let prompt = "why does the zeppelin widget crash sometimes";
-    let scope = mnem::recall::Scope {
+    let scope = ravnori::recall::Scope {
         before: Some(50),
         ..Default::default()
     };
-    let ids: Vec<i64> = mnem::recall::keyword_rank(&c, "proj", prompt, &scope, 5)
+    let ids: Vec<i64> = ravnori::recall::keyword_rank(&c, "proj", prompt, &scope, 5)
         .unwrap()
         .into_iter()
         .map(|h| h.0)
         .collect();
     assert!(ids.contains(&old), "{ids:?}");
     // Measured over today's index, no prompt word is rare any more: nothing qualifies.
-    let now = mnem::recall::keyword_rank(&c, "proj", prompt, &Default::default(), 5).unwrap();
+    let now = ravnori::recall::keyword_rank(&c, "proj", prompt, &Default::default(), 5).unwrap();
     assert!(now.is_empty(), "{now:?}");
 }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ravnori": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/ravnori-mcp",
+      "args": []
+    }
+  }
+}

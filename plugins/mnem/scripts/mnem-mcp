@@ -1,4 +1,0 @@
-#!/bin/sh
-# Claude Code plugin MCP server: mnem's tools (search, get_observations, timeline, ...).
-# Offers none when mnem install already registered them, so they are not listed twice.
-exec mnem mcp --plugin

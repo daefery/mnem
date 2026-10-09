@@ -1,7 +1,7 @@
-//! `mnem install`: wire mnem into Claude Code, Codex and pi.
+//! `rvn install`: wire ravnori into Claude Code, Codex and pi.
 //!
-//! Every file is backed up before it is changed (`<file>.bak-mnem-<ts>`), entries are
-//! idempotent (re-running replaces mnem's own entries and nothing else), and
+//! Every file is backed up before it is changed (`<file>.bak-ravnori-<ts>`), entries are
+//! idempotent (re-running replaces ravnori's own entries and nothing else), and
 //! `--dry-run` prints the plan without writing.
 
 use crate::db;
@@ -61,6 +61,7 @@ pub struct Plan {
 }
 
 pub fn run(p: &Plan) -> Result<()> {
+    from_mnem(p)?;
     if p.claude {
         claude(p)?;
     }
@@ -79,6 +80,64 @@ pub fn run(p: &Plan) -> Result<()> {
     } else {
         say!("\nagents");
         say_raw(&crate::agents::render(&crate::agents::status_all()));
+    }
+    Ok(())
+}
+
+/// An install from before 0.6.0, when ravnori was called mnem: move its data and take
+/// down what only mnem names (MCP server, pi extension, service). The steps after this
+/// write ravnori's own, replacing mnem's hooks in place.
+fn from_mnem(p: &Plan) -> Result<()> {
+    use crate::rename;
+    let states: Vec<(PathBuf, PathBuf)> = claude_dirs()
+        .into_iter()
+        .map(|d| {
+            let s = claude_state(&d);
+            (d, s)
+        })
+        .filter(|(_, s)| rename::has_old_claude_mcp(s))
+        .collect();
+    if !rename::needed() && states.is_empty() && !rename::has_old_codex_mcp() {
+        // Still link a stray old command (a `cargo install`ed mnem with nothing else).
+        for n in rename::link_old_command(&p.bin, p.dry_run)? {
+            say!("{n}");
+        }
+        return Ok(());
+    }
+    say!("moving from mnem (ravnori's name before 0.6.0)");
+    let mut notes = vec![
+        rename::move_data(p.dry_run)?,
+        rename::remove_old_service(p.dry_run)?,
+        rename::remove_old_pi_extension(p.dry_run)?,
+        rename::remove_old_codex_mcp(p.dry_run)?,
+    ];
+    for (dir, state) in states {
+        // Through Claude Code's own command when it is there; the state file is checked
+        // afterwards and cleaned directly if the entry is still in it.
+        if !p.dry_run
+            && let Some(exe) = crate::agents::command_path("claude")
+        {
+            let _ = Command::new(exe)
+                .args(["mcp", "remove", "--scope", "user", rename::OLD])
+                .envs(claude_env(&dir))
+                .output();
+        }
+        notes.push(if p.dry_run || rename::has_old_claude_mcp(&state) {
+            rename::remove_old_claude_mcp_file(&state, p.dry_run)?
+        } else {
+            Some(format!(
+                "removed the mnem MCP server from Claude Code ({})",
+                dir.display()
+            ))
+        });
+    }
+    notes.extend(
+        rename::link_old_command(&p.bin, p.dry_run)?
+            .into_iter()
+            .map(Some),
+    );
+    for n in notes.into_iter().flatten() {
+        say!("  {n}");
     }
     Ok(())
 }
@@ -130,11 +189,11 @@ fn distillation(p: &Plan) -> Result<()> {
     match works {
         Some(_) => say!("  tested: it answered"),
         None => {
-            say!("  ! it did not answer, so memories and `mnem ask` answers wait until it does:");
+            say!("  ! it did not answer, so memories and `rvn ask` answers wait until it does:");
             for f in &failures {
                 say!("    {f}");
             }
-            say!("  then run `mnem doctor` to check");
+            say!("  then run `rvn doctor` to check");
         }
     }
     let path = crate::config::path();
@@ -219,10 +278,10 @@ pub(crate) fn hook_entries(bin: &str, agent: &str) -> Vec<HookEntry> {
 fn is_ours(h: &Value) -> bool {
     h.get("command")
         .and_then(Value::as_str)
-        .is_some_and(|c| c.contains("mnem hook "))
+        .is_some_and(crate::agents::is_hook_command)
 }
 
-/// Remove mnem's hooks everywhere. Other hooks stay, even when they share a group with
+/// Remove ravnori's hooks everywhere. Other hooks stay, even when they share a group with
 /// one of ours; only groups and events left empty by the removal are dropped.
 fn strip_ours(doc: &mut Value) -> usize {
     let Some(hooks) = doc.get_mut("hooks").and_then(Value::as_object_mut) else {
@@ -247,7 +306,7 @@ fn strip_ours(doc: &mut Value) -> usize {
     removed
 }
 
-/// Replace mnem's entries in a Claude-style `{"hooks": {Event: [group]}}` document.
+/// Replace ravnori's entries in a Claude-style `{"hooks": {Event: [group]}}` document.
 fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) -> Result<()> {
     anyhow::ensure!(doc.is_object(), "settings root is not a JSON object");
     // Already exactly right: leave every hook where it is. Codex keys a hook's trust
@@ -284,8 +343,8 @@ fn merge_hooks(doc: &mut Value, entries: &[HookEntry], extra: &Value) -> Result<
     Ok(())
 }
 
-/// Whether mnem's hooks in `doc` are exactly `entries`: each entry found once (its own
-/// group, same event, matcher, command, timeout and extra keys) and no other mnem hook.
+/// Whether ravnori's hooks in `doc` are exactly `entries`: each entry found once (its own
+/// group, same event, matcher, command, timeout and extra keys) and no other rvn hook.
 fn ours_match(doc: &Value, entries: &[HookEntry], extra: &Value) -> bool {
     let Some(hooks) = doc.get("hooks").and_then(Value::as_object) else {
         return false;
@@ -341,6 +400,11 @@ fn read_json(path: &Path) -> Result<Value> {
 
 /// Copy `path` beside itself before changing it. Names never collide: two changes in the
 /// same millisecond (two viewer requests) get separate copies.
+/// Back up a file before ravnori changes it (also used when moving from mnem).
+pub(crate) fn backup_file(path: &Path) -> Result<()> {
+    backup(path)
+}
+
 fn backup(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -348,9 +412,9 @@ fn backup(path: &Path) -> Result<()> {
     let ms = db::now_ms();
     for n in 0..100 {
         let name = if n == 0 {
-            format!("{}.bak-mnem-{ms}", path.display())
+            format!("{}.bak-ravnori-{ms}", path.display())
         } else {
-            format!("{}.bak-mnem-{ms}-{n}", path.display())
+            format!("{}.bak-ravnori-{ms}-{n}", path.display())
         };
         let b = PathBuf::from(name);
         match std::fs::OpenOptions::new()
@@ -418,8 +482,10 @@ fn claude(p: &Plan) -> Result<()> {
             p,
             "claude",
             &claude_env(&dir),
-            &["mcp", "remove", "--scope", "user", "mnem"],
-            &["mcp", "add", "--scope", "user", "mnem", "--", &p.bin, "mcp"],
+            &["mcp", "remove", "--scope", "user", "ravnori"],
+            &[
+                "mcp", "add", "--scope", "user", "ravnori", "--", &p.bin, "mcp",
+            ],
         )?;
         // Checked, not assumed: the command can succeed yet write somewhere else.
         if !registered || (!p.dry_run && !claude_has_mcp(&dir)) {
@@ -429,14 +495,14 @@ fn claude(p: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// A Claude Code state file holding nothing but what mnem writes before Claude Code is
-/// installed (`{"mcpServers": {"mnem": ...}}`).
-pub(crate) fn only_mnem_state(doc: &Value) -> bool {
+/// A Claude Code state file holding nothing but what ravnori writes before Claude Code is
+/// installed (`{"mcpServers": {"ravnori": ...}}`).
+pub(crate) fn only_ravnori_state(doc: &Value) -> bool {
     doc.as_object().is_some_and(|o| o.len() == 1)
         && doc
             .get("mcpServers")
             .and_then(Value::as_object)
-            .is_some_and(|m| m.len() == 1 && m.contains_key("mnem"))
+            .is_some_and(|m| m.len() == 1 && m.contains_key("ravnori"))
 }
 
 /// Where a Claude Code profile keeps its user-scope MCP servers: `.claude.json` in the
@@ -449,10 +515,10 @@ pub(crate) fn claude_state(dir: &Path) -> PathBuf {
     }
 }
 
-/// The command mnem's tools are registered with in this profile (user scope), if any.
+/// The command ravnori's tools are registered with in this profile (user scope), if any.
 pub(crate) fn claude_mcp_command(dir: &Path) -> Option<String> {
     let v = read_json(&claude_state(dir)).ok()?;
-    let m = v.get("mcpServers")?.get("mnem")?;
+    let m = v.get("mcpServers")?.get("ravnori")?;
     let args_ok = m
         .get("args")
         .and_then(Value::as_array)
@@ -462,25 +528,25 @@ pub(crate) fn claude_mcp_command(dir: &Path) -> Option<String> {
         .flatten()
 }
 
-/// Whether the profile has mnem's tools registered at user scope.
+/// Whether the profile has ravnori's tools registered at user scope.
 pub(crate) fn claude_has_mcp(dir: &Path) -> bool {
     claude_mcp_command(dir).is_some()
 }
 
-/// Register mnem's tools before Claude Code exists: create the profile's `.claude.json`
-/// with just mnem's server, as `claude mcp add --scope user` would write it. Only when
+/// Register ravnori's tools before Claude Code exists: create the profile's `.claude.json`
+/// with just ravnori's server, as `claude mcp add --scope user` would write it. Only when
 /// the file is absent (created exclusively, so a Claude Code that starts meanwhile wins):
 /// once Claude Code keeps its state there, only its own `claude mcp` edits it.
 fn claude_mcp_direct(p: &Plan, dir: &Path) -> Result<()> {
     let path = claude_state(dir);
-    // Already registered (mnem created this file on an earlier run): nothing to do.
+    // Already registered (ravnori created this file on an earlier run): nothing to do.
     if claude_mcp_command(dir).as_deref() == Some(p.bin.as_str()) {
         say!("  mcp: already registered in {}", path.display());
         return Ok(());
     }
     if path.exists() {
         say!(
-            "  mcp: NOT registered: {} belongs to Claude Code and its `claude` command is not found; run: {}claude mcp add --scope user mnem -- {} mcp",
+            "  mcp: NOT registered: {} belongs to Claude Code and its `claude` command is not found; run: {}claude mcp add --scope user ravnori -- {} mcp",
             path.display(),
             claude_env(dir)
                 .iter()
@@ -490,12 +556,12 @@ fn claude_mcp_direct(p: &Plan, dir: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let body = serde_json::to_string_pretty(&json!({ "mcpServers": { "mnem": {
+    let body = serde_json::to_string_pretty(&json!({ "mcpServers": { "ravnori": {
         "type": "stdio", "command": p.bin, "args": ["mcp"], "env": {}
     } } }))?
         + "\n";
     if p.dry_run {
-        say!("  would create {} with mnem's tools", path.display());
+        say!("  would create {} with ravnori's tools", path.display());
         return Ok(());
     }
     if let Some(d) = path.parent() {
@@ -513,7 +579,7 @@ fn claude_mcp_direct(p: &Plan, dir: &Path) -> Result<()> {
             use std::io::Write;
             f.write_all(body.as_bytes())?;
             say!(
-                "  mcp: created {} with mnem's tools (Claude Code is not installed yet)",
+                "  mcp: created {} with ravnori's tools (Claude Code is not installed yet)",
                 path.display()
             );
         }
@@ -544,7 +610,7 @@ fn codex(p: &Plan) -> Result<()> {
     say!("Codex");
     let path = db::home().join(".codex/hooks.json");
     let mut doc = read_json(&path)?;
-    // Codex caps injected context per hook; mnem's session context is ~8 KB.
+    // Codex caps injected context per hook; ravnori's session context is ~8 KB.
     merge_hooks(
         &mut doc,
         &hook_entries(&p.bin, "codex"),
@@ -554,29 +620,29 @@ fn codex(p: &Plan) -> Result<()> {
         say!("  hook {event}: {cmd}");
     }
     write_json(p, &path, &doc)?;
-    // MCP server: `[mcp_servers.mnem]` running this binary. Added when missing; its
+    // MCP server: `[mcp_servers.ravnori]` running this binary. Added when missing; its
     // `command` and `args` corrected in place when they differ (a moved binary), with any
     // other keys the user put in the table kept.
     let cfg = db::home().join(".codex/config.toml");
     let cur = std::fs::read_to_string(&cfg).unwrap_or_default();
-    let next = set_mnem_server(&cur, &p.bin)
+    let next = set_ravnori_server(&cur, &p.bin)
         .with_context(|| format!("{} is not valid TOML; left unchanged", cfg.display()))?;
     if next == cur {
-        say!("  mcp: [mcp_servers.mnem] already in {}", cfg.display());
+        say!("  mcp: [mcp_servers.ravnori] already in {}", cfg.display());
     } else if p.dry_run {
-        say!("  would set [mcp_servers.mnem] in {}", cfg.display());
+        say!("  would set [mcp_servers.ravnori] in {}", cfg.display());
     } else {
         backup(&cfg)?;
         if let Some(d) = cfg.parent() {
             std::fs::create_dir_all(d)?;
         }
         std::fs::write(&cfg, next)?;
-        say!("  mcp: set [mcp_servers.mnem] in {}", cfg.display());
+        say!("  mcp: set [mcp_servers.ravnori] in {}", cfg.display());
     }
     Ok(())
 }
 
-/// Run the agent's own command to register mnem's tools. True when it did.
+/// Run the agent's own command to register ravnori's tools. True when it did.
 fn mcp_via_cli(
     p: &Plan,
     cli: &str,
@@ -630,10 +696,10 @@ fn mcp_via_cli(
 
 fn pi(p: &Plan) -> Result<()> {
     say!("pi");
-    let dir = db::home().join(".pi/agent/extensions/mnem");
+    let dir = db::home().join(".pi/agent/extensions/ravnori");
     let path = dir.join("index.ts");
     // JSON string encoding is a valid TS string literal (escapes Windows backslashes).
-    let src = PI_EXTENSION.replace("__MNEM_BIN__", &serde_json::to_string(&p.bin)?);
+    let src = PI_EXTENSION.replace("__RAVNORI_BIN__", &serde_json::to_string(&p.bin)?);
     if std::fs::read_to_string(&path).is_ok_and(|cur| cur == src) {
         say!("  unchanged: {}", path.display());
         return Ok(());
@@ -650,16 +716,16 @@ fn pi(p: &Plan) -> Result<()> {
 }
 
 const PI_EXTENSION: &str = r#"/**
- * mnem for pi: session-start context, cross-agent updates, and memory tools.
- * Generated by `mnem install`; re-run it to update. Capture itself needs nothing
- * here: mnem reads pi's own session files.
+ * ravnori for pi: session-start context, cross-agent updates, and memory tools.
+ * Generated by `rvn install`; re-run it to update. Capture itself needs nothing
+ * here: ravnori reads pi's own session files.
  */
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
-const MNEM = process.env.MNEM_BIN ?? __MNEM_BIN__;
+const RAVNORI = process.env.RAVNORI_BIN ?? __RAVNORI_BIN__;
 
 export default function (pi: ExtensionAPI) {
 	let session = "";
@@ -670,7 +736,7 @@ export default function (pi: ExtensionAPI) {
 
 	const run = async (args: string[]) => {
 		try {
-			const r = await pi.exec(MNEM, args);
+			const r = await pi.exec(RAVNORI, args);
 			return r.code === 0 ? r.stdout.trim() : "";
 		} catch {
 			return "";
@@ -680,8 +746,8 @@ export default function (pi: ExtensionAPI) {
 	// Tools the agent calls: failures are reported, not passed off as "no results", and
 	// relative paths start from the session's current directory.
 	const call = async (args: string[], signal: AbortSignal | undefined, cwd: string) => {
-		const r = await pi.exec(MNEM, args, { signal, cwd });
-		if (r.code !== 0) throw new Error(`mnem failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
+		const r = await pi.exec(RAVNORI, args, { signal, cwd });
+		if (r.code !== 0) throw new Error(`ravnori failed (exit ${r.code}): ${(r.stderr || r.stdout).trim().slice(0, 500)}`);
 		return r.stdout.trim();
 	};
 
@@ -712,7 +778,7 @@ export default function (pi: ExtensionAPI) {
 		}
 		const content = parts.join("\n\n");
 		if (content) {
-			return { message: { customType: "mnem-context", content, display: false } };
+			return { message: { customType: "ravnori-context", content, display: false } };
 		}
 	});
 
@@ -729,7 +795,7 @@ export default function (pi: ExtensionAPI) {
 		touched.add(abs);
 		let text = "";
 		try {
-			const r = await pi.exec(MNEM, ["file", abs, "--touch", "--session", session, "--cwd", ctx.cwd], {
+			const r = await pi.exec(RAVNORI, ["file", abs, "--touch", "--session", session, "--cwd", ctx.cwd], {
 				cwd: ctx.cwd,
 				timeout: 2500,
 				signal: ctx.signal,
@@ -749,8 +815,8 @@ export default function (pi: ExtensionAPI) {
 
 	const tool = (name: string, description: string, parameters: any, promptSnippet?: string) =>
 		defineTool({
-			name: `mnem_${name}`,
-			label: `mnem ${name}`,
+			name: `ravnori_${name}`,
+			label: `ravnori ${name}`,
 			description,
 			promptSnippet,
 			parameters,
@@ -767,12 +833,12 @@ export default function (pi: ExtensionAPI) {
 		});
 
 	pi.registerTool(
-		tool("search", "Search past work across all agents (decisions, bugs, fixes, what was tried): use when the user refers to earlier work (\"like last time\", \"that bug\", \"why did we\"), or when unsure whether a design question was already settled in this project (pass project). Not for general programming knowledge. Returns a one-line-per-hit index with ids for mnem_get_observations.", Type.Object({
+		tool("search", "Search past work across all agents (decisions, bugs, fixes, what was tried): use when the user refers to earlier work (\"like last time\", \"that bug\", \"why did we\"), or when unsure whether a design question was already settled in this project (pass project). Not for general programming knowledge. Returns a one-line-per-hit index with ids for ravnori_get_observations.", Type.Object({
 			query: Type.String({ description: "Search query" }),
 			project: Type.Optional(Type.String({ description: "Filter by project (substring)" })),
 			type: Type.Optional(Type.String({ description: "observations | sessions | prompts | events" })),
 			limit: Type.Optional(Type.Number({ description: "Max results (default 20)" })),
-		}), "mnem_search: search past work (decisions, bugs, fixes) when the user refers to earlier work"),
+		}), "ravnori_search: search past work (decisions, bugs, fixes) when the user refers to earlier work"),
 	);
 	pi.registerTool(
 		tool("ask", "Answer a question about past work from the record, with sources: why something was decided, what was done on a day or in a week (\"what did we do yesterday\", \"what shipped on 4 October\"), what was tried. Reads time words itself and, for a question about a time, looks in every project unless one is named; says when nothing is recorded. Use it before reconstructing history from git log, notes or tickets.", Type.Object({
@@ -781,7 +847,7 @@ export default function (pi: ExtensionAPI) {
 			all: Type.Optional(Type.Boolean({ description: "Search every project" })),
 			since: Type.Optional(Type.String({ description: "YYYY-MM-DD: look at this time instead of the one the question names" })),
 			until: Type.Optional(Type.String({ description: "YYYY-MM-DD, end of since (inclusive)" })),
-		}), "mnem_ask: answer a question about past work (why, what was done when) from the record, with sources"),
+		}), "ravnori_ask: answer a question about past work (why, what was done when) from the record, with sources"),
 	);
 	pi.registerTool(
 		tool("timeline", "What happened around one memory (\"58645\") or transcript event (\"E123\"). Rarely needed: use when you must reconstruct a sequence (what led to a bug, what was tried before a fix).", Type.Object({
@@ -799,14 +865,14 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool(
 		tool("get_observations", "Full text of memories or transcript events: use when a memory you were shown or found looks relevant, since titles alone can mislead. Includes, when available, excerpts of the transcript evidence and whether the files a memory names changed since (no note does not mean unchanged).", Type.Object({
 			ids: Type.Array(Type.Union([Type.String(), Type.Number()]), { description: "Ids, e.g. [58645, \"E72923\"]" }),
-		}), "mnem_get_observations: full text of a memory shown to you (#id) that looks relevant"),
+		}), "ravnori_get_observations: full text of a memory shown to you (#id) that looks relevant"),
 	);
 	pi.registerTool(
 		tool("recall_file", "Memories about one file (past bugs, decisions, changes), one line each, marked with whether its own edits are still in the file (else whether the file changed since): use before changing a file you have not worked on in this session; once per file. Says so when there are none.", Type.Object({
 			path: Type.String({ description: "The file, absolute or relative to the session's working directory" }),
 			cwd: Type.Optional(Type.String({ description: "Directory a relative path starts from (default: the session's)" })),
 			limit: Type.Optional(Type.Number({ description: "Max memories (default 5)" })),
-		}), "mnem_recall_file: past bugs and decisions about a file, before you change it"),
+		}), "ravnori_recall_file: past bugs and decisions about a file, before you change it"),
 	);
 }
 "#;
@@ -860,7 +926,7 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
         }
         let mut doc = read_json(&path)?;
         let n = strip_ours(&mut doc);
-        say!("{name}: {n} mnem hook(s) in {}", path.display());
+        say!("{name}: {n} rvn hook(s) in {}", path.display());
         if n > 0 {
             write_json(&p, &path, &doc)?;
         }
@@ -874,23 +940,27 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
             "claude",
             &claude_env(&dir),
             &["--version"],
-            &["mcp", "remove", "--scope", "user", "mnem"],
+            &["mcp", "remove", "--scope", "user", "ravnori"],
         )?;
-        // Without the `claude` command: a state file holding only what mnem created before
-        // Claude Code was installed is mnem's to delete; anything else is Claude Code's.
+        // Without the `claude` command: a state file holding only what ravnori created before
+        // Claude Code was installed is ravnori's to delete; anything else is Claude Code's.
         let state = claude_state(&dir);
         if !removed && let Ok(doc) = read_json(&state) {
-            if only_mnem_state(&doc) {
+            if only_ravnori_state(&doc) {
                 if dry_run {
                     say!("  would remove {}", state.display());
                 } else {
                     backup(&state)?;
                     std::fs::remove_file(&state)?;
-                    say!("  removed {} (mnem had created it)", state.display());
+                    say!("  removed {} (ravnori had created it)", state.display());
                 }
-            } else if doc.get("mcpServers").and_then(|m| m.get("mnem")).is_some() {
+            } else if doc
+                .get("mcpServers")
+                .and_then(|m| m.get("ravnori"))
+                .is_some()
+            {
                 say!(
-                    "  mcp: still registered in {}; run: claude mcp remove --scope user mnem",
+                    "  mcp: still registered in {}; run: claude mcp remove --scope user ravnori",
                     state.display()
                 );
             }
@@ -898,15 +968,18 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
     }
     let cfg = db::home().join(".codex/config.toml");
     if let Ok(cur) = std::fs::read_to_string(&cfg) {
-        let stripped = remove_mnem_server(&cur)
+        let stripped = remove_ravnori_server(&cur)
             .with_context(|| format!("{} is not valid TOML; left unchanged", cfg.display()))?;
         if stripped != cur {
             if dry_run {
-                say!("  would remove [mcp_servers.mnem] from {}", cfg.display());
+                say!(
+                    "  would remove [mcp_servers.ravnori] from {}",
+                    cfg.display()
+                );
             } else {
                 backup(&cfg)?;
                 std::fs::write(&cfg, stripped)?;
-                say!("  removed [mcp_servers.mnem] from {}", cfg.display());
+                say!("  removed [mcp_servers.ravnori] from {}", cfg.display());
             }
         }
     }
@@ -922,7 +995,7 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
             say!("  removed {}", unit.display());
         }
     }
-    let ext = db::home().join(".pi/agent/extensions/mnem");
+    let ext = db::home().join(".pi/agent/extensions/ravnori");
     if ext.exists() {
         if dry_run {
             say!("  would remove {}", ext.display());
@@ -938,10 +1011,10 @@ pub fn uninstall(dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-/// `config.toml` with `[mcp_servers.mnem]` running `bin` (`args = ["mcp"]`): added when
+/// `config.toml` with `[mcp_servers.ravnori]` running `bin` (`args = ["mcp"]`): added when
 /// missing, `command` and `args` corrected when they differ, every other key, comment and
 /// table kept as it was (format-preserving edit). Unchanged text when already right.
-fn set_mnem_server(src: &str, bin: &str) -> Result<String> {
+fn set_ravnori_server(src: &str, bin: &str) -> Result<String> {
     use toml_edit::{Array, DocumentMut, Item, Table, value};
     let mut doc: DocumentMut = src.parse()?;
     let servers = doc
@@ -953,7 +1026,7 @@ fn set_mnem_server(src: &str, bin: &str) -> Result<String> {
         })
         .as_table_like_mut()
         .context("mcp_servers is not a table")?;
-    let right = servers.get("mnem").is_some_and(|m| {
+    let right = servers.get("ravnori").is_some_and(|m| {
         m.get("command").and_then(|c| c.as_str()) == Some(bin)
             && m.get("args")
                 .and_then(|a| a.as_array())
@@ -962,16 +1035,16 @@ fn set_mnem_server(src: &str, bin: &str) -> Result<String> {
     if right {
         return Ok(src.to_string());
     }
-    let mnem = servers
-        .entry("mnem")
+    let ravnori = servers
+        .entry("ravnori")
         .or_insert(Item::Table(Table::new()))
         .as_table_like_mut()
-        .context("mcp_servers.mnem is not a table")?;
+        .context("mcp_servers.ravnori is not a table")?;
     let mut args = Array::new();
     args.push("mcp");
     // Only the value that differs changes, keeping the comments around it.
-    set_keeping_decor(mnem, "command", value(bin));
-    set_keeping_decor(mnem, "args", value(args));
+    set_keeping_decor(ravnori, "command", value(bin));
+    set_keeping_decor(ravnori, "args", value(args));
     Ok(doc.to_string())
 }
 
@@ -992,13 +1065,13 @@ fn set_keeping_decor(t: &mut dyn toml_edit::TableLike, key: &str, mut new: toml_
     }
 }
 
-/// `config.toml` without `[mcp_servers.mnem]`; everything else as it was.
-fn remove_mnem_server(src: &str) -> Result<String> {
+/// `config.toml` without `[mcp_servers.ravnori]`; everything else as it was.
+fn remove_ravnori_server(src: &str) -> Result<String> {
     let mut doc: toml_edit::DocumentMut = src.parse()?;
     let removed = doc
         .get_mut("mcp_servers")
         .and_then(|s| s.as_table_like_mut())
-        .and_then(|s| s.remove("mnem"))
+        .and_then(|s| s.remove("ravnori"))
         .is_some();
     Ok(if removed {
         doc.to_string()
@@ -1012,7 +1085,7 @@ pub fn default_bin() -> String {
         .ok()
         .and_then(|p| std::fs::canonicalize(p).ok())
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "mnem".into())
+        .unwrap_or_else(|| "rvn".into())
 }
 
 #[cfg(test)]
@@ -1024,9 +1097,9 @@ mod tests {
         let mut doc = json!({ "hooks": { "Stop": [
             { "hooks": [
                 { "type": "command", "command": "notify-send done" },
-                { "type": "command", "command": "/x/mnem hook claude stop" }
+                { "type": "command", "command": "/x/rvn hook claude stop" }
             ] },
-            { "hooks": [{ "type": "command", "command": "/x/mnem hook claude stop" }] }
+            { "hooks": [{ "type": "command", "command": "/x/rvn hook claude stop" }] }
         ], "PreToolUse": [{ "matcher": "Read", "hooks": [{ "type": "command", "command": "guard" }] }] } });
         assert_eq!(strip_ours(&mut doc), 2);
         assert_eq!(doc["hooks"]["Stop"].as_array().unwrap().len(), 1);
@@ -1034,13 +1107,13 @@ mod tests {
             doc["hooks"]["Stop"][0]["hooks"][0]["command"],
             "notify-send done"
         );
-        merge_hooks(&mut doc, &hook_entries("/x/mnem", "claude"), &json!({})).unwrap();
-        merge_hooks(&mut doc, &hook_entries("/x/mnem", "claude"), &json!({})).unwrap();
+        merge_hooks(&mut doc, &hook_entries("/x/rvn", "claude"), &json!({})).unwrap();
+        merge_hooks(&mut doc, &hook_entries("/x/rvn", "claude"), &json!({})).unwrap();
         let stop = doc["hooks"]["Stop"].as_array().unwrap();
         assert_eq!(
             stop.len(),
             2,
-            "user group + one mnem group, even after two installs"
+            "user group + one ravnori group, even after two installs"
         );
         assert_eq!(
             doc["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
@@ -1048,7 +1121,7 @@ mod tests {
         );
     }
 
-    /// Re-running install keeps mnem's hooks where they are (Codex trust is by position),
+    /// Re-running install keeps ravnori's hooks where they are (Codex trust is by position),
     /// and moves them only when they need changing.
     #[test]
     fn a_repeat_install_moves_no_hook() {
@@ -1056,19 +1129,19 @@ mod tests {
         let mut doc = json!({ "hooks": { "SessionStart": [
             { "hooks": [{ "type": "command", "command": "gh-axi" }] }
         ] } });
-        merge_hooks(&mut doc, &hook_entries("/x/mnem", "codex"), &extra).unwrap();
-        // The user adds a hook after mnem's.
+        merge_hooks(&mut doc, &hook_entries("/x/rvn", "codex"), &extra).unwrap();
+        // The user adds a hook after ravnori's.
         doc["hooks"]["SessionStart"]
             .as_array_mut()
             .unwrap()
             .push(json!({ "hooks": [{ "type": "command", "command": "later" }] }));
         let before = doc.clone();
-        merge_hooks(&mut doc, &hook_entries("/x/mnem", "codex"), &extra).unwrap();
+        merge_hooks(&mut doc, &hook_entries("/x/rvn", "codex"), &extra).unwrap();
         assert_eq!(doc, before, "nothing moved");
-        // A moved binary is a real change: mnem's hooks are replaced.
-        merge_hooks(&mut doc, &hook_entries("/y/mnem", "codex"), &extra).unwrap();
-        assert!(doc.to_string().contains("/y/mnem hook codex prompt"));
-        assert!(!doc.to_string().contains("/x/mnem"));
+        // A moved binary is a real change: ravnori's hooks are replaced.
+        merge_hooks(&mut doc, &hook_entries("/y/rvn", "codex"), &extra).unwrap();
+        assert!(doc.to_string().contains("/y/rvn hook codex prompt"));
+        assert!(!doc.to_string().contains("/x/rvn"));
         assert_eq!(
             doc["hooks"]["SessionStart"][1]["hooks"][0]["command"],
             "later"
@@ -1078,7 +1151,7 @@ mod tests {
     /// A duplicated hook does not stand in for a missing one: the set is repaired.
     #[test]
     fn duplicates_do_not_hide_a_missing_hook() {
-        let entries = hook_entries("/x/mnem", "claude");
+        let entries = hook_entries("/x/rvn", "claude");
         let mut doc = json!({});
         merge_hooks(&mut doc, &entries, &json!({})).unwrap();
         assert!(ours_match(&doc, &entries, &json!({})));
@@ -1096,51 +1169,54 @@ mod tests {
     #[test]
     fn codex_server_is_edited_structurally() {
         // Multi-line array, comments, a commented-out header and other keys all survive.
-        let src = "# top\nmodel = \"x\"\n\n# [mcp_servers.mnem] (old, commented)\n[mcp_servers.mnem]\ncommand = \"/old/mnem\" # moved\nargs = [\n  \"mcp\",\n  \"--old\",\n]\nenv = { X = \"1\" }\n\n[mcp_servers.other]\ncommand = \"o\"\n";
-        let out = set_mnem_server(src, "/new/mnem").unwrap();
+        let src = "# top\nmodel = \"x\"\n\n# [mcp_servers.ravnori] (old, commented)\n[mcp_servers.ravnori]\ncommand = \"/old/rvn\" # moved\nargs = [\n  \"mcp\",\n  \"--old\",\n]\nenv = { X = \"1\" }\n\n[mcp_servers.other]\ncommand = \"o\"\n";
+        let out = set_ravnori_server(src, "/new/rvn").unwrap();
         let doc: toml_edit::DocumentMut = out.parse().expect("still valid TOML");
         assert_eq!(
-            doc["mcp_servers"]["mnem"]["command"].as_str(),
-            Some("/new/mnem")
+            doc["mcp_servers"]["ravnori"]["command"].as_str(),
+            Some("/new/rvn")
         );
-        let args: Vec<&str> = doc["mcp_servers"]["mnem"]["args"]
+        let args: Vec<&str> = doc["mcp_servers"]["ravnori"]["args"]
             .as_array()
             .unwrap()
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(args, ["mcp"]);
-        assert_eq!(doc["mcp_servers"]["mnem"]["env"]["X"].as_str(), Some("1"));
+        assert_eq!(
+            doc["mcp_servers"]["ravnori"]["env"]["X"].as_str(),
+            Some("1")
+        );
         assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("o"));
         assert!(out.starts_with("# top\nmodel = \"x\""), "{out}");
         assert!(
-            out.contains("command = \"/new/mnem\" # moved"),
+            out.contains("command = \"/new/rvn\" # moved"),
             "comment kept: {out}"
         );
         assert!(
-            out.contains("# [mcp_servers.mnem] (old, commented)"),
+            out.contains("# [mcp_servers.ravnori] (old, commented)"),
             "{out}"
         );
         assert_eq!(
-            out.matches("[mcp_servers.mnem]").count(),
+            out.matches("[mcp_servers.ravnori]").count(),
             2,
             "one real, one comment: {out}"
         );
         // Already right: byte for byte the same.
-        assert_eq!(set_mnem_server(&out, "/new/mnem").unwrap(), out);
+        assert_eq!(set_ravnori_server(&out, "/new/rvn").unwrap(), out);
         // Missing: added; a file without it keeps its text.
-        let added = set_mnem_server("model = \"x\"\n", "/m").unwrap();
+        let added = set_ravnori_server("model = \"x\"\n", "/m").unwrap();
         assert!(added.starts_with("model = \"x\"\n"), "{added}");
         let d: toml_edit::DocumentMut = added.parse().unwrap();
-        assert_eq!(d["mcp_servers"]["mnem"]["command"].as_str(), Some("/m"));
+        assert_eq!(d["mcp_servers"]["ravnori"]["command"].as_str(), Some("/m"));
         // Invalid TOML is refused, never rewritten.
-        assert!(set_mnem_server("[broken\n", "/m").is_err());
-        // Removal takes only mnem's table.
-        let gone = remove_mnem_server(&out).unwrap();
+        assert!(set_ravnori_server("[broken\n", "/m").is_err());
+        // Removal takes only ravnori's table.
+        let gone = remove_ravnori_server(&out).unwrap();
         let d: toml_edit::DocumentMut = gone.parse().unwrap();
-        assert!(d["mcp_servers"].get("mnem").is_none());
+        assert!(d["mcp_servers"].get("ravnori").is_none());
         assert_eq!(d["mcp_servers"]["other"]["command"].as_str(), Some("o"));
-        assert_eq!(remove_mnem_server("a = 1\n").unwrap(), "a = 1\n");
+        assert_eq!(remove_ravnori_server("a = 1\n").unwrap(), "a = 1\n");
     }
 
     #[test]
@@ -1160,7 +1236,7 @@ mod tests {
 
     #[test]
     fn pi_extension_quotes_windows_paths() {
-        let lit = serde_json::to_string(r"C:\bin\mnem.exe").unwrap();
-        assert_eq!(lit, r#""C:\\bin\\mnem.exe""#);
+        let lit = serde_json::to_string(r"C:\bin\rvn.exe").unwrap();
+        assert_eq!(lit, r#""C:\\bin\\rvn.exe""#);
     }
 }

@@ -1,4 +1,4 @@
-//! The recall release gate: before a change to recall ships, run the installed mnem
+//! The recall release gate: before a change to recall ships, run the installed ravnori
 //! (the baseline) and the candidate build (or candidate settings) on the same database
 //! and the same cached judgments, and refuse the change if recall got worse.
 //!
@@ -33,7 +33,7 @@ pub struct Metrics {
     pub vague_false_alarms: usize,
     /// Real prompts (tuning half), judged; None when not judged.
     pub real: Option<Real>,
-    /// Prompts from the weeks mnem distilled sessions itself (tuning half), judged; None
+    /// Prompts from the weeks ravnori distilled sessions itself (tuning half), judged; None
     /// when not judged or from a build that predates the set.
     #[serde(default)]
     pub recent: Option<Real>,
@@ -112,11 +112,11 @@ fn listed(answer: &str) -> Vec<i64> {
 /// and be large enough to mean something.
 pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
     for (set, how) in [
-        ("recall", "mnem eval --build 40"),
+        ("recall", "rvn eval --build 40"),
         ("vague", "write it by hand (see docs/reference.md)"),
-        ("real-dev", "mnem eval --build-real 160"),
-        ("recent-dev", "mnem eval --build-recent 160"),
-        ("files-dev", "mnem eval --build-files 300"),
+        ("real-dev", "rvn eval --build-real 160"),
+        ("recent-dev", "rvn eval --build-recent 160"),
+        ("files-dev", "rvn eval --build-files 300"),
     ] {
         if !set_path(set).exists() {
             bail!("the gate needs the {set} test set: {how}");
@@ -180,7 +180,7 @@ pub fn metrics(conn: &Connection, db: &Path, judge: bool) -> Result<Metrics> {
     let served = db.to_path_buf();
     std::thread::spawn(move || crate::ui::serve(served, port, || {}));
     // SAFETY: set before any other thread of this process reads the environment.
-    unsafe { std::env::set_var("MNEM_UI_PORT", port.to_string()) };
+    unsafe { std::env::set_var("RAVNORI_UI_PORT", port.to_string()) };
     if model_loaded {
         let t = std::time::Instant::now();
         while crate::embed::query_from_service(conn, "warm up").is_none() {
@@ -667,7 +667,7 @@ impl Drop for Snapshot {
     }
 }
 
-/// Metrics from a mnem binary run with `eval --gate-metrics` (and optional settings).
+/// Metrics from a ravnori binary run with `eval --gate-metrics` (and optional settings).
 pub fn metrics_of(
     bin: &Path,
     db: &Path,
@@ -679,14 +679,14 @@ pub fn metrics_of(
     cmd.arg("--db")
         .arg(db)
         .args(["eval", "--gate-metrics"])
-        .env("MNEM_JUDGE_CONFIG", judge_config)
-        .env_remove("MNEM_UI_PORT");
+        .env("RAVNORI_JUDGE_CONFIG", judge_config)
+        .env_remove("RAVNORI_UI_PORT");
     if !judge {
         cmd.arg("--no-judge");
     }
     match config {
-        Some(c) => cmd.env("MNEM_CONFIG", c),
-        None => cmd.env_remove("MNEM_CONFIG"),
+        Some(c) => cmd.env("RAVNORI_CONFIG", c),
+        None => cmd.env_remove("RAVNORI_CONFIG"),
     };
     let out = cmd
         .output()
@@ -917,7 +917,12 @@ mod tests {
     fn snapshots_of_killed_gate_runs_are_swept() {
         let d = crate::TempDir::new("gate-sweep");
         let day_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400);
-        for name in [".gate-1.db", ".gate-1.copy.db", ".gate-1.db-wal", "mnem.db"] {
+        for name in [
+            ".gate-1.db",
+            ".gate-1.copy.db",
+            ".gate-1.db-wal",
+            "ravnori.db",
+        ] {
             let f = std::fs::File::create(d.join(name)).unwrap();
             f.set_modified(day_ago).unwrap();
         }
@@ -929,7 +934,7 @@ mod tests {
             .collect();
         left.sort();
         // A running gate's copy and the live database stay.
-        assert_eq!(left, [".gate-2.db", "mnem.db"]);
+        assert_eq!(left, [".gate-2.db", "ravnori.db"]);
         let _ = std::fs::remove_dir_all(&d);
     }
 
