@@ -1,28 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-label="ravnori: memory for coding agents">
   <rect width="1280" height="420" rx="20" fill="#ffffff"/>
-  <rect x="0.5" y="0.5" width="1279" height="419" rx="20" fill="none" stroke="#d0d7de"/>
+  <rect x="0.5" y="0.5" width="1279" height="419" rx="20" fill="none" stroke="#D6E2D6"/>
   <g transform="translate(60,62) scale(0.4606060606060606)"><g transform="translate(1 1)">
-  <path d="M19 44L65 20L111 44L65 68Z" fill="#122D2B"/>
-  <path d="M19 66L65 90L111 66" fill="none" stroke="#122D2B" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M19 88L65 112L111 88" fill="none" stroke="#122D2B" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M19 44L65 20L111 44L65 68Z" fill="#102825"/>
+  <path d="M19 66L65 90L111 66" fill="none" stroke="#102825" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M19 88L65 112L111 88" fill="none" stroke="#102825" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
   <circle cx="65" cy="44" r="9" fill="#168F76"/>
 </g></g>
-  <text x="134" y="112" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="46" font-weight="700" fill="#1f2328">ravnori</text>
-  <text x="64" y="186" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="31" font-weight="700" fill="#1f2328">Your coding agents already write</text>
-  <text x="64" y="226" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="31" font-weight="700" fill="#1f2328">everything down. <tspan fill="#0f766e">ravnori remembers it.</tspan></text>
-  <text x="64" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" fill="#475260">One local record of every session · memories with evidence · nothing lost</text>
-  <rect x="64" y="300" width="128" height="34" rx="17" fill="#d6efec" stroke="#0f766e" stroke-opacity="0.5"/><text x="128" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#0f766e">Claude Code</text><rect x="201.6" y="300" width="70" height="34" rx="17" fill="#d6efec" stroke="#0f766e" stroke-opacity="0.5"/><text x="237" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#0f766e">Codex</text><rect x="281.6" y="300" width="41" height="34" rx="17" fill="#d6efec" stroke="#0f766e" stroke-opacity="0.5"/><text x="302" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#0f766e">pi</text><text x="339" y="322" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#6e7781">· one memory, shared</text>
+  <text x="134" y="112" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="46" font-weight="700" fill="#102825">ravnori</text>
+  <text x="64" y="186" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="31" font-weight="700" fill="#102825">Your coding agents already write</text>
+  <text x="64" y="226" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="31" font-weight="700" fill="#102825">everything down. <tspan fill="#137A64">ravnori remembers it.</tspan></text>
+  <text x="64" y="268" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" fill="#3A504C">One local record of every session · memories with evidence · nothing lost</text>
+  <rect x="64" y="300" width="128" height="34" rx="17" fill="#DCEEE6" stroke="#137A64" stroke-opacity="0.5"/><text x="128" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#137A64">Claude Code</text><rect x="201.6" y="300" width="70" height="34" rx="17" fill="#DCEEE6" stroke="#137A64" stroke-opacity="0.5"/><text x="237" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#137A64">Codex</text><rect x="281.6" y="300" width="41" height="34" rx="17" fill="#DCEEE6" stroke="#137A64" stroke-opacity="0.5"/><text x="302" y="322" text-anchor="middle" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#137A64">pi</text><text x="339" y="322" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#5E736F">· one memory, shared</text>
   
-  <rect x="790" y="70" width="430" height="280" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
-  <rect x="814" y="94" width="86" height="24" rx="6" fill="#d6efec"/>
-  <text x="857" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="700" fill="#0f766e">DECISION</text>
+  <rect x="790" y="70" width="430" height="280" rx="16" fill="#F4F8F3" stroke="#D6E2D6"/>
+  <rect x="814" y="94" width="86" height="24" rx="6" fill="#DCEEE6"/>
+  <text x="857" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="700" fill="#137A64">DECISION</text>
   <rect x="908" y="94" width="72" height="24" rx="12" fill="none" stroke="#b45309" stroke-opacity="0.6"/>
   <text x="944" y="111" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="12" font-weight="700" fill="#b45309">CLAUDE</text>
-  <text x="814" y="156" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#1f2328">Deploy order for orders v2:</text>
-  <text x="814" y="182" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#1f2328">migration first, then workers</text>
-  <text x="814" y="216" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#475260">New workers read order_items, old ones ignore it.</text>
-  <line x1="814" y1="240" x2="1196" y2="240" stroke="#d0d7de"/>
-  <text x="814" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6e7781">evidence  E2041 E2044 E2058</text>
-  <text x="814" y="294" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#0f766e">✓ its edited lines are still there</text>
-  <text x="814" y="320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#6e7781">offered 3× · opened 1× · 2d ago</text>
+  <text x="814" y="156" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#102825">Deploy order for orders v2:</text>
+  <text x="814" y="182" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#102825">migration first, then workers</text>
+  <text x="814" y="216" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#3A504C">New workers read order_items, old ones ignore it.</text>
+  <line x1="814" y1="240" x2="1196" y2="240" stroke="#D6E2D6"/>
+  <text x="814" y="268" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#5E736F">evidence  E2041 E2044 E2058</text>
+  <text x="814" y="294" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#137A64">✓ its edited lines are still there</text>
+  <text x="814" y="320" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" fill="#5E736F">offered 3× · opened 1× · 2d ago</text>
 </svg>

@@ -149,7 +149,7 @@
         sections.map(([k, label]) =>
           el("section", { class: "summary-section" },
             el("div", { class: "summary-section-header" },
-              el("img", { src: `/icons/icon-thick-${k.replace("_", "-")}.svg`, alt: label, class: `summary-section-icon summary-section-icon--${k}` }),
+              el("span", { "aria-hidden": "true", class: `summary-section-icon summary-section-icon--${k}` }),
               el("h3", { class: "summary-section-label" }, label)),
             el("div", { class: "summary-section-content" }, s[k])))),
       el("footer", { class: "summary-card-footer" },

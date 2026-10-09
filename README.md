@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/daefery/ravnori/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/daefery/ravnori?color=0f766e&label=release"></a>
+  <a href="https://github.com/daefery/ravnori/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/daefery/ravnori?color=168F76&label=release"></a>
   <a href="https://github.com/daefery/ravnori/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/daefery/ravnori/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-0f766e"></a>
+  <a href="LICENSE"><img alt="License: AGPL-3.0" src="https://img.shields.io/badge/license-AGPL--3.0-168F76"></a>
   <img alt="Linux, WSL, macOS" src="https://img.shields.io/badge/runs%20on-Linux%20·%20WSL%20·%20macOS-555">
 </p>
 

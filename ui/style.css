@@ -12,44 +12,52 @@
 
 :root {
   color-scheme: light;
-  --logo-ink: #122D2B;
-  --logo-dot: #168F76;
-  --bg: #f6f8fa;
+  /* Brand palette: Forest #102825, Mist #E9F2E7, Lime #B5E38B, Teal #168F76. Light uses
+     Forest for ink and Teal for the accent (one step deeper for text and buttons, so
+     small text keeps 4.5:1 on white); dark uses Forest for the ground, Mist for ink and
+     Lime for the accent. */
+  --forest: #102825;
+  --mist: #E9F2E7;
+  --lime: #B5E38B;
+  --teal: #168F76;
+  --logo-ink: var(--forest);
+  --logo-dot: var(--teal);
+  --bg: #F4F8F3;
   --surface: #ffffff;
-  --surface-2: #f6f8fa;
-  --surface-3: #eef1f4;
-  --line: #d8dee4;
-  --line-strong: #c4ccd5;
-  --ink: #1f2328;
-  --ink-2: #4b5563;
-  --ink-3: #6b7280;
-  --ink-4: #8c959f;
+  --surface-2: #F4F8F3;
+  --surface-3: var(--mist);
+  --line: #D6E2D6;
+  --line-strong: #BFCFC0;
+  --ink: var(--forest);
+  --ink-2: #3A504C;
+  --ink-3: #5E736F;
+  --ink-4: #7F928E;
 
-  --accent: #0f766e;
-  --accent-hover: #0d655e;
+  --accent: #137A64;
+  --accent-hover: #106B59;
   --accent-ink: #ffffff;
-  --accent-soft: rgba(15, 118, 110, 0.10);
-  --accent-line: rgba(15, 118, 110, 0.35);
-  --ring: rgba(15, 118, 110, 0.28);
+  --accent-soft: rgba(22, 143, 118, 0.10);
+  --accent-line: rgba(22, 143, 118, 0.38);
+  --ring: rgba(22, 143, 118, 0.30);
 
-  --summary: #a35a00;
-  --summary-soft: rgba(217, 119, 6, 0.08);
-  --summary-line: rgba(217, 119, 6, 0.38);
-  --summary-title: #8a4b00;
-  --prompt: #6d28d9;
-  --prompt-soft: rgba(124, 58, 237, 0.06);
-  --prompt-line: rgba(124, 58, 237, 0.32);
+  --summary: var(--accent);
+  --summary-soft: rgba(22, 143, 118, 0.07);
+  --summary-line: rgba(22, 143, 118, 0.34);
+  --summary-title: var(--forest);
+  --prompt: var(--forest);
+  --prompt-soft: rgba(233, 242, 231, 0.70);
+  --prompt-line: #C9D9C9;
 
   --ok: #1a7f37;
   --warn: #b45309;
   --danger: #c2262e;
   --danger-soft: rgba(194, 38, 46, 0.08);
 
-  --terminal-bg: #0d1117;
-  --terminal-ink: #d1d9e0;
+  --terminal-bg: var(--forest);
+  --terminal-ink: var(--mist);
 
-  --shadow-card: 0 1px 2px rgba(31, 35, 40, 0.04);
-  --shadow-pop: 0 18px 50px rgba(31, 35, 40, 0.18), 0 2px 6px rgba(31, 35, 40, 0.06);
+  --shadow-card: 0 1px 2px rgba(16, 40, 37, 0.05);
+  --shadow-pop: 0 18px 50px rgba(16, 40, 37, 0.18), 0 2px 6px rgba(16, 40, 37, 0.06);
 
   /* Used by app.js for concept tags. */
   --color-type-badge-bg: var(--surface-3);
@@ -64,82 +72,87 @@
 /* Dark: one set of values, for the explicit choice and for the system default. */
 [data-theme="dark"] {
   color-scheme: dark;
-  --logo-ink: #E9F2E7;
-  --logo-dot: #B5E38B;
-  --bg: #0d1117;
-  --surface: #151b23;
-  --surface-2: #1b222c;
-  --surface-3: #212a35;
-  --line: #2a323d;
-  --line-strong: #3a4452;
-  --ink: #e6edf3;
-  --ink-2: #b4bec9;
-  --ink-3: #8b96a3;
-  --ink-4: #6b7683;
+  --logo-ink: var(--mist);
+  --logo-dot: var(--lime);
+  --bg: #0B1F1C;
+  --surface: var(--forest);
+  --surface-2: #16332F;
+  --surface-3: #1D3D38;
+  --line: #24453F;
+  --line-strong: #34574F;
+  --ink: var(--mist);
+  --ink-2: #BCCDC2;
+  --ink-3: #8FA69C;
+  --ink-4: #6F8880;
 
-  --accent: #2dd4bf;
-  --accent-hover: #5eead4;
-  --accent-ink: #062b28;
-  --accent-soft: rgba(45, 212, 191, 0.12);
-  --accent-line: rgba(45, 212, 191, 0.38);
-  --ring: rgba(45, 212, 191, 0.32);
+  --accent: var(--lime);
+  --accent-hover: #C8EDA6;
+  --accent-ink: var(--forest);
+  --accent-soft: rgba(181, 227, 139, 0.12);
+  --accent-line: rgba(181, 227, 139, 0.38);
+  --ring: rgba(181, 227, 139, 0.32);
 
-  --summary: #f0a64a;
-  --summary-soft: rgba(240, 166, 74, 0.07);
-  --summary-line: rgba(240, 166, 74, 0.34);
-  --summary-title: #f5c27a;
-  --prompt: #b79cff;
-  --prompt-soft: rgba(183, 156, 255, 0.06);
-  --prompt-line: rgba(183, 156, 255, 0.32);
+  --summary: var(--lime);
+  --summary-soft: rgba(181, 227, 139, 0.06);
+  --summary-line: rgba(181, 227, 139, 0.30);
+  --summary-title: #D3F0B6;
+  --prompt: var(--mist);
+  --prompt-soft: rgba(233, 242, 231, 0.04);
+  --prompt-line: rgba(233, 242, 231, 0.22);
 
   --ok: #3fb950;
   --warn: #e3a341;
   --danger: #f47067;
   --danger-soft: rgba(244, 112, 103, 0.10);
 
-  --terminal-bg: #0a0e13;
-  --terminal-ink: #d1d9e0;
+  --terminal-bg: #081814;
+  --terminal-ink: var(--mist);
 
   --shadow-card: none;
-  --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(233, 242, 231, 0.05);
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) {
     color-scheme: dark;
-    --logo-ink: #E9F2E7;
-    --logo-dot: #B5E38B;
-    --bg: #0d1117;
-    --surface: #151b23;
-    --surface-2: #1b222c;
-    --surface-3: #212a35;
-    --line: #2a323d;
-    --line-strong: #3a4452;
-    --ink: #e6edf3;
-    --ink-2: #b4bec9;
-    --ink-3: #8b96a3;
-    --ink-4: #6b7683;
-    --accent: #2dd4bf;
-    --accent-hover: #5eead4;
-    --accent-ink: #062b28;
-    --accent-soft: rgba(45, 212, 191, 0.12);
-    --accent-line: rgba(45, 212, 191, 0.38);
-    --ring: rgba(45, 212, 191, 0.32);
-    --summary: #f0a64a;
-    --summary-soft: rgba(240, 166, 74, 0.07);
-    --summary-line: rgba(240, 166, 74, 0.34);
-    --summary-title: #f5c27a;
-    --prompt: #b79cff;
-    --prompt-soft: rgba(183, 156, 255, 0.06);
-    --prompt-line: rgba(183, 156, 255, 0.32);
+    --logo-ink: var(--mist);
+    --logo-dot: var(--lime);
+    --bg: #0B1F1C;
+    --surface: var(--forest);
+    --surface-2: #16332F;
+    --surface-3: #1D3D38;
+    --line: #24453F;
+    --line-strong: #34574F;
+    --ink: var(--mist);
+    --ink-2: #BCCDC2;
+    --ink-3: #8FA69C;
+    --ink-4: #6F8880;
+
+    --accent: var(--lime);
+    --accent-hover: #C8EDA6;
+    --accent-ink: var(--forest);
+    --accent-soft: rgba(181, 227, 139, 0.12);
+    --accent-line: rgba(181, 227, 139, 0.38);
+    --ring: rgba(181, 227, 139, 0.32);
+
+    --summary: var(--lime);
+    --summary-soft: rgba(181, 227, 139, 0.06);
+    --summary-line: rgba(181, 227, 139, 0.30);
+    --summary-title: #D3F0B6;
+    --prompt: var(--mist);
+    --prompt-soft: rgba(233, 242, 231, 0.04);
+    --prompt-line: rgba(233, 242, 231, 0.22);
+
     --ok: #3fb950;
     --warn: #e3a341;
     --danger: #f47067;
     --danger-soft: rgba(244, 112, 103, 0.10);
-    --terminal-bg: #0a0e13;
-    --terminal-ink: #d1d9e0;
+
+    --terminal-bg: #081814;
+    --terminal-ink: var(--mist);
+
     --shadow-card: none;
-    --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --shadow-pop: 0 24px 60px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(233, 242, 231, 0.05);
   }
 }
 
@@ -433,17 +446,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .source-claude { background: rgba(217, 119, 87, 0.10); color: #b5502c; border-color: rgba(217, 119, 87, 0.25); }
 .source-codex { background: rgba(56, 108, 176, 0.10); color: #2f5f9e; border-color: rgba(56, 108, 176, 0.25); }
-.source-pi { background: rgba(15, 118, 110, 0.10); color: #0f766e; border-color: rgba(15, 118, 110, 0.25); }
+.source-pi { background: rgba(22, 143, 118, 0.10); color: #137A64; border-color: rgba(22, 143, 118, 0.28); }
 .source-cursor { background: rgba(124, 58, 237, 0.10); color: #6d28d9; border-color: rgba(124, 58, 237, 0.24); }
 
 [data-theme="dark"] .source-claude { background: rgba(232, 140, 108, 0.12); color: #f0a184; border-color: rgba(232, 140, 108, 0.28); }
 [data-theme="dark"] .source-codex { background: rgba(121, 168, 230, 0.12); color: #95bdf0; border-color: rgba(121, 168, 230, 0.28); }
-[data-theme="dark"] .source-pi { background: rgba(45, 212, 191, 0.12); color: #5eead4; border-color: rgba(45, 212, 191, 0.28); }
+[data-theme="dark"] .source-pi { background: rgba(181, 227, 139, 0.12); color: #B5E38B; border-color: rgba(181, 227, 139, 0.30); }
 [data-theme="dark"] .source-cursor { background: rgba(196, 181, 253, 0.12); color: #c4b5fd; border-color: rgba(196, 181, 253, 0.26); }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme]) .source-claude { background: rgba(232, 140, 108, 0.12); color: #f0a184; border-color: rgba(232, 140, 108, 0.28); }
   :root:not([data-theme]) .source-codex { background: rgba(121, 168, 230, 0.12); color: #95bdf0; border-color: rgba(121, 168, 230, 0.28); }
-  :root:not([data-theme]) .source-pi { background: rgba(45, 212, 191, 0.12); color: #5eead4; border-color: rgba(45, 212, 191, 0.28); }
+  :root:not([data-theme]) .source-pi { background: rgba(181, 227, 139, 0.12); color: #B5E38B; border-color: rgba(181, 227, 139, 0.30); }
   :root:not([data-theme]) .source-cursor { background: rgba(196, 181, 253, 0.12); color: #c4b5fd; border-color: rgba(196, 181, 253, 0.26); }
 }
 
@@ -636,11 +649,16 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .summary-section-header { display: flex; align-items: center; gap: 9px; margin-bottom: 6px; }
 
-.summary-section-icon { position: relative; width: auto; line-height: 1; }
-.summary-section-icon--investigated { height: 15px; }
-.summary-section-icon--learned { height: 17px; left: -1px; top: -2px; }
-.summary-section-icon--completed { height: 16px; }
-.summary-section-icon--next_steps { height: 14px; }
+/* The icon files are shapes only; they take the summary colour of the theme in use. */
+.summary-section-icon {
+  position: relative; display: inline-block; flex: none; line-height: 1;
+  background: var(--summary);
+  -webkit-mask: var(--icon) center / contain no-repeat; mask: var(--icon) center / contain no-repeat;
+}
+.summary-section-icon--investigated { --icon: url(/icons/icon-thick-investigated.svg); width: 15px; height: 15px; }
+.summary-section-icon--learned { --icon: url(/icons/icon-thick-learned.svg); width: 17px; height: 17px; left: -1px; top: -2px; }
+.summary-section-icon--completed { --icon: url(/icons/icon-thick-completed.svg); width: 16px; height: 16px; }
+.summary-section-icon--next_steps { --icon: url(/icons/icon-thick-next-steps.svg); width: 14px; height: 14px; }
 
 .summary-section-label {
   margin: 0;
@@ -793,7 +811,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   align-items: center;
   justify-content: center;
   padding: 20px;
-  background: rgba(10, 14, 19, 0.55);
+  background: rgba(8, 24, 20, 0.55);
 }
 
 .context-settings-modal {

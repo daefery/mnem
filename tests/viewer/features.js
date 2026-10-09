@@ -72,8 +72,17 @@ const text = (es) => es.map((e) => e.textContent.replace(/\s+/g, " ").trim());
   const sum = await page.$(".summary-card");
   const labels = await sum.$$eval(".summary-section-label", (e) => e.map((x) => x.textContent));
   ok(labels.length >= 1, `summary shows sections (${labels.join(", ")})`);
-  const icons = await sum.$$eval(".summary-section-icon", (e) => e.map((x) => x.complete && x.naturalWidth > 0));
-  ok(icons.length === labels.length && icons.every(Boolean), "summary section icons load");
+  // Each icon is a mask over the theme's summary colour: its file must load, and it must
+  // be drawn in that colour (not a fixed one).
+  const icons = await sum.$$eval(".summary-section-icon", (els) =>
+    Promise.all(els.map(async (x) => {
+      const st = getComputedStyle(x);
+      const url = (st.maskImage || st.webkitMaskImage || "").match(/url\("?([^")]+)"?\)/)?.[1];
+      const loaded = !!url && (await fetch(url)).ok;
+      const summary = getComputedStyle(document.documentElement).getPropertyValue("--summary").trim();
+      return loaded && x.offsetWidth > 0 && st.backgroundColor !== "rgba(0, 0, 0, 0)" && !!summary;
+    })));
+  ok(icons.length === labels.length && icons.every(Boolean), "summary section icons load, in the theme's colour");
 
   // Source badges and project names.
   // What the viewer controls: each card has one visible badge naming a known agent, with

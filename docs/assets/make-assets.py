@@ -17,13 +17,16 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SANS = "ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
 MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
 
+# The brand palette: Forest #102825, Mist #E9F2E7, Lime #B5E38B, Teal #168F76 (as in the
+# viewer, ui/style.css). Light: Forest ink, Teal accent (one step deeper for small text);
+# dark: Forest ground, Mist ink, Lime accent. Terminals are Forest in both.
 THEMES = {
-    "dark": dict(bg="#0d1117", panel="#161b22", panel2="#1c2430", ink="#e6edf3", ink2="#9da7b3",
-                 ink3="#6e7781", rule="#30363d", teal="#2dd4bf", teal_soft="#0f3d39", amber="#f0a64a",
-                 violet="#b79cff", term="#0b0f14", term_bar="#1b222c", logo_ink="#E9F2E7", logo_dot="#B5E38B"),
-    "light": dict(bg="#ffffff", panel="#f6f8fa", panel2="#eef2f5", ink="#1f2328", ink2="#475260",
-                  ink3="#6e7781", rule="#d0d7de", teal="#0f766e", teal_soft="#d6efec", amber="#b45309",
-                  violet="#6d28d9", term="#0d1117", term_bar="#1f2630", logo_ink="#122D2B", logo_dot="#168F76"),
+    "dark": dict(bg="#102825", panel="#16332F", panel2="#1D3D38", ink="#E9F2E7", ink2="#BCCDC2",
+                 ink3="#8FA69C", rule="#24453F", teal="#B5E38B", teal_soft="#24402A", amber="#f0a64a",
+                 violet="#b79cff", term="#081814", term_bar="#16332F", logo_ink="#E9F2E7", logo_dot="#B5E38B"),
+    "light": dict(bg="#ffffff", panel="#F4F8F3", panel2="#E9F2E7", ink="#102825", ink2="#3A504C",
+                  ink3="#5E736F", rule="#D6E2D6", teal="#137A64", teal_soft="#DCEEE6", amber="#b45309",
+                  violet="#6d28d9", term="#102825", term_bar="#16332F", logo_ink="#102825", logo_dot="#168F76"),
 }
 
 # The strata mark (docs/assets/logo/), drawn on a 132-unit square; {ink} and {dot} are the
@@ -155,8 +158,8 @@ def terminal(t, title, command, lines, color_of):
     p = [f'<rect width="{width}" height="{H}" rx="12" fill="{t["term"]}"/>',
          f'<rect width="{width}" height="40" rx="12" fill="{t["term_bar"]}"/><rect y="28" width="{width}" height="12" fill="{t["term_bar"]}"/>',
          '<circle cx="24" cy="20" r="6" fill="#ff5f57"/><circle cx="44" cy="20" r="6" fill="#febc2e"/><circle cx="64" cy="20" r="6" fill="#28c840"/>',
-         f'<text x="{width / 2}" y="25" text-anchor="middle" font-family="{SANS}" font-size="13" fill="#8b949e">{esc(title)}</text>',
-         f'<text x="24" y="74" font-family="{MONO}" font-size="14" fill="#2dd4bf">$ <tspan fill="#e6edf3">{esc(command)}</tspan></text>']
+         f'<text x="{width / 2}" y="25" text-anchor="middle" font-family="{SANS}" font-size="13" fill="#8FA69C">{esc(title)}</text>',
+         f'<text x="24" y="74" font-family="{MONO}" font-size="14" fill="#B5E38B">$ <tspan fill="#E9F2E7">{esc(command)}</tspan></text>']
     for i, (l, c) in enumerate(wrapped):
         p.append(f'<text x="24" y="{106 + i * 24}" font-family="{MONO}" font-size="14" fill="{c}" xml:space="preserve">{esc(l)}</text>')
     label = html.escape(command, quote=True)
@@ -173,16 +176,16 @@ def main():
 
         def ask_color(l):
             if l.startswith("* "):
-                return "#2dd4bf"
+                return "#B5E38B"
             if l.startswith("  #") or l.startswith("Sources"):
-                return "#8b949e"
-            return "#e6edf3"
+                return "#8FA69C"
+            return "#E9F2E7"
 
         # A terminal is dark in either theme: one file each.
         t = THEMES["dark"]
         write("ask.svg", terminal(t, "rvn ask", 'rvn ask "why did customers get charged twice"', ask, ask_color))
         write("trace.svg", terminal(t, "rvn trace", "rvn trace --commits 8 --out .agent-trace", trace,
-                                    lambda l: "#2dd4bf" if "written by agents" in l else "#e6edf3"))
+                                    lambda l: "#B5E38B" if "written by agents" in l else "#E9F2E7"))
     print("assets written to", HERE)
 
 
